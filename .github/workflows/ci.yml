@@ -62,7 +62,6 @@ jobs:
     name: Database Schema Migrations
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: ${{ hashFiles('sql/*.sql') != '' }}
     env:
       PGHOST: 127.0.0.1
       PGPORT: "5432"
@@ -89,7 +88,12 @@ jobs:
       - name: Apply migrations in order
         run: |
           set -e
-          for f in $(ls sql/[0-9]*_*.sql | sort); do
+          files=$(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort)
+          if [ -z "$files" ]; then
+            echo "No migrations found — skipping."
+            exit 0
+          fi
+          for f in $files; do
             echo "== applying $f"
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
