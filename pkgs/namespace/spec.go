@@ -27,7 +27,10 @@ type openapiSpec struct {
 }
 
 type serviceSpec struct {
-	ServiceID        string          `json:"service_id"`
+	ServiceID string `json:"service_id"`
+	// Spec is the LEGACY raw-OpenAPI field ({"name","spec"} shape); it is
+	// normalized onto OpenAPI.Content by normalizeOpenAPI before validation.
+	Spec             json.RawMessage `json:"spec"`
 	Name             string          `json:"name"`
 	Description      string          `json:"description"`
 	Deploy           json.RawMessage `json:"deploy"`
@@ -89,21 +92,31 @@ func randomID() (string, error) {
 // (openapi parse, engine defaults, ingress references). Returns 422 detail.
 func validateSpecComponents(spec *namespaceSpec) error {
 	svcRefs := map[string]bool{}
-	for _, s := range spec.Services {
+	summaries := make([]*serviceopenapi.Summary, len(spec.Services))
+	for i, s := range spec.Services {
 		if s.Name == "" {
 			return specErr{"spec.services[].name is required"}
 		}
 		if s.OpenAPI == nil || s.OpenAPI.Content == "" {
 			return specErr{"spec.services[" + s.Name + "].openapi.content is required"}
 		}
-		if _, err := serviceopenapi.ValidateAndIndex([]byte(s.OpenAPI.Content)); err != nil {
+		summary, err := serviceopenapi.ValidateAndIndex([]byte(s.OpenAPI.Content))
+		if err != nil {
 			return specErr{"spec.services[" + s.Name + "] openapi invalid: " + err.Error()}
 		}
-		// Host rules may reference the service by name or by client-supplied
-		// service_id (server generates "svc-"+rand when empty).
+		summaries[i] = summary
+		// Host rules / dependencies may reference the service by name or by
+		// client-supplied service_id (server generates "svc-"+rand when empty).
 		svcRefs[s.Name] = true
 		if s.ServiceID != "" {
 			svcRefs[s.ServiceID] = true
+		}
+	}
+	// Full-definition validation (mock ops, database_bindings shape,
+	// dependencies refs) — same rules as POST /services (plans/17).
+	for i, s := range spec.Services {
+		if err := validateServiceDefinition(nil, "", s, summaries[i], svcRefs); err != nil {
+			return specErr{"spec.services[" + s.Name + "] " + err.Error()}
 		}
 	}
 	for _, db := range spec.Databases {

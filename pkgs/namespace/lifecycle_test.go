@@ -85,12 +85,14 @@ func TestValidateApplyReadinessLifecycle(t *testing.T) {
 		t.Errorf("network policy = (%v, %v)", err, policy.ResolvedFromDeps)
 	}
 
-	// spec change → ready_for_loadtest reset + targets re-indexed
-	rec = testutil.Do(t, h, http.MethodPut, base+"/"+ns.ID+"/services/widgets/spec", principal, map[string]any{
-		"spec": json.RawMessage(widgetSpec), // same content → unchanged
+	// spec upload via service_id-based PUT (plan 17): same content → no
+	// revalidation, the updated service row is returned.
+	rec = testutil.Do(t, h, http.MethodPut, base+"/"+ns.ID+"/services/"+*svc.ServiceID, principal, map[string]any{
+		"name":    "widgets",
+		"openapi": map[string]any{"format": "json", "content_type": "application/json", "content": widgetSpec},
 	})
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "unchanged") {
-		t.Errorf("same-spec upload = (%d, %s)", rec.Code, rec.Body.String())
+	if rec.Code != 200 {
+		t.Errorf("same-spec PUT = (%d, %s)", rec.Code, rec.Body.String())
 	}
 }
 
