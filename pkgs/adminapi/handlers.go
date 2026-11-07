@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 
+	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
@@ -31,14 +32,29 @@ type Deps struct {
 	Now func() time.Time // injectable clock for tests
 }
 
-// Router mounts the admin API routes on a chi router.
+// Router mounts the nginx-internal endpoints (trusted channel: unix socket /
+// private upstream — no principal middleware; nginx calls carry no user
+// identity) plus the operator endpoints behind RequirePrincipal +
+// RequireSelfOrAdmin (pattern from opsense-rs require_self_or_admin: the app
+// must gate "self-only" itself, never trust the header blindly).
 func Router(d Deps) http.Handler {
 	r := chi.NewRouter()
+
+	// nginx-internal (security-sensitive, trusted channel only)
 	r.Get("/tenant/{host}/id", d.resolveTenantID)
 	r.Get("/tenant/{host}/auth-config", d.authConfig)
 	r.Post("/token/introspect", d.introspect)
-	r.Post("/users/{userID}/tokens", d.issueToken)
-	r.Post("/tokens/{tokenID}/revoke", d.revokeToken)
+
+	// operator endpoints — fail-closed principal + self-or-admin gate
+	r.Route("/users", func(r chi.Router) {
+		r.Use(authz.RequirePrincipal)
+		r.Post("/{userID}/tokens", d.issueToken)
+		r.Get("/{userID}/tokens", d.listTokens)
+	})
+	r.Route("/tokens", func(r chi.Router) {
+		r.Use(authz.RequirePrincipal)
+		r.Post("/{tokenID}/revoke", d.revokeToken)
+	})
 	return r
 }
 
@@ -208,6 +224,10 @@ func (d Deps) introspectToken(ctx context.Context, token, tenantID string) intro
 
 func (d Deps) issueToken(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userID")
+	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), r.Header.Get("X-Tenant-Id"), userID); err != nil {
+		httpx.WriteCodeError(w, "FORBIDDEN", "not allowed to issue tokens for another user")
+		return
+	}
 	var body struct {
 		Name string `json:"name"`
 		TTL  string `json:"ttl"`
@@ -262,6 +282,10 @@ func (d Deps) issueToken(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) revokeToken(w http.ResponseWriter, r *http.Request) {
 	tokenID := chi.URLParam(r, "tokenID")
+	if !d.ownsToken(r, tokenID) {
+		httpx.WriteCodeError(w, "FORBIDDEN", "not allowed to revoke this token")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	now := d.now()
@@ -279,6 +303,52 @@ func (d Deps) revokeToken(w http.ResponseWriter, r *http.Request) {
 	}
 	d.audit(ctx, r, "token.revoke", "access_token", tokenID)
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}
+
+// listTokens returns a user's tokens (metadata only — never plaintext).
+func (d Deps) listTokens(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userID")
+	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), r.Header.Get("X-Tenant-Id"), userID); err != nil {
+		httpx.WriteCodeError(w, "FORBIDDEN", "not allowed to list tokens of another user")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var tokens []store.AccessToken
+	if err := d.DB.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("created_at DESC").
+		Find(&tokens).Error; err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "token list failed")
+		return
+	}
+	type tokenInfo struct {
+		ID        string     `json:"id"`
+		Name      string     `json:"name"`
+		Prefix    string     `json:"prefix"`
+		ExpiresAt *time.Time `json:"expires_at"`
+		RevokedAt *time.Time `json:"revoked_at"`
+	}
+	out := make([]tokenInfo, 0, len(tokens))
+	for _, t := range tokens {
+		out = append(out, tokenInfo{ID: t.ID, Name: t.Name, Prefix: t.Prefix, ExpiresAt: t.ExpiresAt, RevokedAt: t.RevokedAt})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"tokens": out})
+}
+
+// ownsToken checks the caller may revoke tokenID (self-or-admin of the
+// token's owner).
+func (d Deps) ownsToken(r *http.Request, tokenID string) bool {
+	p := authz.PrincipalOf(r)
+	var at store.AccessToken
+	if err := d.DB.First(&at, "id = ?", tokenID).Error; err != nil {
+		return false
+	}
+	var user store.User
+	if err := d.DB.First(&user, "id = ?", at.UserID).Error; err != nil {
+		return false
+	}
+	return authz.RequireSelfOrAdmin(p, user.TenantID, at.UserID) == nil
 }
 
 // --- helpers ---------------------------------------------------------------------

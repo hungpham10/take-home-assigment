@@ -119,9 +119,28 @@ func TestIntrospectLifecycle(t *testing.T) {
 	tenantID, userID := fixtures(t, d)
 	h := Router(d)
 
-	// issue — plaintext returned exactly once
+	// issue by ANOTHER user in same tenant without admin → 403 (self-only gate)
+	other := store.User{TenantID: tenantID, Email: "other-" + tenantID + "@x.co", DisplayName: "O"}
+	if err := d.DB.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	oheaders := map[string]string{"X-Tenant-Id": tenantID, "X-User-Id": other.ID, "X-User-Role": "user"}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens", nil))
+	ireq := httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens", nil)
+	for k, v := range oheaders {
+		ireq.Header.Set(k, v)
+	}
+	h.ServeHTTP(rec, ireq)
+	if rec.Code != 403 {
+		t.Fatalf("self-only gate: status = %d, want 403", rec.Code)
+	}
+
+	// issue — self (plaintext returned exactly once)
+	rec = httptest.NewRecorder()
+	ireq = httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens", nil)
+	ireq.Header.Set("X-Tenant-Id", tenantID)
+	ireq.Header.Set("X-User-Id", userID)
+	h.ServeHTTP(rec, ireq)
 	if rec.Code != 201 {
 		t.Fatalf("issue status = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -135,7 +154,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 
 	// introspect active (matching tenant header)
 	rec = httptest.NewRecorder()
-	ireq := httptest.NewRequest(http.MethodPost, "/token/introspect",
+	ireq = httptest.NewRequest(http.MethodPost, "/token/introspect",
 		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token})))
 	ireq.Header.Set("X-Tenant-Id", tenantID)
 	h.ServeHTTP(rec, ireq)
@@ -165,9 +184,23 @@ func TestIntrospectLifecycle(t *testing.T) {
 		t.Error("tampered token must be inactive")
 	}
 
-	// revoke → inactive
+	// revoke by the other (non-owner) user → 403
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/revoke", nil))
+	rreq := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/revoke", nil)
+	for k, v := range oheaders {
+		rreq.Header.Set(k, v)
+	}
+	h.ServeHTTP(rec, rreq)
+	if rec.Code != 403 {
+		t.Fatalf("revoke self-only gate: status = %d, want 403", rec.Code)
+	}
+
+	// revoke by owner → inactive
+	rec = httptest.NewRecorder()
+	rreq = httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/revoke", nil)
+	rreq.Header.Set("X-Tenant-Id", tenantID)
+	rreq.Header.Set("X-User-Id", userID)
+	h.ServeHTTP(rec, rreq)
 	if rec.Code != 200 {
 		t.Fatalf("revoke status = %d", rec.Code)
 	}
@@ -182,12 +215,15 @@ func TestIntrospectLifecycle(t *testing.T) {
 
 func TestIntrospectExpired(t *testing.T) {
 	d := testDeps(t)
-	_, userID := fixtures(t, d)
+	tenantID, userID := fixtures(t, d)
 	h := Router(d)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens",
-		bytes.NewReader(jsonBytes(map[string]string{"ttl": "1ns"}))))
+	expreq := httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens",
+		bytes.NewReader(jsonBytes(map[string]string{"ttl": "1ns"})))
+	expreq.Header.Set("X-Tenant-Id", tenantID)
+	expreq.Header.Set("X-User-Id", userID)
+	h.ServeHTTP(rec, expreq)
 	var issued struct {
 		Token string `json:"token"`
 	}
