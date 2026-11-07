@@ -116,13 +116,6 @@ func (d Deps) validateNamespace(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": ns.ID, "status": "APPLYING"})
 }
 
-func writeValidation(w http.ResponseWriter, checks []readinessCheck) {
-	httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]any{
-		"error":  httpx.Error{Code: "VALIDATION_FAILED", Message: "readiness gates failed"},
-		"checks": checks,
-	})
-}
-
 // applyNamespace: APPLYING → DATA_LOADING → READY (+ ready_for_loadtest=true).
 // Also resolves dependencies → network policy spec.
 func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {

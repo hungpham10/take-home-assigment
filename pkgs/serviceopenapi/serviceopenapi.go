@@ -22,10 +22,10 @@ type Target struct {
 
 // Summary is stored in tbl_services.parsed_summary (JSONB).
 type Summary struct {
-	Targets  []Target `json:"targets"`
-	Title    string   `json:"title"`
-	Version  string   `json:"version"`
-	OpCount  int      `json:"op_count"`
+	Targets []Target `json:"targets"`
+	Title   string   `json:"title"`
+	Version string   `json:"version"`
+	OpCount int      `json:"op_count"`
 }
 
 // ValidateAndIndex parses and validates an OpenAPI 3 spec, returning the
@@ -82,7 +82,7 @@ func SpecHash(spec []byte) string {
 	return string(out[:])
 }
 
-// MarshalJSON helpers for storing summaries.
+// Marshal serializes the summary for JSONB storage.
 func (s *Summary) Marshal() []byte {
 	b, _ := json.Marshal(s)
 	return b

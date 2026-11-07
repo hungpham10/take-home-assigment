@@ -51,10 +51,12 @@ func TestValidateAndIndexErrors(t *testing.T) {
 }
 
 func TestSpecHashStable(t *testing.T) {
-	if SpecHash([]byte(validSpec)) != SpecHash([]byte(validSpec)) {
+	h1 := SpecHash([]byte(validSpec))
+	h2 := SpecHash([]byte(validSpec))
+	if h1 != h2 {
 		t.Error("hash must be stable")
 	}
-	if SpecHash([]byte(validSpec)) == SpecHash([]byte(validSpec+" ")) {
+	if h1 == SpecHash([]byte(validSpec+" ")) {
 		t.Error("hash must differ on content change")
 	}
 }
