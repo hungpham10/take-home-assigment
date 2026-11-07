@@ -15,16 +15,19 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
 	"github.com/hungpham/loadtest-platform/pkgs/namespace"
+	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
 // Deps carries everything the server routes need.
 type Deps struct {
-	DB        *gorm.DB
-	Now       func() time.Time // injectable clock (tests)
-	Secrets   secrets.Resolver // SOPS-decrypted tenant secrets
-	MasterKey []byte           // AES-256-GCM master key (token encryption at rest)
+	DB         *gorm.DB
+	Now        func() time.Time // injectable clock (tests)
+	Secrets    secrets.Resolver // SOPS-decrypted tenant secrets
+	MasterKey  []byte           // AES-256-GCM master key (token encryption at rest)
+	ScriptsDir string           // staging dir for k6 scripts
+	ScriptQ    *script.Queue    // async validation queue (nil → sync in tests)
 }
 
 // NewRouter builds the full HTTP handler.
@@ -58,6 +61,9 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/api/loadtest/v1", func(r chi.Router) {
 		r.Use(authz.RequirePrincipal)
 		r.Mount("/namespaces", namespace.Router(namespace.Deps{DB: d.DB, Now: d.Now}))
+		r.Mount("/namespaces/{id}/scripts", script.Router(script.Deps{
+			DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now,
+		}))
 	})
 	return r
 }

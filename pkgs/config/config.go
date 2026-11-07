@@ -20,6 +20,9 @@ type Config struct {
 
 	// Log level: debug|info|warn|error
 	LogLevel string
+
+	// ScriptsDir stages k6 script content (content_ref in tbl_scripts)
+	ScriptsDir string
 }
 
 // FromEnv builds Config from environment variables with sane dev defaults.
@@ -29,6 +32,7 @@ func FromEnv() (Config, error) {
 		DatabaseDSN: envOr("DATABASE_DSN", "postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable"),
 		RunnerMode:  envOr("RUNNER_MODE", "local"),
 		LogLevel:    envOr("LOG_LEVEL", "info"),
+		ScriptsDir:  envOr("SCRIPTS_DIR", "/tmp/ltp-scripts"),
 	}
 	switch c.RunnerMode {
 	case "local", "k8s":

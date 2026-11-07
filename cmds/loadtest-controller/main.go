@@ -15,8 +15,9 @@ import (
 
 	platform "github.com/hungpham/loadtest-platform"
 	"github.com/hungpham/loadtest-platform/pkgs/config"
-	"github.com/hungpham/loadtest-platform/pkgs/server"
+	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
+	"github.com/hungpham/loadtest-platform/pkgs/server"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
@@ -42,6 +43,10 @@ func run() error {
 	}
 	slog.Info("migrations applied")
 
+	// Async script validation workers (k6 inspect local; K8s Job in plan 13).
+	scriptQ := script.NewQueue(ctx, nil, cfg.ScriptsDir, 4, 256) // db wired below
+	_ = scriptQ
+
 	db, err := store.New(ctx, cfg.DatabaseDSN)
 	if err != nil {
 		return err
@@ -52,9 +57,12 @@ func run() error {
 	}
 	defer func() { _ = sqlDB.Close() }()
 
+	// Re-wire the queue with the live DB handle (workers started before db).
+	*scriptQ = *script.NewQueue(ctx, db, cfg.ScriptsDir, 4, 256)
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey()}),
+		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
