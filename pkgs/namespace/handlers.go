@@ -9,9 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
 // Deps carries the handlers' dependencies.
@@ -41,34 +42,13 @@ func Router(d Deps) http.Handler {
 	return r
 }
 
-// --- models --------------------------------------------------------------------
-
-type namespaceRow struct {
-	ID               string     `gorm:"column:id"`
-	TenantID         string     `gorm:"column:tenant_id"`
-	OwnerUserID      string     `gorm:"column:owner_user_id"`
-	Name             string     `gorm:"column:name"`
-	Description      string     `gorm:"column:description"`
-	Status           string     `gorm:"column:status"`
-	ReadyForLoadtest bool       `gorm:"column:ready_for_loadtest"`
-	Version          int        `gorm:"column:version"`
-	TTLExpiresAt     *time.Time `gorm:"column:ttl_expires_at"`
-	CreatedAt        time.Time  `gorm:"column:created_at"`
-	UpdatedAt        time.Time  `gorm:"column:updated_at"`
-}
+// --- handlers --------------------------------------------------------------------
 
 type createRequest struct {
 	Name        string     `json:"name"`
 	Description string     `json:"description"`
 	TTL         *time.Time `json:"ttl_expires_at"`
 }
-
-type updateRequest struct {
-	Description *string `json:"description"`
-	// Optimistic concurrency via If-Match header.
-}
-
-// --- handlers --------------------------------------------------------------------
 
 func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
@@ -80,15 +60,17 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var row namespaceRow
-	err := d.DB.WithContext(ctx).Raw(`
-		INSERT INTO tbl_namespaces (tenant_id, owner_user_id, name, description, ttl_expires_at)
-		VALUES (?::uuid, ?::uuid, ?, ?, ?)
-		RETURNING id::text, tenant_id::text, owner_user_id::text, name, description,
-		          status, ready_for_loadtest, version, ttl_expires_at, created_at, updated_at`,
-		p.TenantID, p.UserID, req.Name, req.Description, req.TTL).
-		Scan(&row).Error
-	if err != nil {
+	ns := store.Namespace{
+		TenantID:      p.TenantID,
+		OwnerUserID:   p.UserID,
+		Name:          req.Name,
+		Description:   req.Description,
+		Status:        "DRAFT",
+		Version:       1,
+		TTLExpiresAt:  req.TTL,
+		CleanupPolicy: jsonBytes(map[string]any{}),
+	}
+	if err := d.DB.WithContext(ctx).Create(&ns).Error; err != nil {
 		if isUniqueViolation(err) {
 			httpx.WriteCodeError(w, "VALIDATION_FAILED", "namespace name already exists in tenant")
 			return
@@ -96,8 +78,8 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "create namespace failed")
 		return
 	}
-	d.audit(ctx, r, p, "namespace.create", row.ID)
-	writeWithETag(w, http.StatusCreated, row)
+	d.audit(ctx, r, p, "namespace.create", ns.ID)
+	writeWithETag(w, http.StatusCreated, ns)
 }
 
 func (d Deps) list(w http.ResponseWriter, r *http.Request) {
@@ -105,23 +87,17 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	q := `SELECT id::text, tenant_id::text, owner_user_id::text, name, description,
-	             status, ready_for_loadtest, version, ttl_expires_at, created_at, updated_at
-	      FROM tbl_namespaces WHERE tenant_id = ?::uuid AND status <> 'DELETED'`
-	args := []any{p.TenantID}
+	q := d.DB.WithContext(ctx).
+		Where("tenant_id = ? AND status <> ?", p.TenantID, "DELETED")
 	if !p.IsAdmin() {
 		// Owner-only default; admin sees across owners within the tenant.
-		q += ` AND owner_user_id = ?::uuid`
-		args = append(args, p.UserID)
+		q = q.Where("owner_user_id = ?", p.UserID)
 	}
 	if s := r.URL.Query().Get("status"); s != "" {
-		q += ` AND status = ?`
-		args = append(args, s)
+		q = q.Where("status = ?", s)
 	}
-	q += ` ORDER BY created_at DESC LIMIT 100`
-
-	var rows []namespaceRow
-	if err := d.DB.WithContext(ctx).Raw(q, args...).Scan(&rows).Error; err != nil {
+	var rows []store.Namespace
+	if err := q.Order("created_at DESC").Limit(100).Find(&rows).Error; err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "list namespaces failed")
 		return
 	}
@@ -130,20 +106,24 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) get(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
-	row, ok := d.loadOwned(w, r, p)
+	ns, ok := d.loadOwned(w, r, p)
 	if !ok {
 		return
 	}
-	writeWithETag(w, http.StatusOK, row)
+	writeWithETag(w, http.StatusOK, ns)
+}
+
+type updateRequest struct {
+	Description *string `json:"description"`
 }
 
 func (d Deps) update(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
-	row, ok := d.loadOwned(w, r, p)
+	ns, ok := d.loadOwned(w, r, p)
 	if !ok {
 		return
 	}
-	if !checkIfMatch(w, r, row.Version) {
+	if !checkIfMatch(w, r, ns.Version) {
 		return
 	}
 	var req updateRequest
@@ -154,96 +134,90 @@ func (d Deps) update(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var updated namespaceRow
-	err := d.DB.WithContext(ctx).Raw(`
-		UPDATE tbl_namespaces SET description = ?, version = version + 1
-		WHERE id = ?::uuid AND version = ?
-		RETURNING id::text, tenant_id::text, owner_user_id::text, name, description,
-		          status, ready_for_loadtest, version, ttl_expires_at, created_at, updated_at`,
-		*req.Description, row.ID, row.Version).Scan(&updated).Error
-	if err != nil || updated.ID == "" {
-		// version changed under us
+	// Optimistic concurrency: WHERE version = current; GORM bumps version.
+	res := d.DB.WithContext(ctx).
+		Model(&store.Namespace{}).
+		Where("id = ? AND version = ?", ns.ID, ns.Version).
+		Updates(map[string]any{"description": *req.Description, "version": ns.Version + 1})
+	if res.Error != nil || res.RowsAffected == 0 {
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "concurrent modification, retry with fresh If-Match")
 		return
 	}
-	d.audit(ctx, r, p, "namespace.update", row.ID)
-	writeWithETag(w, http.StatusOK, updated)
+	d.audit(ctx, r, p, "namespace.update", ns.ID)
+	ns.Description = *req.Description
+	ns.Version++
+	writeWithETag(w, http.StatusOK, ns)
 }
 
 func (d Deps) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
-	row, ok := d.loadOwned(w, r, p)
+	ns, ok := d.loadOwned(w, r, p)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var tRow struct {
-		Status  string
-		Version int
-	}
-	err := d.DB.WithContext(ctx).Raw(`
-		SELECT status, version FROM fn_namespace_transition(?::uuid, 'DELETING', ?::jsonb, ?)`,
-		row.ID, authzJSON(p), "delete requested").Scan(&tRow).Error
-	if err != nil {
+	if err := d.transition(ctx, ns.ID, "DELETING", p, "delete requested"); err != nil {
 		// INVALID_TRANSITION from the DB function (e.g. APPLYING/DATA_LOADING).
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "namespace cannot be deleted from its current status")
 		return
 	}
-	d.audit(ctx, r, p, "namespace.delete", row.ID)
-	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"id": row.ID, "status": tRow.Status})
+	d.audit(ctx, r, p, "namespace.delete", ns.ID)
+	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"id": ns.ID, "status": "DELETING"})
 }
 
 func (d Deps) events(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
-	row, ok := d.loadOwned(w, r, p)
+	ns, ok := d.loadOwned(w, r, p)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	type eventRow struct {
-		ID         int64     `gorm:"column:id"`
-		FromStatus *string   `gorm:"column:from_status"`
-		ToStatus   string    `gorm:"column:to_status"`
-		Reason     *string   `gorm:"column:reason"`
-		CreatedAt  time.Time `gorm:"column:created_at"`
-	}
-	var events []eventRow
-	if err := d.DB.WithContext(ctx).Raw(`
-		SELECT id, from_status, to_status, reason, created_at
-		FROM tbl_namespace_events WHERE object_id = ?::uuid ORDER BY id`, row.ID).
-		Scan(&events).Error; err != nil {
+	var events []store.NamespaceEvent
+	if err := d.DB.WithContext(ctx).
+		Where("object_id = ?", ns.ID).
+		Order("id").Find(&events).Error; err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "events query failed")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
+// transition calls the DB state-machine function in a transaction. This is
+// the ONLY Raw kept in the package: GORM has no syntax for function calls,
+// and status changes must never bypass fn_*_transition (plans/04).
+func (d Deps) transition(ctx context.Context, id, to string, p authz.Principal, reason string) error {
+	return d.DB.WithContext(ctx).Exec(
+		`SELECT fn_namespace_transition(?::uuid, ?, ?::jsonb, ?)`,
+		id, to, authzJSON(p), reason).Error
+}
+
 // loadOwned fetches the namespace and enforces tenant isolation + owner/admin.
 // 404 (not 403) for cross-owner to avoid leaking existence (docs §2.3).
-func (d Deps) loadOwned(w http.ResponseWriter, r *http.Request, p authz.Principal) (namespaceRow, bool) {
+func (d Deps) loadOwned(w http.ResponseWriter, r *http.Request, p authz.Principal) (store.Namespace, bool) {
 	id := chi.URLParam(r, "id")
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var row namespaceRow
-	q := `SELECT id::text, tenant_id::text, owner_user_id::text, name, description,
-	             status, ready_for_loadtest, version, ttl_expires_at, created_at, updated_at
-	      FROM tbl_namespaces WHERE id = ?::uuid AND tenant_id = ?::uuid AND status <> 'DELETED'`
-	args := []any{id, p.TenantID}
+	var ns store.Namespace
+	q := d.DB.WithContext(ctx).
+		Where("id = ? AND tenant_id = ? AND status <> ?", id, p.TenantID, "DELETED")
 	if !p.IsAdmin() {
-		q += ` AND owner_user_id = ?::uuid`
-		args = append(args, p.UserID)
+		q = q.Where("owner_user_id = ?", p.UserID)
 	}
-	err := d.DB.WithContext(ctx).Raw(q, args...).Scan(&row).Error
-	if err != nil || row.ID == "" {
+	err := q.First(&ns).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && ns.ID == "") {
 		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "namespace not found")
-		return namespaceRow{}, false
+		return store.Namespace{}, false
 	}
-	return row, true
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "namespace lookup failed")
+		return store.Namespace{}, false
+	}
+	return ns, true
 }
 
 // --- ETag / If-Match -------------------------------------------------------------
@@ -252,9 +226,9 @@ func etagFor(version int) string {
 	return `"` + strconv.Itoa(version) + `"`
 }
 
-func writeWithETag(w http.ResponseWriter, status int, row namespaceRow) {
-	w.Header().Set("ETag", etagFor(row.Version))
-	httpx.WriteJSON(w, status, row)
+func writeWithETag(w http.ResponseWriter, status int, ns store.Namespace) {
+	w.Header().Set("ETag", etagFor(ns.Version))
+	httpx.WriteJSON(w, status, ns)
 }
 
 // checkIfMatch enforces optimistic concurrency; returns false when it wrote a response.
@@ -263,7 +237,7 @@ func checkIfMatch(w http.ResponseWriter, r *http.Request, version int) bool {
 	if im == "" {
 		return true // optional; PATCH without If-Match takes latest
 	}
-	if strings.Trim(im, ` W/`) != etagFor(version) && strings.Trim(im, `"`) != etagFor(version) {
+	if trimEtag(im) != etagFor(version) {
 		w.WriteHeader(http.StatusPreconditionFailed)
 		httpx.WriteError(w, http.StatusPreconditionFailed, "PRECONDITION_FAILED",
 			"If-Match does not match current version")
@@ -272,14 +246,15 @@ func checkIfMatch(w http.ResponseWriter, r *http.Request, version int) bool {
 	return true
 }
 
+func trimEtag(s string) string { return trimEtagNormal(s) }
+
 // --- idempotency --------------------------------------------------------------------
 
 // requireIdempotencyKey enforces the mandatory Idempotency-Key header on
 // POST /namespaces, /apply, /loadtests, /loadtests/{id}/stop (docs contract).
 func requireIdempotencyKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("Idempotency-Key")
-		if key == "" {
+		if r.Header.Get("Idempotency-Key") == "" {
 			httpx.WriteCodeError(w, "VALIDATION_FAILED", "Idempotency-Key header is required")
 			return
 		}
@@ -288,13 +263,12 @@ func requireIdempotencyKey(next http.Handler) http.Handler {
 }
 
 // idempotencyReplay replays a stored response for (tenant, endpoint, key)
-// with identical request hash. Returns handled=true when replayed or conflict.
-// Mount via With(...) around create-like handlers.
+// with identical request hash; otherwise calls next and stores the response.
 func (d Deps) idempotencyReplay(endpoint string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := authz.PrincipalOf(r)
 		key := r.Header.Get("Idempotency-Key")
-		body, err := readBody(r)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			httpx.WriteCodeError(w, "BAD_REQUEST", "unreadable request body")
 			return
@@ -305,44 +279,40 @@ func (d Deps) idempotencyReplay(endpoint string, next http.HandlerFunc) http.Han
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
-		var stored struct {
-			RequestHash    string  `gorm:"column:request_hash"`
-			ResponseStatus *int    `gorm:"column:response_status"`
-			ResponseBody   *string `gorm:"column:response_body"`
-		}
-		err = d.DB.WithContext(ctx).Raw(`
-			SELECT request_hash, response_status, response_body
-			FROM tbl_idempotency_keys
-			WHERE tenant_id = ?::uuid AND endpoint = ? AND key = ?`,
-			p.TenantID, endpoint, key).Scan(&stored).Error
-		if err == nil && stored.RequestHash != "" {
-			if stored.RequestHash != reqHash {
-				httpx.WriteCodeError(w, "VALIDATION_FAILED",
-					"Idempotency-Key reused with different request payload")
-				return
-			}
-			if stored.ResponseStatus != nil && stored.ResponseBody != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Idempotency-Replayed", "true")
-				w.WriteHeader(*stored.ResponseStatus)
-				_, _ = w.Write([]byte(*stored.ResponseBody))
-				return
-			}
+		var stored store.IdempotencyKey
+		err = d.DB.WithContext(ctx).
+			Where("tenant_id = ? AND endpoint = ? AND key = ?", p.TenantID, endpoint, key).
+			First(&stored).Error
+		switch {
+		case err == nil && stored.RequestHash != reqHash:
+			httpx.WriteCodeError(w, "VALIDATION_FAILED",
+				"Idempotency-Key reused with different request payload")
+			return
+		case err == nil && stored.ResponseStatus != nil && stored.ResponseBody != nil:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Idempotency-Replayed", "true")
+			w.WriteHeader(*stored.ResponseStatus)
+			_, _ = w.Write([]byte(*stored.ResponseBody))
+			return
+		case err == nil:
 			// In-flight duplicate: first request still processing.
 			httpx.WriteCodeError(w, "INVALID_TRANSITION", "request with this Idempotency-Key is in progress")
 			return
 		}
 
 		rec := &captureWriter{ResponseWriter: w}
-		r.Body = readCloser(body)
+		r.Body = io.NopCloser(bytesReader(body))
 		next(rec, r)
 
 		if rec.status >= 200 && rec.status < 500 {
-			_ = d.DB.WithContext(ctx).Exec(`
-				INSERT INTO tbl_idempotency_keys (tenant_id, endpoint, key, request_hash, response_status, response_body)
-				VALUES (?::uuid, ?, ?, ?, ?, NULLIF(?,'')::jsonb)
-				ON CONFLICT (tenant_id, endpoint, key) DO NOTHING`,
-				p.TenantID, endpoint, key, reqHash, rec.status, rec.bodyString()).Error
+			_ = d.DB.WithContext(ctx).Create(&store.IdempotencyKey{
+				TenantID:       p.TenantID,
+				Endpoint:       endpoint,
+				Key:            key,
+				RequestHash:    reqHash,
+				ResponseStatus: &rec.status,
+				ResponseBody:   strPtr(rec.bodyString()),
+			}).Error
 		}
 	}
 }
@@ -350,25 +320,20 @@ func (d Deps) idempotencyReplay(endpoint string, next http.HandlerFunc) http.Han
 // --- helpers ---------------------------------------------------------------------
 
 func (d Deps) audit(ctx context.Context, _ *http.Request, p authz.Principal, action, objectID string) {
-	_ = d.DB.WithContext(ctx).Exec(`
-		INSERT INTO tbl_audit_log (tenant_id, actor, action, object_type, object_id)
-		VALUES (?::uuid, ?::jsonb, ?, 'namespace', ?)`,
-		p.TenantID, actorJSON(p), action, objectID).Error
+	_ = d.DB.WithContext(ctx).Create(&store.AuditLog{
+		TenantID:   strPtr(p.TenantID),
+		Actor:      jsonBytes(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role}),
+		Action:     action,
+		ObjectType: "namespace",
+		ObjectID:   strPtr(objectID),
+	}).Error
 }
 
 func authzJSON(p authz.Principal) string {
-	b, _ := json.Marshal(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role})
-	return string(b)
-}
-
-func actorJSON(p authz.Principal) string {
-	return authzJSON(p)
+	return string(jsonBytes(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role}))
 }
 
 func isUniqueViolation(err error) bool {
 	var pgErr interface{ SQLState() string }
-	if errors.As(err, &pgErr) {
-		return pgErr.SQLState() == "23505"
-	}
-	return false
+	return errors.As(err, &pgErr) && pgErr.SQLState() == "23505"
 }
