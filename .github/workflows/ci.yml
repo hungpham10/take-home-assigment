@@ -114,3 +114,10 @@ jobs:
               || (echo "FAIL: missing table $t" && exit 1)
           done
           echo "All required tables present."
+
+      - name: Run SQL transition tests
+        run: |
+          if [ -f tests/sql/transition_test.sql ]; then
+            psql -v ON_ERROR_STOP=1 -f tests/sql/transition_test.sql
+            echo "SQL transition tests passed."
+          fi
