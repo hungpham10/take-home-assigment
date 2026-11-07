@@ -1,0 +1,90 @@
+# Load Test Manager API — Run Lifecycle (requires READY namespace)
+
+This document defines **load test run management** in the namespace-first model. Endpoint-level contracts live in [`docs/bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md); namespace/component/readiness rules live in [`docs/namespace-management-api.md`](namespace-management-api.md).
+
+**Base path:** `/api/loadtest/v1`.  
+**Related:** [`docs/namespace-management-api.md`](namespace-management-api.md), [`docs/k6-operator-go-client.md`](k6-operator-go-client.md), [`docs/admin-oidc-integration-api.md`](admin-oidc-integration-api.md), [`docs/nginx-oidc-auth.md`](nginx-oidc-auth.md), [`docs/architecture.md`](architecture.md).
+
+## 1. Hard prerequisites (must enforce)
+
+A load test **cannot** be defined/triggered unless:
+1. **`namespace_id` is provided** and resolves in the same tenant/visibility scope.
+2. Namespace is **READY for load testing** (`ready_for_loadtest=true`; e.g., status `READY`, components applied/readiness checks passed). If not ready -> **`409 Conflict`** (`NAMESPACE_NOT_READY`) with readiness details.
+3. **Target API(s) are explicit** and valid: `targets[]` references `service_id` operations that exist in the namespace (resolved from each service’s **OpenAPI/Swagger** definition). Reject unknown service/operation/invalid method+path.
+4. **JS load test definition is provided** (k6 script): required `script` payload (e.g., `filename` + `content` and/or approved ref). Reject missing/invalid script; enforce size/form guardrails (ConfigMap payload limit ~1 MiB when using ConfigMap; prefer run-scoped storage/ref for larger scripts).
+
+Authz: tenant isolation; owner-only; `admin` cross-owner within tenant. Immutable `tenant_id`, `owner_user_id` on runs.
+
+## 2. Responsibilities
+
+- Validate namespace readiness + target APIs + JS script + guardrails.
+- Persist run catalog before provisioning; async `202` + polling; idempotency where supported.
+- Provision/resolve execution context (namespace/dependency/NetworkPolicy already defined by namespace; ensure runner access/policies as needed), create script source (ConfigMap or approved mechanism), create **k6-operator `TestRun`** via **Go Kubernetes API (no `kubectl`)** (`docs/k6-operator-go-client.md`).
+- Reconcile BFF status with operator/provision/teardown signals; enforce TTL/force stop/cleanup.
+- Serve status, logs, metrics/events scoped to authz.
+
+## 3. API summary
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/loadtest/v1/loadtests` | Create & trigger (`202`). Requires ready namespace + `targets[]` + `script` JS + `load_config`. |
+| `GET` | `/api/loadtest/v1/loadtests` | List runs (`namespace_id`, `service_id`, `status`, owner admin-only). |
+| `GET` | `/api/loadtest/v1/loadtests/{id}` | Run detail, targets, namespace/service snapshot, metrics. |
+| `POST` | `/api/loadtest/v1/loadtests/{id}/stop` | Force close/teardown. |
+| `GET` | `/api/loadtest/v1/loadtests/{id}/logs` | Logs (redacted). |
+| (inferred) | events/metrics/artifacts/rerun/delete | As needed, authz-scoped. |
+
+## 4. Create/trigger flow
+
+1. Authn context + authz (namespace visible/usable).
+2. **Check namespace readiness** (`ready_for_loadtest`).
+3. Resolve and validate **`targets[]`** against namespace service OpenAPI operations.
+4. Validate **JS script** (presence, size/type/allowed form, guardrails).
+5. Apply guardrails (vusers/duration/TTL/concurrency/quotas).
+6. Persist run (`PROVISIONING`/`QUEUED`, `namespace_id`, `targets`, script ref/hash, `expires_at`).
+7. Provision async: bind execution to namespace context; ensure **runner NetworkPolicy/egress** allows only resolved `targets[]`/approved deps + required platform endpoints (do not rely on advisory `targets[]`); create script source (run-scoped name, e.g., `<test_id>-script`; set owner references/cleanup on failure; respect ConfigMap size limits); create k6 `TestRun`; store `k8s_refs`. Runner must have no platform/K8s credentials.
+8. Return `202` + `status_url`; reconcile to canonical statuses per `docs/bff-loadtest-api-spec.md` (MVP: use `STOPPED` for stop/cancel outcomes; `CANCELED` reserved unless explicitly distinguished).
+
+## 5. Target API and script (clarity)
+
+- **Target API(s):** explicit list of impacted operations. Preferred fields: `service_id` + `operation_id`; also accept `method`+`path` when resolvable. Stored on the run for audit/UI/validation.
+- **JS script (required):** executable k6 definition of the load test. Supported forms (MVP policy to finalize):
+  - `inline`: `filename` + `content` (+ `content_type`). Subject to size guardrails.
+  - `approved_ref`: vetted object-storage/reference (e.g. S3 URI, internal artifact ref). **Do not pass arbitrary remote URLs directly to execution**; resolve only approved refs with scoped credentials/presigned access.
+  - `multipart upload`: optional convenience; stored as managed artifact/ref.
+
+### 5.1 Remote script loading (S3/object storage) and staging
+k6-operator `TestRun.spec.script` supports **`configMap`**, **`volumeClaim`**, or **`localFile`** only (no direct S3/HTTP source). Therefore remote scripts (e.g., S3) must be handled by the platform:
+1. **Register/reference script**: BFF stores script metadata (`script_id`, source ref, checksum/hash, size, owner/tenant, status).
+2. **Validate before use** (see 5.2): create validation job and require `VALIDATED` (or policy-approved) before allowing `TestRun` execution, especially for approved refs / CI flows.
+3. **Stage for execution**: resolve approved ref in a controlled path, then create a run-scoped script source:
+   - **ConfigMap** (`data["test.js"]`): simple for small scripts; **ConfigMap value limit ~1 MiB**. Enforce hard size limit.
+   - **Volume/PVC/archive** (`volumeClaim`): for larger scripts/archives; platform stages content to a PVC/object-backed volume using a controlled init/staging Job or approved CSI/object mechanism.
+   - **Baked image** (`localFile`): only for vetted runner images, not user-supplied arbitrary remote code.
+4. **Create `TestRun`** referencing the staged `configMap`/`volumeClaim`/`localFile`. Use run-scoped names/labels, owner refs/cleanup on failure.
+
+### 5.2 Validation before execution (separate K8s Job + watcher)
+Remote/registered scripts should be validated before dispatching load:
+- **Validation record**: `PENDING_VALIDATION | VALIDATING | VALIDATED | INVALID | VALIDATION_FAILED` with diagnostics (syntax/import/archive errors, guardrail violations, checksum mismatch), timestamps, validator image/version.
+- **K8s Job (isolated)**: BFF (or reconciler) creates a **run/validation-scoped Kubernetes Job** that executes controlled validation (e.g., `k6 inspect`/`k6 archive`/syntax/module checks) against the approved script source. Job runs with **least privilege**: no platform/K8s credentials, scoped read-only access to the approved object/script ref, resource/time limits, network egress restricted to approved artifact endpoints as needed.
+- **Status observation / notify**: use a **Kubernetes watch/informer** (preferred, level-triggered reconciler) on the validation Job/Pod status; on transitions update projection and emit notification state. Expose to users via:
+  - `GET /api/loadtest/v1/scripts/{script_id}` or `/validations/{validation_id}` (polling-friendly, projection-backed),
+  - events/audit entries,
+  - optional future push (SSE/webhook) — not required for MVP.
+- **Execution gate**: `POST /loadtests` rejects unvalidated/invalid script refs when policy requires validation (`409 SCRIPT_NOT_VALIDATED` or `422` as finalized). Inline small scripts may use lightweight synchronous validation + guardrails if fast/safe; large/remote refs use async Job validation.
+
+### 5.3 Security/ops guardrails
+- Never trust arbitrary user-provided URLs/credentials; use approved refs, scoped short-lived credentials/presigned reads, and checksum verification.
+- Validate script size/type, reject unsafe archive/module patterns per policy, and record audit.
+- Validation Jobs and staged artifacts are TTL-cleaned; reaper removes orphans.
+
+## 6. Security notes (must address before implementation)
+- **Untrusted JS:** k6 script is arbitrary code. Enforce network-level egress restrictions for runners (resolved targets only + required allowances), least-privilege SA (no K8s/platform secrets), quotas (vusers, duration, script size, ConfigMap 1 MiB), and safe target resolution.
+- **Rollback:** if `TestRun` creation fails after script source creation, clean up or use owner references to avoid orphans.
+- **K8s naming:** use run-scoped names/labels (`test_id`), not `<name>-script` without unique scope.
+- **k6-operator version:** pin tested `k6.io` API version (e.g., `v1alpha1`) and operator compatibility.
+
+## 7. Decisions / open items
+- **Locked (MVP):** 1 platform Environment = 1 Kubernetes Namespace. Runner execution uses network-enforced egress (NetworkPolicy from resolved `targets[]`/approved deps/mocks + DNS). POC uses OIDC/nginx auth; nginx reflects permissions from OIDC/claims into trusted headers, Go middleware normalizes principal/enforces RBAC; `abt_` is service-account token for CLI/automation; `tenant_id` scopes org/multi-domain boundary.
+- Target strictness: targets must match what the script exercises (advisory/metadata) vs enforceable mapping (limited).
+- Script forms allowed in MVP and storage (inline vs object storage/ref).
