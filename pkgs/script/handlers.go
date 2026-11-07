@@ -233,7 +233,7 @@ func loadNamespace(w http.ResponseWriter, r *http.Request, p authz.Principal, db
 func (d Deps) startValidation(ctx context.Context, w http.ResponseWriter, p authz.Principal, scriptID, reason string) bool {
 	if d.Queue != nil {
 		if !d.Queue.Submit(scriptID) {
-			httpx.WriteCodeError(w, "VALIDATION_FAILED", "validation queue full, retry")
+			httpx.WriteCodeError(w, "QUOTA_EXCEEDED", "validation queue full, retry")
 			return false
 		}
 	}

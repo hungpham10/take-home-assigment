@@ -234,7 +234,15 @@ func (d Deps) introspectToken(ctx context.Context, token, tenantID string) intro
 
 func (d Deps) issueToken(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userID")
-	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), r.Header.Get("X-Tenant-Id"), userID); err != nil {
+	// Target tenant comes from the target user's DB row — NOT from the caller's
+	// own X-Tenant-Id header (which trivially equals the caller's tenant and
+	// would let an admin of tenant B issue tokens inside tenant A).
+	var target store.User
+	if err := d.DB.First(&target, "id = ?", userID).Error; err != nil {
+		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "user not found")
+		return
+	}
+	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), target.TenantID, userID); err != nil {
 		httpx.WriteCodeError(w, "FORBIDDEN", "not allowed to issue tokens for another user")
 		return
 	}
@@ -328,7 +336,13 @@ func (d Deps) revokeToken(w http.ResponseWriter, r *http.Request) {
 // listTokens returns a user's tokens (metadata only — never plaintext).
 func (d Deps) listTokens(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userID")
-	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), r.Header.Get("X-Tenant-Id"), userID); err != nil {
+	// Same tenant-sourcing rule as issueToken: the target user's DB row.
+	var target store.User
+	if err := d.DB.First(&target, "id = ?", userID).Error; err != nil {
+		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "user not found")
+		return
+	}
+	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), target.TenantID, userID); err != nil {
 		httpx.WriteCodeError(w, "FORBIDDEN", "not allowed to list tokens of another user")
 		return
 	}
