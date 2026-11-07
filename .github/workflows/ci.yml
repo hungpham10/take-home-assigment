@@ -108,9 +108,19 @@ jobs:
           echo "=== Tables ==="
           psql -v ON_ERROR_STOP=1 -c "\dt"
           # Các bảng bắt buộc phải có sau toàn bộ migrations (cập nhật dần theo sql/)
-          REQUIRED_TABLES="tbl_tenants tbl_tenant_hosts tbl_tenant_auth_profiles tbl_users tbl_user_external_identities tbl_user_roles tbl_access_tokens tbl_audit_log"
+          REQUIRED_TABLES="tbl_tenants tbl_tenant_hosts tbl_tenant_auth_profiles tbl_users tbl_user_external_identities tbl_user_roles tbl_access_tokens tbl_audit_log tbl_namespaces tbl_services tbl_databases tbl_ingress tbl_dependencies tbl_network_policies"
           for t in $REQUIRED_TABLES; do
             psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM information_schema.tables WHERE table_name='$t'" | grep -q 1 \
               || (echo "FAIL: missing table $t" && exit 1)
           done
           echo "All required tables present."
+
+      - name: Run SQL transition tests
+        run: |
+          set -e
+          for t in tests/sql/*_test.sql; do
+            [ -e "$t" ] || continue
+            echo "== running $t"
+            psql -v ON_ERROR_STOP=1 -f "$t"
+          done
+          echo "SQL transition tests passed."

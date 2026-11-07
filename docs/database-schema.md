@@ -32,7 +32,32 @@ Append-only. `actor JSONB` chứa principal từ trusted headers. Index `(tenant
 - Mọi mutation trên domain admin ghi 1 row `tbl_audit_log`.
 - Tenant/user/token không xóa cứng — dùng status/`revoked_at`.
 
-## State transitions & events (từ migration 0004, pattern chi tiết ở plans/04)
+## Migration 0002 — Status transitions (pattern)
+
+- `tbl_status_transitions (object_type, from_status, to_status, allowed)` — transition map chung.
+- `fn_is_transition_allowed(object_type, from, to)` — check map.
+- `fn_status_transition(main_table, events_table, object_type, id, to_status, actor, reason, meta)` — template generic: FOR UPDATE lock → check map → UPDATE status+version → INSERT event, trong 1 transaction caller. Domain migrations tạo wrapper `fn_<object>_transition`.
+
+## Migration 0003 — Namespace & component domain
+
+### tbl_namespaces (current state)
+- `status`: `DRAFT, VALIDATING, INVALID, APPLYING, DATA_LOADING, READY, DEGRADED, DELETING, DELETED` (CHECK constraint).
+- `ready_for_loadtest BOOL` — gate tạo loadtest; `version` cho ETag/If-Match.
+- TTL: `ttl_expires_at` (NULL = không TTL) + `cleanup_policy JSONB` — reaper (Plan 13) đọc index partial.
+- Unique `(tenant_id, name)`; index `(tenant_id, status)`, `(owner_user_id, status)`.
+- Chỉ transition sang `DELETED` (soft delete) — không xóa cứng.
+
+### tbl_namespace_events
+Append-only; index `(object_id, id)`; wrapper `fn_namespace_transition(...)`.
+
+### Components (FK CASCADE về namespace, không state machine — dùng audit)
+- `tbl_services`: `openapi_spec JSONB` (NULL → chặn readiness, 422), `spec_hash` (đổi spec → revalidate), `parsed_summary JSONB` (operations index → `targets[]`), unique `(namespace_id, name)`.
+- `tbl_databases`: engine + `profile JSONB`.
+- `tbl_ingress`: host + `paths JSONB`.
+- `tbl_dependencies`: `type` (service|database|mock) + `ref_id` + `config` — nguồn suy ra NetworkPolicy egress (ADR-002).
+- `tbl_network_policies`: `spec` đã resolve + `observed_generation`.
+
+## State transitions & events (pattern chi tiết ở plans/04)
 - Các object có state machine (`tbl_namespaces`, `tbl_scripts`, `tbl_load_tests`, `tbl_datasets`) chuyển trạng thái **chỉ** qua `fn_<object>_transition(...)`:
   `SELECT ... FOR UPDATE` → check `tbl_status_transitions` → `UPDATE status, version+1` → `INSERT tbl_<object>_events` — tất cả trong 1 transaction; transition trái phép → exception (app map `409/422`).
 - `tbl_<object>` = current state, nguồn đọc cho list/get (JOIN + index); `tbl_<object>_events` append-only, chỉ JOIN khi xem lịch sử.
