@@ -11,7 +11,7 @@ Tenant (org boundary). `slug` unique; `status`: `ACTIVE|SUSPENDED|DELETED`.
 Map hostname → tenant cho nginx. `host` unique; `is_default`.
 
 ### tbl_tenant_auth_profiles
-Cấu hình auth per tenant, schema khớp expectations Lua trong `conf/nginx` (issuer, client_id, jwks_uri, `config JSONB`). Unique `(tenant_id, name)`.
+Cấu hình auth per tenant, schema khớp expectations Lua trong `conf/nginx` (issuer, client_id, jwks_uri, `config JSONB`). Unique `(tenant_id, name)`. **Không chứa secret** — secret lấy từ SOPS env (`docs/secrets-management.md`); migration 0007 strip các key nhạy cảm.
 
 ### tbl_users
 `tenant_id` immutable. Unique `(tenant_id, email)`.

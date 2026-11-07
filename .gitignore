@@ -74,3 +74,6 @@ sources/
 # Go build artifacts
 bin/
 coverage.out
+
+# SOPS plaintext (YAML) — chỉ bản .enc được commit
+env/secrets.*.yaml

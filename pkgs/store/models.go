@@ -107,15 +107,16 @@ func (UserRole) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // AccessToken is a hashed abt_ service token (tbl_access_tokens).
 type AccessToken struct {
-	ID        string     `gorm:"column:id;primaryKey;type:uuid"`
-	UserID    string     `gorm:"column:user_id"`
-	Name      string     `gorm:"column:name"`
-	TokenHash string     `gorm:"column:token_hash"`
-	Prefix    string     `gorm:"column:prefix"`
-	ExpiresAt *time.Time `gorm:"column:expires_at"`
-	RevokedAt *time.Time `gorm:"column:revoked_at"`
-	CreatedAt time.Time  `gorm:"column:created_at"`
-	UpdatedAt time.Time  `gorm:"column:updated_at"`
+	ID             string     `gorm:"column:id;primaryKey;type:uuid"`
+	UserID         string     `gorm:"column:user_id"`
+	Name           string     `gorm:"column:name"`
+	TokenHash      string     `gorm:"column:token_hash"`
+	Prefix         string     `gorm:"column:prefix"`
+	TokenEncrypted []byte     `gorm:"column:token_encrypted;type:bytea"`
+	ExpiresAt      *time.Time `gorm:"column:expires_at"`
+	RevokedAt      *time.Time `gorm:"column:revoked_at"`
+	CreatedAt      time.Time  `gorm:"column:created_at"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at"`
 }
 
 // TableName maps AccessToken to its PostgreSQL table.

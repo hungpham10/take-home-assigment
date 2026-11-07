@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -23,13 +24,16 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
 // Deps carries the handlers' dependencies.
 type Deps struct {
-	DB  *gorm.DB
-	Now func() time.Time // injectable clock for tests
+	DB        *gorm.DB
+	Now       func() time.Time // injectable clock for tests
+	Secrets   secrets.Resolver // SOPS-decrypted env secrets (never from DB)
+	MasterKey []byte           // AES-256-GCM key for token encryption at rest
 }
 
 // Router mounts the nginx-internal endpoints (trusted channel: unix socket /
@@ -54,6 +58,7 @@ func Router(d Deps) http.Handler {
 	r.Route("/tokens", func(r chi.Router) {
 		r.Use(authz.RequirePrincipal)
 		r.Post("/{tokenID}/revoke", d.revokeToken)
+		r.Post("/{tokenID}/reveal", d.revealToken)
 	})
 	return r
 }
@@ -127,16 +132,29 @@ func (d Deps) authConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Secrets come from SOPS-decrypted env (LTP_TENANT_<SLUG>_*), never from
+	// the DB — tbl_tenant_auth_profiles.config holds non-sensitive fields only
+	// (migration 0007 strips legacy values).
+	var tenant store.Tenant
+	if err := d.DB.WithContext(ctx).First(&tenant, "id = ?", profile.TenantID).Error; err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "tenant lookup failed")
+		return
+	}
 	cfg := authConfig{
 		ID:               profile.ID,
 		JWTMode:          str(profile.Config, "jwt_mode", "jwks"),
 		OIDCJWKSURL:      deref(profile.JwksURI),
-		JWTSecret:        str(profile.Config, "jwt_secret", ""),
+		JWTSecret:        d.Secrets.Resolve(tenant.Slug, secrets.JWTSecret),
 		OIDCIssuer:       deref(profile.Issuer),
 		OIDCClientID:     deref(profile.ClientID),
-		OIDCClientSecret: str(profile.Config, "oidc_client_secret", ""),
+		OIDCClientSecret: d.Secrets.Resolve(tenant.Slug, secrets.OIDCClientSecret),
 		OIDCExpectedAlg:  str(profile.Config, "oidc_expected_alg", "RS256"),
-		SessionSecret:    str(profile.Config, "session_secret", ""),
+		SessionSecret:    d.Secrets.Resolve(tenant.Slug, secrets.SessionSecret),
+	}
+	if cfg.SessionSecret == "" || cfg.OIDCClientSecret == "" {
+		// Warn WITHOUT values (nginx Lua falls back to env vars on its side).
+		slog.Warn("auth-config missing tenant secrets from env",
+			"tenant", tenant.Slug, "host", host, "profile", name)
 	}
 	// SECURITY: contains secrets — trusted nginx channel only, never log.
 	httpx.WriteJSON(w, http.StatusOK, authConfigBody{Auth: cfg})
@@ -267,6 +285,16 @@ func (d Deps) issueToken(w http.ResponseWriter, r *http.Request) {
 		Prefix:    tokenPrefix(full),
 		ExpiresAt: &expires,
 	}
+	// Encrypt plaintext at rest (opsense-rs sops.rs pattern) when a master
+	// key is configured — enables admin reveal; hash stays the auth path.
+	if len(d.MasterKey) == 32 {
+		enc, err := secrets.Encrypt(d.MasterKey, full)
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "token encryption failed")
+			return
+		}
+		at.TokenEncrypted = enc
+	}
 	if err := d.DB.WithContext(ctx).Create(&at).Error; err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "token insert failed")
 		return
@@ -334,6 +362,33 @@ func (d Deps) listTokens(w http.ResponseWriter, r *http.Request) {
 		out = append(out, tokenInfo{ID: t.ID, Name: t.Name, Prefix: t.Prefix, ExpiresAt: t.ExpiresAt, RevokedAt: t.RevokedAt})
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"tokens": out})
+}
+
+// revealToken returns the decrypted plaintext to self-or-admin.
+// Audit-logged; requires LTP_MASTER_KEY (SOPS env).
+func (d Deps) revealToken(w http.ResponseWriter, r *http.Request) {
+	tokenID := chi.URLParam(r, "tokenID")
+	var at store.AccessToken
+	if err := d.DB.First(&at, "id = ?", tokenID).Error; err != nil {
+		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "token not found")
+		return
+	}
+	if err := authz.RequireSelfOrAdmin(authz.PrincipalOf(r), r.Header.Get("X-Tenant-Id"), at.UserID); err != nil {
+		httpx.WriteCodeError(w, "FORBIDDEN", "not allowed to reveal this token")
+		return
+	}
+	if len(d.MasterKey) != 32 || len(at.TokenEncrypted) == 0 {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "REVEAL_UNAVAILABLE",
+			"token encryption at rest not configured")
+		return
+	}
+	plain, err := secrets.Decrypt(d.MasterKey, at.TokenEncrypted)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "token decrypt failed")
+		return
+	}
+	d.audit(r.Context(), r, "token.reveal", "access_token", tokenID)
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"token": plain})
 }
 
 // ownsToken checks the caller may revoke tokenID (self-or-admin of the

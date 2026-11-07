@@ -1,0 +1,10 @@
+# SOPS config — chỉ PUBLIC age key được commit; private key (age-key.txt) gitignored.
+# Encrypt: sops -e env/secrets.dev.yaml > env/secrets.dev.enc.yaml
+# Decrypt (runtime): scripts/release.sh — sops -d --output-type dotenv qua SOPS_AGE_KEY_CONTENT.
+creation_rules:
+  - path_regex: env/secrets\.[a-z]+\.yaml$
+    age: >-
+      age1h8nytvu9cac5lxdxyl8u9ye62n2dlcf9e2lnwenuh2m0nqrq7p7s9r4ycr
+  - path_regex: env/.*\.enc\.(yaml|yml|json)$
+    age: >-
+      age1h8nytvu9cac5lxdxyl8u9ye62n2dlcf9e2lnwenuh2m0nqrq7p7s9r4ycr
