@@ -19,6 +19,9 @@ Thứ tự thực thi từ đơn giản → phức tạp. Mỗi plan = 1 PR/feat
 | 13 | [loadtest-runner](13-loadtest-runner.md) | Runner interface (K8s/local) + lifecycle | 11, 12 |
 | 14 | [local-stack-e2e](14-local-stack-e2e.md) | docker-compose, Earthfile (pattern opsense-rs), e2e smoke, k6 perf gate (bảng QPS target per API) | 08–13 |
 | 15 | [sops-secrets](15-sops-secrets.md) | SOPS + age: secrets mã hoá, tách khỏi DB, resolver LTP_TENANT_<SLUG>_* | 08–09 |
+| 16 | [harness-testing-integrity](16-harness-testing-integrity.md) | Harness: ACID/fault matrix, composition root refactor, authz matrix | 03–14 |
+| 17 | [service-management](17-service-management.md) | Service API đầy đủ (service_id, deploy/mock/bindings, /openapi /apis) | 11, 16 |
+| 18 | [namespace-database-management](18-namespace-database-management.md) | Namespace create-with-spec + databases/datasets/ingress/dependencies | 17 |
 
 Sau 14: mock-service (phase sau), CodeGraph review, bump version, release.
 | 16 | [harness-testing-integrity](16-harness-testing-integrity.md) | Harness tests: ACID/invariants, crash/exception/network faults, idempotency/retry, runner/egress safety | 03–13 |
