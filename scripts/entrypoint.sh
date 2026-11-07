@@ -1,7 +1,5 @@
-#!/bin/bash
+#!/bin/sh
+# Entry shim: decrypt SOPS secrets rồi exec controller (App chỉ có env vars).
 set -e
-
-mkdir -p /var/run/axum
-chmod 755 /var/run/axum
-
+[ -f /app/scripts/release.sh ] && . /app/scripts/release.sh || true
 exec "$@"

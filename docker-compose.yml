@@ -1,0 +1,36 @@
+# Local stack — controller + PostgreSQL. nginx (conf/nginx) mount khi cần full gateway.
+# Secrets: SOPS env/secrets.<ENV>.enc.yaml decrypted bởi scripts/release.sh (SOPS_AGE_KEY_CONTENT).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ltp
+      POSTGRES_PASSWORD: ltp
+      POSTGRES_DB: ltp
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ltp -d ltp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  controller:
+    image: ghcr.io/hungpham10/loadtest-platform/controller:latest
+    build:
+      context: .
+    environment:
+      ADDR: ":8080"
+      DATABASE_DSN: postgres://ltp:ltp@postgres:5432/ltp?sslmode=disable
+      RUNNER_MODE: local
+      LOG_LEVEL: debug
+      SCRIPTS_DIR: /tmp/ltp-scripts
+      APP_ENV: dev
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # release.sh decrypts SOPS secrets trước khi boot controller (pattern repo)
+    entrypoint: ["/bin/sh", "-c", "if command -v sops >/dev/null && [ -n \"$$SOPS_AGE_KEY_CONTENT\" ]; then exec /app/entrypoint.sh loadtest-controller; else exec /app/loadtest-controller; fi"]
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./env:/app/env:ro

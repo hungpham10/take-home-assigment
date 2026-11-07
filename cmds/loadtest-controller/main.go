@@ -44,10 +44,6 @@ func run() error {
 	}
 	slog.Info("migrations applied")
 
-	// Async script validation workers (k6 inspect local; K8s Job in plan 13).
-	scriptQ := script.NewQueue(ctx, nil, cfg.ScriptsDir, 4, 256) // db wired below
-	_ = scriptQ
-
 	db, err := store.New(ctx, cfg.DatabaseDSN)
 	if err != nil {
 		return err
@@ -58,8 +54,8 @@ func run() error {
 	}
 	defer func() { _ = sqlDB.Close() }()
 
-	// Re-wire the queue with the live DB handle (workers started before db).
-	*scriptQ = *script.NewQueue(ctx, db, cfg.ScriptsDir, 4, 256)
+	// Async script validation workers (k6 inspect local; K8s Job plugs later).
+	scriptQ := script.NewQueue(ctx, db, cfg.ScriptsDir, 4, 256)
 
 	run := newRunner(cfg.RunnerMode, "")
 	// Reconciler: poll Runner status → advance DB state machine.
