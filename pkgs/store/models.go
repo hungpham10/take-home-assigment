@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,6 +147,8 @@ type Namespace struct {
 	TenantID         string     `gorm:"column:tenant_id" json:"tenant_id"`
 	OwnerUserID      string     `gorm:"column:owner_user_id" json:"owner_user_id"`
 	Name             string     `gorm:"column:name" json:"name"`
+	Slug             *string    `gorm:"column:slug" json:"slug,omitempty"`
+	Visibility       *string    `gorm:"column:visibility;default:'tenant'" json:"visibility,omitempty"`
 	Description      string     `gorm:"column:description" json:"description"`
 	Status           string     `gorm:"column:status" json:"status"`
 	ReadyForLoadtest bool       `gorm:"column:ready_for_loadtest" json:"ready_for_loadtest"`
@@ -197,15 +200,21 @@ func (IdempotencyKey) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(
 
 // Service is a namespace component with an OpenAPI spec (tbl_services).
 type Service struct {
-	ID            string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
-	NamespaceID   string    `gorm:"column:namespace_id" json:"namespace_id"`
-	Name          string    `gorm:"column:name" json:"name"`
-	OpenAPISpec   []byte    `gorm:"column:openapi_spec;type:jsonb" json:"openapi_spec"`
-	SpecHash      *string   `gorm:"column:spec_hash" json:"spec_hash"`
-	ParsedSummary []byte    `gorm:"column:parsed_summary;type:jsonb" json:"parsed_summary"`
-	Version       int       `gorm:"column:version" json:"version"`
-	CreatedAt     time.Time `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt     time.Time `gorm:"column:updated_at" json:"updated_at"`
+	ID               string          `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID      string          `gorm:"column:namespace_id" json:"namespace_id"`
+	ServiceID        *string         `gorm:"column:service_id" json:"service_id,omitempty"`
+	Name             string          `gorm:"column:name" json:"name"`
+	Description      string          `gorm:"column:description" json:"description"`
+	Deploy           json.RawMessage `gorm:"column:deploy;type:jsonb;default:'{}'" json:"deploy"`
+	Mock             json.RawMessage `gorm:"column:mock;type:jsonb;default:'{}'" json:"mock"`
+	DatabaseBindings json.RawMessage `gorm:"column:database_bindings;type:jsonb;default:'[]'" json:"database_bindings"`
+	Dependencies     json.RawMessage `gorm:"column:dependencies;type:jsonb;default:'[]'" json:"dependencies"`
+	OpenAPISpec      []byte          `gorm:"column:openapi_spec;type:jsonb" json:"openapi_spec"`
+	SpecHash         *string         `gorm:"column:spec_hash" json:"spec_hash"`
+	ParsedSummary    []byte          `gorm:"column:parsed_summary;type:jsonb" json:"parsed_summary"`
+	Version          int             `gorm:"column:version" json:"version"`
+	CreatedAt        time.Time       `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt        time.Time       `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Service to its PostgreSQL table.
@@ -214,16 +223,28 @@ func (Service) TableName() string { return "tbl_services" }
 // BeforeCreate fills the UUID primary key app-side.
 func (Service) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
-// Database is a namespace component (tbl_databases).
+// Database is a namespace component (tbl_databases). Note: Version (INT) is
+// the optimistic-concurrency counter; EngineVersion is the user-facing
+// database engine version (e.g. "16").
 type Database struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
-	NamespaceID string    `gorm:"column:namespace_id" json:"namespace_id"`
-	Name        string    `gorm:"column:name" json:"name"`
-	Engine      string    `gorm:"column:engine" json:"engine"`
-	Profile     []byte    `gorm:"column:profile;type:jsonb" json:"profile"`
-	Version     int       `gorm:"column:version" json:"version"`
-	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
+	ID            string          `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID   string          `gorm:"column:namespace_id" json:"namespace_id"`
+	DatabaseID    *string         `gorm:"column:database_id" json:"database_id,omitempty"`
+	Name          string          `gorm:"column:name" json:"name"`
+	Engine        string          `gorm:"column:engine" json:"engine"`
+	Operator      string          `gorm:"column:operator" json:"operator"`
+	EngineVersion *string         `gorm:"column:engine_version" json:"engine_version,omitempty"`
+	Config        json.RawMessage `gorm:"column:config;type:jsonb" json:"config"`
+	InitScriptRef *string         `gorm:"column:init_script_ref" json:"init_script_ref,omitempty"`
+	DataSource    json.RawMessage `gorm:"column:data_source;type:jsonb" json:"data_source"`
+	RestorePolicy json.RawMessage `gorm:"column:restore_policy;type:jsonb" json:"restore_policy"`
+	Ephemeral     json.RawMessage `gorm:"column:ephemeral;type:jsonb" json:"ephemeral"`
+	Mock          json.RawMessage `gorm:"column:mock;type:jsonb" json:"mock"`
+	SecretRef     *string         `gorm:"column:secret_ref" json:"secret_ref,omitempty"`
+	Profile       []byte          `gorm:"column:profile;type:jsonb" json:"profile"`
+	Version       int             `gorm:"column:version" json:"version"`
+	CreatedAt     time.Time       `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt     time.Time       `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Database to its PostgreSQL table.
@@ -234,14 +255,41 @@ func (Database) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // Ingress is a namespace component (tbl_ingress).
 type Ingress struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
-	NamespaceID string    `gorm:"column:namespace_id" json:"namespace_id"`
-	Name        string    `gorm:"column:name" json:"name"`
-	Host        string    `gorm:"column:host" json:"host"`
-	Paths       []byte    `gorm:"column:paths;type:jsonb" json:"paths"`
-	Version     int       `gorm:"column:version" json:"version"`
-	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
+	ID          string          `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID string          `gorm:"column:namespace_id" json:"namespace_id"`
+	IngressID   *string         `gorm:"column:ingress_id" json:"ingress_id,omitempty"`
+	Name        string          `gorm:"column:name" json:"name"`
+	Class       string          `gorm:"column:class" json:"class"`
+	Hosts       json.RawMessage `gorm:"column:hosts;type:jsonb;default:'[]'" json:"hosts"`
+	Host        string          `gorm:"column:host" json:"host"`
+	Paths       []byte          `gorm:"column:paths;type:jsonb" json:"paths"`
+	Version     int             `gorm:"column:version" json:"version"`
+	CreatedAt   time.Time       `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time       `gorm:"column:updated_at" json:"updated_at"`
+}
+
+// Dataset is a non-prod data snapshot used for restores (tbl_datasets).
+type Dataset struct {
+	ID                string          `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID          string          `gorm:"column:tenant_id" json:"tenant_id"`
+	NamespaceID       *string         `gorm:"column:namespace_id" json:"namespace_id,omitempty"`
+	OwnerUserID       *string         `gorm:"column:owner_user_id" json:"owner_user_id,omitempty"`
+	Name              string          `gorm:"column:name" json:"name"`
+	SourceRef         string          `gorm:"column:source_ref" json:"source_ref"`
+	SizeBytes         int64           `gorm:"column:size_bytes" json:"size_bytes"`
+	PIIClassification string          `gorm:"column:pii_classification" json:"pii_classification"`
+	Status            string          `gorm:"column:status" json:"status"`
+	RestoreConfig     []byte          `gorm:"column:restore_config;type:jsonb" json:"restore_config"`
+	Checksum          json.RawMessage `gorm:"column:checksum;type:jsonb" json:"checksum"`
+	Engine            *string         `gorm:"column:engine" json:"engine,omitempty"`
+	EngineVersion     *string         `gorm:"column:engine_version" json:"engine_version,omitempty"`
+	Location          json.RawMessage `gorm:"column:location;type:jsonb" json:"location"`
+	RestoreFormat     *string         `gorm:"column:restore_format" json:"restore_format,omitempty"`
+	SchemaVersion     *string         `gorm:"column:schema_version" json:"schema_version,omitempty"`
+	RetentionUntil    *time.Time      `gorm:"column:retention_until" json:"retention_until,omitempty"`
+	Version           int             `gorm:"column:version" json:"version"`
+	CreatedAt         time.Time       `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt         time.Time       `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Ingress to its PostgreSQL table.
@@ -249,6 +297,12 @@ func (Ingress) TableName() string { return "tbl_ingress" }
 
 // BeforeCreate fills the UUID primary key app-side.
 func (Ingress) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
+// TableName maps Dataset to its PostgreSQL table.
+func (Dataset) TableName() string { return "tbl_datasets" }
+
+// BeforeCreate fills the UUID primary key app-side.
+func (Dataset) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // Dependency references a service/database/mock used by the env (tbl_dependencies).
 type Dependency struct {

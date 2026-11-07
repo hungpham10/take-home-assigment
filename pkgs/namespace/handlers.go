@@ -33,9 +33,9 @@ type Deps struct {
 func Mount(r chi.Router, d Deps) {
 	r.With(idempotency.RequireKey).
 		Post("/namespaces", idempotency.Replay("/api/loadtest/v1/namespaces", d.DB, d.create))
-	r.Get("/namespaces", d.list)
-	r.Get("/namespaces/{id}", d.get)
-	r.Patch("/namespaces/{id}", d.update)
+	r.Get("/namespaces", d.listNamespaces)
+	r.Get("/namespaces/{id}", d.getNamespace)
+	r.Patch("/namespaces/{id}", d.updateNamespace)
 	// Soft delete: DRAFT/INVALID/READY/DEGRADED → DELETING (reaper finishes it).
 	r.Delete("/namespaces/{id}", d.deleteNamespace)
 	r.Get("/namespaces/{id}/events", d.events)
@@ -56,10 +56,16 @@ func mountLifecycle(r chi.Router, d Deps) {
 
 // --- handlers --------------------------------------------------------------------
 
+// createRequest is the POST /namespaces body (docs/namespace-management-api.md
+// §create). Spec is optional — nil Spec keeps the legacy metadata-only create.
 type createRequest struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	TTL         *time.Time `json:"ttl_expires_at"`
+	Name        string         `json:"name"`
+	Slug        string         `json:"slug"`
+	Description string         `json:"description"`
+	Visibility  string         `json:"visibility"`
+	TTL         *time.Time     `json:"ttl_expires_at"`
+	Apply       bool           `json:"apply"`
+	Spec        *namespaceSpec `json:"spec"`
 }
 
 func (d Deps) create(w http.ResponseWriter, r *http.Request) {
@@ -69,32 +75,52 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteCodeError(w, "VALIDATION_FAILED", "name is required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	ns := store.Namespace{
-		TenantID:      p.TenantID,
-		OwnerUserID:   p.UserID,
-		Name:          req.Name,
-		Description:   req.Description,
-		Status:        "DRAFT",
-		Version:       1,
-		TTLExpiresAt:  req.TTL,
-		CleanupPolicy: store.JSONBytes(map[string]any{}),
+	if req.Visibility == "" {
+		req.Visibility = "tenant"
 	}
-	if err := d.DB.WithContext(ctx).Create(&ns).Error; err != nil {
-		if isUniqueViolation(err) {
-			httpx.WriteCodeError(w, "VALIDATION_FAILED", "namespace name already exists in tenant")
-			return
-		}
-		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "create namespace failed")
+	if req.Visibility != "tenant" && req.Visibility != "public" {
+		httpx.WriteCodeError(w, "VALIDATION_FAILED", "visibility must be tenant or public")
 		return
 	}
-	d.audit(ctx, r, p, "namespace.create", ns.ID)
-	writeWithETag(w, http.StatusCreated, ns)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Legacy shape: no spec → metadata-only namespace row.
+	if req.Spec == nil {
+		ns := store.Namespace{
+			TenantID:      p.TenantID,
+			OwnerUserID:   p.UserID,
+			Name:          req.Name,
+			Slug:          strPtr(req.Slug),
+			Visibility:    strPtr(req.Visibility),
+			Description:   req.Description,
+			Status:        "DRAFT",
+			Version:       1,
+			TTLExpiresAt:  req.TTL,
+			CleanupPolicy: store.JSONBytes(map[string]any{}),
+		}
+		if err := d.DB.WithContext(ctx).Create(&ns).Error; err != nil {
+			if isUniqueViolation(err) {
+				httpx.WriteCodeError(w, "VALIDATION_FAILED", "namespace name already exists in tenant")
+				return
+			}
+			httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "create namespace failed")
+			return
+		}
+		d.audit(ctx, r, p, "namespace.create", ns.ID)
+		writeWithETag(w, http.StatusCreated, ns)
+		return
+	}
+
+	// Pre-DB component validation (openapi parse, refs) → 422 before any row.
+	if err := validateSpecComponents(req.Spec); err != nil {
+		httpx.WriteCodeError(w, "VALIDATION_FAILED", err.Error())
+		return
+	}
+	d.runCreateSpec(ctx, w, r, p, req)
 }
 
-func (d Deps) list(w http.ResponseWriter, r *http.Request) {
+func (d Deps) listNamespaces(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -116,7 +142,7 @@ func (d Deps) list(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"namespaces": rows, "count": len(rows)})
 }
 
-func (d Deps) get(w http.ResponseWriter, r *http.Request) {
+func (d Deps) getNamespace(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
 	ns, ok := d.loadOwned(w, r, p)
 	if !ok {
@@ -129,7 +155,7 @@ type updateRequest struct {
 	Description *string `json:"description"`
 }
 
-func (d Deps) update(w http.ResponseWriter, r *http.Request) {
+func (d Deps) updateNamespace(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
 	ns, ok := d.loadOwned(w, r, p)
 	if !ok {
