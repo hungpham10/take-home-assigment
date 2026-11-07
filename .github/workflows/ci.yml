@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -17,8 +20,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
+          version: v2.15.0
           args: --timeout 5m
 
   test:
@@ -51,9 +55,20 @@ jobs:
             go build -o bin/mock-service ./cmds/mock-service
           fi
 
+  # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
+  # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
+  # sources/opsense-rs/.github/workflows/ci.yml (service container + health
+  # check + verify sau khi stack up).
   sql-migrations:
+    name: Database Schema Migrations
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('sql/*.sql') != '' }}
+    timeout-minutes: 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ltp
+      PGPASSWORD: ltp
+      PGDATABASE: ltp
     services:
       postgres:
         image: postgres:16-alpine
@@ -63,16 +78,39 @@ jobs:
           POSTGRES_DB: ltp
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U ltp"
+          --health-cmd "pg_isready -U ltp -d ltp"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Apply migrations in order
         run: |
-          for f in $(ls sql/[0-9]*_*.sql | sort); do
+          set -e
+          files=$(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort)
+          if [ -z "$files" ]; then
+            echo "No migrations found — skipping."
+            exit 0
+          fi
+          for f in $files; do
             echo "== applying $f"
-            PGPASSWORD=ltp psql -h localhost -U ltp -v ON_ERROR_STOP=1 -f "$f" || exit 1
+            psql -v ON_ERROR_STOP=1 -f "$f"
           done
           echo "All migrations applied cleanly."
+
+      - name: Verify schema
+        run: |
+          set -e
+          echo "=== Applied migrations ==="
+          psql -v ON_ERROR_STOP=1 -c "SELECT filename, applied_at FROM tbl_schema_migrations ORDER BY id;"
+          echo "=== Tables ==="
+          psql -v ON_ERROR_STOP=1 -c "\dt"
+          # Các bảng bắt buộc phải có sau toàn bộ migrations (cập nhật dần theo sql/)
+          REQUIRED_TABLES="tbl_tenants tbl_tenant_hosts tbl_tenant_auth_profiles tbl_users tbl_user_external_identities tbl_user_roles tbl_access_tokens tbl_audit_log"
+          for t in $REQUIRED_TABLES; do
+            psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM information_schema.tables WHERE table_name='$t'" | grep -q 1 \
+              || (echo "FAIL: missing table $t" && exit 1)
+          done
+          echo "All required tables present."
