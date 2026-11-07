@@ -16,6 +16,7 @@ import (
 	platform "github.com/hungpham/loadtest-platform"
 	"github.com/hungpham/loadtest-platform/pkgs/config"
 	"github.com/hungpham/loadtest-platform/pkgs/server"
+	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
@@ -53,7 +54,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{DB: db}),
+		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New()}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

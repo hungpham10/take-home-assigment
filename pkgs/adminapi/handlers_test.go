@@ -11,6 +11,7 @@ import (
 	"time"
 
 	platform "github.com/hungpham/loadtest-platform"
+	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
@@ -39,11 +40,12 @@ func testDeps(t *testing.T) Deps {
 	return Deps{DB: db, Now: func() time.Time { return time.Now() }}
 }
 
-// fixtures creates tenant + host(fx.local) + user; returns (tenantID, userID).
-func fixtures(t *testing.T, d Deps) (string, string) {
+// fixtures creates tenant + host(fx.local) + user; returns (tenantID, userID, slug).
+func fixtures(t *testing.T, d Deps) (string, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	tenant := store.Tenant{Name: "Fx", Slug: "fx-" + tokenHash(time.Now().String())[:16], Status: "ACTIVE"}
+	slug := "fx" + tokenHash(time.Now().String())[:12]
+	tenant := store.Tenant{Name: "Fx", Slug: slug, Status: "ACTIVE"}
 	if err := d.DB.WithContext(ctx).Create(&tenant).Error; err != nil {
 		t.Fatalf("fixtures tenant: %v", err)
 	}
@@ -58,12 +60,12 @@ func fixtures(t *testing.T, d Deps) (string, string) {
 		FirstOrCreate(&host).Error; err != nil {
 		t.Fatal(err)
 	}
-	return tenant.ID, user.ID
+	return tenant.ID, user.ID, slug
 }
 
 func TestResolveTenantID(t *testing.T) {
 	d := testDeps(t)
-	tenantID, _ := fixtures(t, d)
+	tenantID, _, _ := fixtures(t, d)
 	h := Router(d)
 
 	rec := httptest.NewRecorder()
@@ -81,18 +83,23 @@ func TestResolveTenantID(t *testing.T) {
 
 func TestAuthConfigShape(t *testing.T) {
 	d := testDeps(t)
-	tenantID, _ := fixtures(t, d)
+	tenantID, _, slug := fixtures(t, d)
 	cfg := store.AuthProfile{
 		TenantID: tenantID,
 		Name:     "default",
 		Issuer:   ptr("http://dex:5556/dex"),
 		ClientID: ptr("cid"),
 		JwksURI:  ptr("http://dex:5556/dex/jwks"),
-		Config:   jsonBytes(map[string]any{"oidc_client_secret": "s3cr3t", "session_secret": "sess"}),
+		Config:   jsonBytes(map[string]any{"jwt_mode": "jwks"}),
 	}
 	if err := d.DB.Create(&cfg).Error; err != nil {
 		t.Fatal(err)
 	}
+
+	// Secrets come from SOPS-decrypted env, NOT the DB (plans/15).
+	t.Setenv("LTP_TENANT_"+secrets.SanitizeSlug(slug)+"_OIDC_CLIENT_SECRET", "s3cr3t")
+	t.Setenv("LTP_TENANT_"+secrets.SanitizeSlug(slug)+"_SESSION_SECRET", "sess")
+	d.Secrets = secrets.New()
 
 	h := Router(d)
 	rec := httptest.NewRecorder()
@@ -116,7 +123,7 @@ func TestAuthConfigShape(t *testing.T) {
 
 func TestIntrospectLifecycle(t *testing.T) {
 	d := testDeps(t)
-	tenantID, userID := fixtures(t, d)
+	tenantID, userID, _ := fixtures(t, d)
 	h := Router(d)
 
 	// issue by ANOTHER user in same tenant without admin → 403 (self-only gate)
@@ -215,7 +222,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 
 func TestIntrospectExpired(t *testing.T) {
 	d := testDeps(t)
-	tenantID, userID := fixtures(t, d)
+	tenantID, userID, _ := fixtures(t, d)
 	h := Router(d)
 
 	rec := httptest.NewRecorder()
