@@ -283,3 +283,90 @@ func (NetworkPolicy) TableName() string { return "tbl_network_policies" }
 
 // BeforeCreate fills the UUID primary key app-side.
 func (NetworkPolicy) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
+// Script is the current-state k6 script row (tbl_scripts).
+type Script struct {
+	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
+	NamespaceID string    `gorm:"column:namespace_id"`
+	Name        string    `gorm:"column:name"`
+	ContentRef  string    `gorm:"column:content_ref"`
+	ContentHash string    `gorm:"column:content_hash"`
+	SizeBytes   int       `gorm:"column:size_bytes"`
+	Status      string    `gorm:"column:status"`
+	Version     int       `gorm:"column:version"`
+	CreatedAt   time.Time `gorm:"column:created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at"`
+}
+
+// TableName maps Script to its PostgreSQL table.
+func (Script) TableName() string { return "tbl_scripts" }
+
+// BeforeCreate fills the UUID primary key app-side.
+func (Script) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
+// ScriptValidation records one validation attempt (tbl_script_validations).
+type ScriptValidation struct {
+	ID          int64     `gorm:"column:id;primaryKey"`
+	ScriptID    string    `gorm:"column:script_id"`
+	Attempt     int       `gorm:"column:attempt"`
+	Status      string    `gorm:"column:status"`
+	Errors      []byte    `gorm:"column:errors;type:jsonb"`
+	ValidatedAt time.Time `gorm:"column:validated_at"`
+}
+
+// TableName maps ScriptValidation to its PostgreSQL table.
+func (ScriptValidation) TableName() string { return "tbl_script_validations" }
+
+// LoadTest is the current-state load test row (tbl_load_tests).
+type LoadTest struct {
+	ID          string     `gorm:"column:id;primaryKey;type:uuid"`
+	NamespaceID string     `gorm:"column:namespace_id"`
+	ScriptID    string     `gorm:"column:script_id"`
+	Name        string     `gorm:"column:name"`
+	CreatedBy   string     `gorm:"column:created_by"`
+	LoadConfig  []byte     `gorm:"column:load_config;type:jsonb"`
+	Targets     []byte     `gorm:"column:targets;type:jsonb"`
+	RunnerType  string     `gorm:"column:runner_type"`
+	RunnerRef   *string    `gorm:"column:runner_ref"`
+	Status      string     `gorm:"column:status"`
+	StartedAt   *time.Time `gorm:"column:started_at"`
+	FinishedAt  *time.Time `gorm:"column:finished_at"`
+	TimeoutAt   *time.Time `gorm:"column:timeout_at"`
+	Version     int        `gorm:"column:version"`
+	CreatedAt   time.Time  `gorm:"column:created_at"`
+	UpdatedAt   time.Time  `gorm:"column:updated_at"`
+}
+
+// TableName maps LoadTest to its PostgreSQL table.
+func (LoadTest) TableName() string { return "tbl_load_tests" }
+
+// BeforeCreate fills the UUID primary key app-side.
+func (LoadTest) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
+// LoadTestEvent is an append-only transition log (tbl_loadtest_events).
+type LoadTestEvent struct {
+	ID         int64     `gorm:"column:id;primaryKey"`
+	ObjectID   string    `gorm:"column:object_id"`
+	FromStatus *string   `gorm:"column:from_status"`
+	ToStatus   string    `gorm:"column:to_status"`
+	Reason     *string   `gorm:"column:reason"`
+	Actor      []byte    `gorm:"column:actor;type:jsonb"`
+	Metadata   []byte    `gorm:"column:metadata;type:jsonb"`
+	CreatedAt  time.Time `gorm:"column:created_at"`
+}
+
+// TableName maps LoadTestEvent to its PostgreSQL table.
+func (LoadTestEvent) TableName() string { return "tbl_loadtest_events" }
+
+// TestEvent is the runtime event stream (tbl_test_events).
+type TestEvent struct {
+	ID         int64     `gorm:"column:id;primaryKey"`
+	LoadTestID string    `gorm:"column:load_test_id"`
+	Seq        int64     `gorm:"column:seq"`
+	Type       string    `gorm:"column:type"`
+	Payload    []byte    `gorm:"column:payload;type:jsonb"`
+	CreatedAt  time.Time `gorm:"column:created_at"`
+}
+
+// TableName maps TestEvent to its PostgreSQL table.
+func (TestEvent) TableName() string { return "tbl_test_events" }
