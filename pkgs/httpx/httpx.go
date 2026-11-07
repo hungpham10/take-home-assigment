@@ -32,6 +32,7 @@ func WriteError(w http.ResponseWriter, status int, code, message string) {
 // Known platform error codes and their HTTP status mapping.
 var statusByCode = map[string]int{
 	"NAMESPACE_NOT_READY":        http.StatusConflict,            // 409
+	"CONFLICT":                   http.StatusConflict,            // 409
 	"SCRIPT_NOT_VALIDATED":       http.StatusConflict,            // 409
 	"INSUFFICIENT_MOCK_CAPACITY": http.StatusConflict,            // 409
 	"INVALID_TRANSITION":         http.StatusConflict,            // 409

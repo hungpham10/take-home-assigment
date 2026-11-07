@@ -24,3 +24,8 @@ Implement đầy đủ contract `docs/service-management-api.md`: service defini
 ## Verification
 - TDD qua testutil.NewServer; 422 matrix (spec sai, mock op không match, ref không tồn tại); 409 delete-referenced.
 - CodeGraph re-index: `mountServices` flow có validateMock/validateBindings.
+
+## Implementation status (PR B, 2026-11-07 — branch feat/23-service-api-full)
+- Đã xong: paths theo `service_id` (GET/PUT/PATCH/DELETE + `/openapi` + `/apis`), POST full definition (service_id server-generated, client gửi service_id → 422), `validateServiceDefinition` (mock ops ↔ parsed targets, database_bindings shape, dependencies refs) dùng chung với create-with-spec, DELETE 409 `CONFLICT` khi bị dependencies[]/ingress hosts tham chiếu, readiness components shape mới (services/databases/data_load/ingress/dependencies/network_policy/mocks), apply → 409 `INSUFFICIENT_MOCK_CAPACITY` khi mocks.required (mock runtime là apply-time gate — validate vẫn pass), `CONFLICT`→409 trong httpx.statusByCode.
+- Ghi chú: PUT không kèm openapi → xoá spec (full replacement); PATCH chỉ merge field được cung cấp; ingress hosts chấp nhận service_id hoặc name (backward-compat create-with-spec); tbl_load_tests.targets không check ở DELETE (đúng yêu cầu).
+- Tests: TestServiceAPIByServiceID, TestServiceMockValidation, TestServiceDeleteConflict, TestReadinessComponents + cập nhật lifecycle_test/harness_test. go vet + golangci-lint 0 issues; full suite -race xanh với Postgres.

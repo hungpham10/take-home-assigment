@@ -452,7 +452,7 @@ func TestAPICONC01OptimisticConcurrency(t *testing.T) {
 
 // --- API-VAL-01 --------------------------------------------------------------------
 
-// Broken service spec → namespace validate returns 422 with a checks array and
+// Broken service spec → namespace validate returns 422 with blocking_reasons and
 // marks the namespace INVALID (fail-closed readiness gates).
 func TestAPIVAL01BrokenSpecInvalid(t *testing.T) {
 	db := testutil.TestDB(t)
@@ -485,10 +485,10 @@ func TestAPIVAL01BrokenSpecInvalid(t *testing.T) {
 		t.Fatalf("validate with broken spec: %d, want 422 (%s)", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Checks []map[string]any `json:"checks"`
+		BlockingReasons []string `json:"blocking_reasons"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Checks) == 0 {
-		t.Errorf("response must carry a checks array: %s", rec.Body.String())
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.BlockingReasons) == 0 {
+		t.Errorf("response must carry blocking_reasons: %s", rec.Body.String())
 	}
 	var after store.Namespace
 	if err := db.First(&after, "id = ?", draft.ID).Error; err != nil {
