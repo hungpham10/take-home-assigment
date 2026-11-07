@@ -57,6 +57,22 @@ Append-only; index `(object_id, id)`; wrapper `fn_namespace_transition(...)`.
 - `tbl_dependencies`: `type` (service|database|mock) + `ref_id` + `config` — nguồn suy ra NetworkPolicy egress (ADR-002).
 - `tbl_network_policies`: `spec` đã resolve + `observed_generation`.
 
+## Migration 0004 — Script & Loadtest domain
+
+### tbl_scripts (current state)
+- `status`: `PENDING_VALIDATION, VALIDATING, VALIDATED, INVALID, VALIDATION_FAILED`; `INVALID/VALIDATION_FAILED` có thể revalidate (`→VALIDATING`).
+- `size_bytes CHECK ≤ 1MiB` (giới hạn ConfigMap); content lưu qua `content_ref` (ConfigMap/staging), chỉ lưu `content_hash`.
+- `tbl_script_validations`: kết quả mỗi lần validate (`(script_id, attempt)` unique, `errors JSONB` → 422).
+
+### tbl_load_tests (current state)
+- `status`: `QUEUED, PROVISIONING, RUNNING, COMPLETED, FAILED, STOPPING, STOPPED, TIMED_OUT, TIMEOUT_CLEANED, CLEANUP_FAILED` (`CANCELED` reserved).
+- `load_config JSONB`, `targets JSONB` (bắt buộc), `runner_type k8s|local`, `runner_ref`.
+- `timeout_at` + index partial cho reaper (TIMED_OUT); app gate: namespace `ready_for_loadtest` + script `VALIDATED` (409 nếu không).
+- `tbl_loadtest_events` append-only; `fn_loadtest_transition`.
+
+### tbl_test_events
+Stream runtime append-only, unique `(load_test_id, seq)`, `type log|metric|status`.
+
 ## State transitions & events (pattern chi tiết ở plans/04)
 - Các object có state machine (`tbl_namespaces`, `tbl_scripts`, `tbl_load_tests`, `tbl_datasets`) chuyển trạng thái **chỉ** qua `fn_<object>_transition(...)`:
   `SELECT ... FOR UPDATE` → check `tbl_status_transitions` → `UPDATE status, version+1` → `INSERT tbl_<object>_events` — tất cả trong 1 transaction; transition trái phép → exception (app map `409/422`).
