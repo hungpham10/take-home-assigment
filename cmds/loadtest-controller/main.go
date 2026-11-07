@@ -15,6 +15,7 @@ import (
 
 	platform "github.com/hungpham/loadtest-platform"
 	"github.com/hungpham/loadtest-platform/pkgs/config"
+	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
 	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/server"
@@ -60,9 +61,13 @@ func run() error {
 	// Re-wire the queue with the live DB handle (workers started before db).
 	*scriptQ = *script.NewQueue(ctx, db, cfg.ScriptsDir, 4, 256)
 
+	run := newRunner(cfg.RunnerMode, "")
+	// Reconciler: poll Runner status → advance DB state machine.
+	go loadtest.Reconciler{DB: db, Runner: run, Every: 2 * time.Second}.Start(ctx)
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ}),
+		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
