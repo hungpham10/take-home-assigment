@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          args: --timeout 5m
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run unit tests
+        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        run: |
+          go build -o bin/loadtest-controller ./cmds/loadtest-controller
+          if [ -d ./cmds/mock-service ]; then
+            go build -o bin/mock-service ./cmds/mock-service
+          fi
+
+  sql-migrations:
+    runs-on: ubuntu-latest
+    if: ${{ hashFiles('sql/*.sql') != '' }}
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ltp
+          POSTGRES_PASSWORD: ltp
+          POSTGRES_DB: ltp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply migrations in order
+        run: |
+          for f in $(ls sql/[0-9]*_*.sql | sort); do
+            echo "== applying $f"
+            PGPASSWORD=ltp psql -h localhost -U ltp -v ON_ERROR_STOP=1 -f "$f" || exit 1
+          done
+          echo "All migrations applied cleanly."
