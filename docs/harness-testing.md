@@ -134,3 +134,28 @@ Before merge/release of controller/runner/mock control-plane changes:
 - Proving global exactly-once across DB + K8s + S3 (use idempotency/convergence).
 - Full chaos platform (Litmus/Chaos Mesh) in MVP CI — add later; start with deterministic fakes + targeted integration faults.
 - Performance/load correctness under benchmark pressure (covered by k6 perf gate), except where perf causes integrity risk (timeouts, queue/backpressure). 
+
+## 8. Implementation status (2026-11-07, plan-16 scope)
+
+Implemented per `plans/16-harness-testing-integrity.md` "Implementation scope 2026-11-07":
+
+- **SQL harness** — `tests/sql/harness_test.sql`, runs in the CI `sql-migrations` job
+  (`for t in tests/sql/*_test.sql`): `DB-TXN-01..05`, `IDEM-CONFLICT-01`,
+  `RESERVATION-01`, `TERMINAL-01`, `APPEND-01` (skips under superuser/owner —
+  enforce with the app role).
+- **Go harness** — `tests/harness/harness_test.go` (package `harness_test`),
+  through the REAL server composition (`pkgs/testutil.NewServer`):
+  `API-AUTHZ-01..04`, `API-IDEM-01`, `API-CONC-01`, `API-VAL-01`,
+  `STATE-QUEUE-01`, `STATE-MEM-01`, `RUN-STOP`, `RUN-TIMEOUT`. Integration
+  tests skip without `TEST_DATABASE_DSN`, hard-fail when `CI` is set.
+- **K8s scaffold** — `tests/harness/k8s/egress_test.go`
+  (`//go:build harness_k8s`), skip-guarded, compiles under the tag only.
+- **Behavior fixes landed with the harness** (TDD):
+  - `pkgs/script` queue-full now returns **429 (QUOTA_EXCEEDED)** and leaves
+    the script status untouched (plan High-2; was mislabeled 422).
+  - `pkgs/adminapi` `issueToken`/`listTokens` resolve the **target tenant from
+    the target user's DB row**, not the caller's own `X-Tenant-Id` header —
+    closes the cross-tenant admin token-issue hole surfaced by API-AUTHZ-03.
+- **Invariant-break proof:** disabling the `RequireSelfOrAdmin` check in
+  `issueToken` flips `TestAPIAUTHZ03AdminCrossOwnerMutationAndAudit` and
+  `TestAPIAUTHZ03SelfOnlyTokenGate` to FAIL (verified 2026-11-07; check restored).
