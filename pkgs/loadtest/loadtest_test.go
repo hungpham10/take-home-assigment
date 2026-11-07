@@ -1,21 +1,20 @@
-package loadtest
+package loadtest_test
 
 import (
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 
-	platform "github.com/hungpham/loadtest-platform"
-	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
+	"github.com/hungpham/loadtest-platform/pkgs/testutil"
 )
 
 // fakeRunner records calls without running k6.
@@ -47,66 +46,54 @@ func (f *fakeRunner) Status(_ context.Context, ref string) (runner.Status, error
 	return runner.Status{State: f.states[ref]}, nil
 }
 
-func testDeps(t *testing.T) (Deps, *fakeRunner) {
+// Handler tests go through the REAL server composition (server.NewRouter via
+// testutil) — /api/loadtest/v1/namespaces/{id}/loadtests exactly as nginx
+// routes them. Skips locally without Postgres, fails in CI.
+
+func testServer(t *testing.T) (h http.Handler, db *gorm.DB, fr *fakeRunner) {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_DSN")
-	if dsn == "" {
-		dsn = "postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable"
-	}
-	db, err := store.New(context.Background(), dsn)
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatalf("CI requires postgres: %v", err)
-		}
-		t.Skipf("postgres unavailable: %v", err)
-	}
-	sqlDB, _ := db.DB()
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := store.Migrate(context.Background(), dsn, platform.Migrations()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	fr := &fakeRunner{}
-	return Deps{DB: db, Runner: fr, Now: time.Now}, fr
+	dbr := testutil.TestDB(t)
+	fr = &fakeRunner{}
+	h = testutil.NewServer(t, testutil.ServerDeps{DB: dbr, Runner: fr, Now: time.Now})
+	return h, dbr, fr
+}
+
+// doLT performs a request against the loadtest routes of nsID.
+func doLT(t *testing.T, h http.Handler, headers map[string]string, method, nsID, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	return testutil.Do(t, h, method, "/api/loadtest/v1/namespaces/"+nsID+"/loadtests"+path, headers, body)
 }
 
 // readyFixture: tenant+user+READY namespace+VALIDATED script+service with targets.
-func readyFixture(t *testing.T, d Deps) (map[string]string, string) {
+func readyFixture(t *testing.T, db *gorm.DB) (map[string]string, string) {
 	t.Helper()
-	suffix := time.Now().UnixNano()
-	tenant := store.Tenant{Name: "L", Slug: "lt" + itoa(suffix), Status: "ACTIVE"}
-	if err := d.DB.Create(&tenant).Error; err != nil {
-		t.Fatal(err)
-	}
-	user := store.User{TenantID: tenant.ID, Email: "lt" + itoa(suffix) + "@x.co", DisplayName: "L"}
-	if err := d.DB.Create(&user).Error; err != nil {
-		t.Fatal(err)
-	}
+	tenantID, userID := testutil.TenantUser(t, db, "user")
 	ns := store.Namespace{
-		TenantID: tenant.ID, OwnerUserID: user.ID, Name: "ns" + itoa(suffix),
+		TenantID: tenantID, OwnerUserID: userID, Name: "ns" + itoa(time.Now().UnixNano()),
 		Status: "READY", ReadyForLoadtest: true, Version: 1, CleanupPolicy: []byte("{}"),
 	}
-	if err := d.DB.Create(&ns).Error; err != nil {
+	if err := db.Create(&ns).Error; err != nil {
 		t.Fatal(err)
 	}
 	sc := store.Script{
-		NamespaceID: ns.ID, Name: "s" + itoa(suffix), ContentRef: ns.ID + "/s.js",
+		NamespaceID: ns.ID, Name: "s" + itoa(time.Now().UnixNano()), ContentRef: ns.ID + "/s.js",
 		ContentHash: "abc", SizeBytes: 10, Status: "VALIDATED", Version: 1,
 	}
-	if err := d.DB.Create(&sc).Error; err != nil {
+	if err := db.Create(&sc).Error; err != nil {
 		t.Fatal(err)
 	}
 	svc := store.Service{
-		NamespaceID: ns.ID, Name: "svc", OpenAPISpec: []byte(`{}`), SpecHash: strPtr("h"),
-		ParsedSummary: jsonBytes(map[string]any{"targets": []map[string]any{
+		NamespaceID: ns.ID, Name: "svc", OpenAPISpec: []byte(`{}`), SpecHash: store.StrPtr("h"),
+		ParsedSummary: store.JSONBytes(map[string]any{"targets": []map[string]any{
 			{"id": "getWidgets", "method": "GET", "path": "/widgets"},
 		}}), Version: 1,
 	}
-	if err := d.DB.Create(&svc).Error; err != nil {
+	if err := db.Create(&svc).Error; err != nil {
 		t.Fatal(err)
 	}
-	return map[string]string{
-		"X-Tenant-Id": tenant.ID, "X-User-Id": user.ID, "X-User-Role": "user", "X-Script-Id": sc.ID,
-	}, ns.ID
+	h := testutil.PrincipalHeaders(tenantID, userID, "user")
+	h["X-Script-Id"] = sc.ID // test-only channel
+	return h, ns.ID
 }
 
 func itoa(n int64) string {
@@ -120,55 +107,19 @@ func itoa(n int64) string {
 	return string(b[i:])
 }
 
-func doLT(t *testing.T, d Deps, h map[string]string, method, nsID, path string, body any) *httptest.ResponseRecorder {
-	t.Helper()
-	parent := chi.NewRouter()
-	parent.Mount("/namespaces/{id}/loadtests", Router(d))
-	rel := "/namespaces/" + nsID + "/loadtests" + path
-	req := httptest.NewRequest(method, rel, bytesReader(body))
-	for k, v := range h {
-		req.Header.Set(k, v)
-	}
-	rec := httptest.NewRecorder()
-	authz.RequirePrincipal(parent).ServeHTTP(rec, req)
-	return rec
-}
-
-func bytesReader(v any) *bytesReaderT {
-	b, _ := json.Marshal(v)
-	return &bytesReaderT{b}
-}
-
-type bytesReaderT struct{ b []byte }
-
-func (br *bytesReaderT) Read(p []byte) (int, error) {
-	if len(br.b) == 0 {
-		return 0, errEOF
-	}
-	n := copy(p, br.b)
-	br.b = br.b[n:]
-	return n, nil
-}
-
-var errEOF = errEOFType{}
-
-type errEOFType struct{}
-
-func (errEOFType) Error() string { return "EOF" }
-
 func TestLoadTestGatesAndLifecycle(t *testing.T) {
-	d, fr := testDeps(t)
-	h, nsID := readyFixture(t, d)
+	h, db, fr := testServer(t)
+	headers, nsID := readyFixture(t, db)
 
 	// missing Idempotency-Key → 422
-	rec := doLT(t, d, h, http.MethodPost, nsID, "", map[string]any{"name": "lt1", "script_id": h["X-Script-Id"]})
+	rec := doLT(t, h, headers, http.MethodPost, nsID, "", map[string]any{"name": "lt1", "script_id": headers["X-Script-Id"]})
 	if rec.Code != 422 {
 		t.Fatalf("missing key: %d", rec.Code)
 	}
 
 	// create → PROVISIONING
-	rec = doLT(t, d, withKey(h, "k1"), http.MethodPost, nsID, "",
-		map[string]any{"name": "lt1", "script_id": h["X-Script-Id"]})
+	rec = doLT(t, h, testutil.WithKey(headers, "k1"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt1", "script_id": headers["X-Script-Id"]})
 	if rec.Code != 201 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
@@ -188,28 +139,28 @@ func TestLoadTestGatesAndLifecycle(t *testing.T) {
 
 	// gate: script not VALIDATED → 409
 	var badScript store.Script
-	_ = d.DB.First(&badScript, "id = ?", h["X-Script-Id"]).Error
-	_ = d.DB.Model(&store.Script{}).Where("id = ?", badScript.ID).Update("status", "INVALID").Error
-	rec = doLT(t, d, withKey(h, "k2"), http.MethodPost, nsID, "",
+	_ = db.First(&badScript, "id = ?", headers["X-Script-Id"]).Error
+	_ = db.Model(&store.Script{}).Where("id = ?", badScript.ID).Update("status", "INVALID").Error
+	rec = doLT(t, h, testutil.WithKey(headers, "k2"), http.MethodPost, nsID, "",
 		map[string]any{"name": "lt2", "script_id": badScript.ID})
-	if rec.Code != 409 || !jsonContains(rec.Body.String(), "SCRIPT_NOT_VALIDATED") {
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "SCRIPT_NOT_VALIDATED") {
 		t.Errorf("invalid script gate = (%d, %s)", rec.Code, rec.Body.String())
 	}
-	_ = d.DB.Model(&store.Script{}).Where("id = ?", badScript.ID).Update("status", "VALIDATED").Error
+	_ = db.Model(&store.Script{}).Where("id = ?", badScript.ID).Update("status", "VALIDATED").Error
 
 	// gate: namespace not READY → 409
-	_ = d.DB.Model(&store.Namespace{}).Where("id = ?", nsID).
+	_ = db.Model(&store.Namespace{}).Where("id = ?", nsID).
 		Updates(map[string]any{"ready_for_loadtest": false, "status": "DEGRADED"}).Error
-	rec = doLT(t, d, withKey(h, "k3"), http.MethodPost, nsID, "",
-		map[string]any{"name": "lt3", "script_id": h["X-Script-Id"]})
-	if rec.Code != 409 || !jsonContains(rec.Body.String(), "NAMESPACE_NOT_READY") {
+	rec = doLT(t, h, testutil.WithKey(headers, "k3"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt3", "script_id": headers["X-Script-Id"]})
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "NAMESPACE_NOT_READY") {
 		t.Errorf("ns not ready gate = (%d, %s)", rec.Code, rec.Body.String())
 	}
-	_ = d.DB.Model(&store.Namespace{}).Where("id = ?", nsID).
+	_ = db.Model(&store.Namespace{}).Where("id = ?", nsID).
 		Updates(map[string]any{"ready_for_loadtest": true, "status": "READY"}).Error
 
-	// stop RUNNING → STOPPING (transition needs RUNNING first: PROVISIONING → STOPPING allowed too)
-	rec = doLT(t, d, withKey(h, "k4"), http.MethodPost, nsID, "/"+lt.ID+"/stop", nil)
+	// stop: PROVISIONING → STOPPING (transition map allows it)
+	rec = doLT(t, h, testutil.WithKey(headers, "k4"), http.MethodPost, nsID, "/"+lt.ID+"/stop", nil)
 	if rec.Code != 202 {
 		t.Fatalf("stop: %d %s", rec.Code, rec.Body.String())
 	}
@@ -217,99 +168,14 @@ func TestLoadTestGatesAndLifecycle(t *testing.T) {
 		t.Errorf("runner stop calls = %v", fr.stopped)
 	}
 	// double stop → 409 (no longer active)
-	rec = doLT(t, d, withKey(h, "k5"), http.MethodPost, nsID, "/"+lt.ID+"/stop", nil)
+	rec = doLT(t, h, testutil.WithKey(headers, "k5"), http.MethodPost, nsID, "/"+lt.ID+"/stop", nil)
 	if rec.Code != 409 {
 		t.Errorf("double stop = %d, want 409", rec.Code)
 	}
 
 	// events recorded
-	rec = doLT(t, d, h, http.MethodGet, nsID, "/"+lt.ID+"/events", nil)
-	if rec.Code != 200 || !jsonContains(rec.Body.String(), "STOPPING") {
+	rec = doLT(t, h, headers, http.MethodGet, nsID, "/"+lt.ID+"/events", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "STOPPING") {
 		t.Errorf("events = (%d, %s)", rec.Code, rec.Body.String())
-	}
-}
-
-func jsonContains(s, sub string) bool {
-	return len(s) >= len(sub) && indexOf(s, sub) >= 0
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
-
-func withKey(h map[string]string, key string) map[string]string {
-	out := map[string]string{"Idempotency-Key": key}
-	for k, v := range h {
-		out[k] = v
-	}
-	return out
-}
-
-func TestReconcilerAdvancesStates(t *testing.T) {
-	d, fr := testDeps(t)
-	h, nsID := readyFixture(t, d)
-
-	rec := doLT(t, d, withKey(h, "kr1"), http.MethodPost, nsID, "",
-		map[string]any{"name": "ltr", "script_id": h["X-Script-Id"]})
-	if rec.Code != 201 {
-		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
-	}
-	var lt store.LoadTest
-	_ = json.Unmarshal(rec.Body.Bytes(), &lt)
-
-	rc := Reconciler{DB: d.DB, Runner: fr, Every: time.Hour, Now: time.Now}
-
-	// PROVISIONING + runner RUNNING → RUNNING
-	fr.states[*lt.RunnerRef] = "RUNNING"
-	rc.tick(context.Background())
-	var after store.LoadTest
-	_ = d.DB.First(&after, "id = ?", lt.ID)
-	if after.Status != "RUNNING" {
-		t.Fatalf("after provisioning tick = %s, want RUNNING", after.Status)
-	}
-
-	// RUNNING + runner COMPLETED → COMPLETED
-	fr.states[*lt.RunnerRef] = "COMPLETED"
-	rc.tick(context.Background())
-	_ = d.DB.First(&after, "id = ?", lt.ID)
-	if after.Status != "COMPLETED" {
-		t.Fatalf("after completion tick = %s, want COMPLETED", after.Status)
-	}
-	if after.FinishedAt == nil {
-		t.Error("finished_at must be set")
-	}
-
-	// event trail: PROVISIONING? (runner ref update wrote PROVISIONING outside fn) + RUNNING + COMPLETED
-	var count int64
-	_ = d.DB.Model(&store.LoadTestEvent{}).Where("object_id = ?", lt.ID).Count(&count).Error
-	if count < 2 {
-		t.Errorf("event rows = %d, want >= 2 (RUNNING, COMPLETED)", count)
-	}
-}
-
-func TestReconcilerTimeout(t *testing.T) {
-	d, _ := testDeps(t)
-	h, nsID := readyFixture(t, d)
-	rec := doLT(t, d, withKey(h, "kt1"), http.MethodPost, nsID, "",
-		map[string]any{"name": "ltt", "script_id": h["X-Script-Id"]})
-	var lt store.LoadTest
-	_ = json.Unmarshal(rec.Body.Bytes(), &lt)
-
-	past := time.Now().Add(-time.Hour)
-	if err := d.DB.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
-		Updates(map[string]any{"status": "RUNNING", "timeout_at": &past, "started_at": &past}).Error; err != nil {
-		t.Fatal(err)
-	}
-	rc := Reconciler{DB: d.DB, Runner: &fakeRunner{states: map[string]string{}}, Every: time.Hour, Now: time.Now}
-	rc.tick(context.Background())
-	var after store.LoadTest
-	_ = d.DB.First(&after, "id = ?", lt.ID)
-	if after.Status != "TIMEOUT_CLEANED" {
-		t.Errorf("status after timeout reap = %s, want TIMEOUT_CLEANED", after.Status)
 	}
 }

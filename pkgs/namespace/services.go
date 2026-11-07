@@ -15,15 +15,14 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
-// ServicesRouter mounts /namespaces/{id}/services (OpenAPI component CRUD).
-func ServicesRouter(d Deps) http.Handler {
-	r := chi.NewRouter()
-	r.Post("/", d.createService)
-	r.Get("/", d.listServices)
-	r.Get("/{svc}", d.getService)
-	r.Put("/{svc}/spec", d.putSpec)
-	r.Delete("/{svc}", d.deleteService)
-	return r
+// mountServices registers /namespaces/{id}/services (OpenAPI component CRUD)
+// flat on r (composition-root pattern — no nested router).
+func mountServices(r chi.Router, d Deps) {
+	r.Post("/namespaces/{id}/services", d.createService)
+	r.Get("/namespaces/{id}/services", d.listServices)
+	r.Get("/namespaces/{id}/services/{svc}", d.getService)
+	r.Put("/namespaces/{id}/services/{svc}/spec", d.putSpec)
+	r.Delete("/namespaces/{id}/services/{svc}", d.deleteService)
 }
 
 func (d Deps) createService(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +42,7 @@ func (d Deps) createService(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	svc := store.Service{NamespaceID: ns.ID, Name: body.Name, ParsedSummary: jsonBytes(map[string]any{})}
+	svc := store.Service{NamespaceID: ns.ID, Name: body.Name, ParsedSummary: store.JSONBytes(map[string]any{})}
 	if len(body.Spec) > 0 {
 		summary, err := serviceopenapi.ValidateAndIndex(body.Spec)
 		if err != nil {
@@ -51,7 +50,7 @@ func (d Deps) createService(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		svc.OpenAPISpec = body.Spec
-		svc.SpecHash = strPtr(serviceopenapi.SpecHash(body.Spec))
+		svc.SpecHash = store.StrPtr(serviceopenapi.SpecHash(body.Spec))
 		svc.ParsedSummary = summary.Marshal()
 	}
 	if err := d.DB.WithContext(ctx).Create(&svc).Error; err != nil {

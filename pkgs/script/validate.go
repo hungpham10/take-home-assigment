@@ -74,55 +74,59 @@ func CurrentValidator() Validator {
 }
 
 // ValidateNow runs validation for one script: VALIDATING → VALIDATED|INVALID|
-// VALIDATION_FAILED, recording the attempt in tbl_script_validations.
+// VALIDATION_FAILED, recording the attempt in tbl_script_validations. The
+// caller (HTTP handler on enqueue-accept, or the nil-queue sync path) owns the
+// →VALIDATING transition; ValidateWith only records + transitions to terminal.
 func ValidateNow(ctx context.Context, db *gorm.DB, scriptsDir, scriptID string) error {
 	return ValidateWith(ctx, db, scriptsDir, scriptID, CurrentValidator())
 }
 
-// ValidateWith runs a specific validator and records the attempt + transitions.
+// ValidateWith runs a specific validator and records the attempt + the
+// terminal transition. The script must already be in VALIDATING.
 func ValidateWith(ctx context.Context, db *gorm.DB, scriptsDir, scriptID string, v Validator) error {
 	var sc store.Script
 	if err := db.First(&sc, "id = ?", scriptID).Error; err != nil {
 		return err
 	}
-	content, err := os.ReadFile(scriptsJoin(scriptsDir, sc.ContentRef))
-	if err != nil {
-		return err
+	content, readErr := os.ReadFile(scriptsJoin(scriptsDir, sc.ContentRef))
+	if readErr != nil {
+		// Staging file lost — never leave the script stuck: record the attempt
+		// and transition VALIDATING → VALIDATION_FAILED.
+		return recordTerminal(ctx, db, sc.ID, v.Name(), "VALIDATION_FAILED",
+			store.JSONBytes([]string{"staged script unreadable: " + readErr.Error()}))
 	}
 	errs, verr := v.Validate(ctx, content)
 
-	attempt := 1
-	var last store.ScriptValidation
-	if err := db.Where("script_id = ?", sc.ID).Order("attempt DESC").First(&last).Error; err == nil {
-		attempt = last.Attempt + 1
-	}
-
 	var to string
-	errsJSON := jsonBytes([]string{})
+	errsJSON := store.JSONBytes([]string{})
 	if verr != nil {
 		// Infrastructure error (k6 missing/crash) — distinct terminal status.
 		to = "VALIDATION_FAILED"
-		errsJSON = jsonBytes([]string{verr.Error()})
+		errsJSON = store.JSONBytes([]string{verr.Error()})
 	} else if len(errs) > 0 {
 		to = "INVALID"
-		errsJSON = jsonBytes(errs)
+		errsJSON = store.JSONBytes(errs)
 	} else {
 		to = "VALIDATED"
 	}
+	return recordTerminal(ctx, db, sc.ID, v.Name(), to, errsJSON)
+}
 
-	rec := store.ScriptValidation{ScriptID: sc.ID, Attempt: attempt, Status: to, Errors: errsJSON}
+// recordTerminal inserts the tbl_script_validations attempt and performs the
+// VALIDATING → to transition in one transaction.
+func recordTerminal(ctx context.Context, db *gorm.DB, scriptID, validator, to string, errsJSON []byte) error {
+	attempt := 1
+	var last store.ScriptValidation
+	if err := db.Where("script_id = ?", scriptID).Order("attempt DESC").First(&last).Error; err == nil {
+		attempt = last.Attempt + 1
+	}
+	rec := store.ScriptValidation{ScriptID: scriptID, Attempt: attempt, Status: to, Errors: errsJSON}
 	return db.Transaction(func(tx *gorm.DB) error {
-		// State machine requires PENDING/INVALID/VALIDATION_FAILED → VALIDATING
-		// → terminal; never jump straight to a terminal status.
-		if err := store.Transition(ctx, tx, "script", sc.ID, "VALIDATING",
-			store.ActorJSON("", "system", ""), v.Name()); err != nil {
-			return err
-		}
 		if err := tx.Create(&rec).Error; err != nil {
 			return err
 		}
-		return store.Transition(ctx, tx, "script", sc.ID, to,
-			store.ActorJSON("", "system", ""), v.Name())
+		return store.Transition(ctx, tx, "script", scriptID, to,
+			store.ActorJSON("", "system", ""), validator)
 	})
 }
 

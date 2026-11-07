@@ -2,6 +2,7 @@ package loadtest
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -18,14 +19,13 @@ func loadNamespace(w http.ResponseWriter, r *http.Request, p authz.Principal, db
 	id := chi.URLParam(r, "id")
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	var ns store.Namespace
-	q := db.WithContext(ctx).
-		Where("id = ? AND tenant_id = ? AND status <> ?", id, p.TenantID, "DELETED")
-	if !p.IsAdmin() {
-		q = q.Where("owner_user_id = ?", p.UserID)
-	}
-	if err := q.First(&ns).Error; err != nil || ns.ID == "" {
+	ns, err := store.LoadNamespaceScoped(ctx, db, p.TenantID, p.UserID, p.IsAdmin(), id)
+	if errors.Is(err, store.ErrNotFound) {
 		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "namespace not found")
+		return store.Namespace{}, false
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "namespace lookup failed")
 		return store.Namespace{}, false
 	}
 	return ns, true

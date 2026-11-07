@@ -21,6 +21,7 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/idempotency"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
@@ -35,15 +36,17 @@ type Deps struct {
 	Now        func() time.Time
 }
 
-// Router mounts script routes (under /namespaces/{id}).
-func Router(d Deps) http.Handler {
-	r := chi.NewRouter()
-	r.With(requireIdempotencyKey).Post("/", d.upload)
-	r.Get("/", d.list)
-	r.Get("/{scriptID}", d.get)
-	r.Post("/{scriptID}/validate", d.revalidate)
-	r.Get("/{scriptID}/validations", d.validations)
-	return r
+// Mount registers the script routes FLAT on the passed-in router (server
+// composition root applies authz.RequirePrincipal). All patterns carry the
+// /namespaces/{id}/scripts prefix.
+func Mount(r chi.Router, d Deps) {
+	prefix := "/namespaces/{id}/scripts"
+	r.With(idempotency.RequireKey).
+		Post(prefix, idempotency.Replay("/api/loadtest/v1/scripts", d.DB, d.upload))
+	r.Get(prefix, d.list)
+	r.Get(prefix+"/{scriptID}", d.get)
+	r.Post(prefix+"/{scriptID}/validate", d.revalidate)
+	r.Get(prefix+"/{scriptID}/validations", d.validations)
 }
 
 // --- handlers --------------------------------------------------------------------
@@ -95,8 +98,10 @@ func (d Deps) upload(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "script insert failed")
 		return
 	}
-	d.enqueue(ctx, sc.ID)
 	d.audit(ctx, r, p, "script.create", sc.ID)
+	if !d.startValidation(ctx, w, p, sc.ID, "upload") {
+		return
+	}
 	// Reload: sync validation (nil queue) may have already reached a terminal
 	// status; respond with the current DB state, not the stale struct.
 	_ = d.DB.WithContext(ctx).First(&sc, "id = ?", sc.ID).Error
@@ -111,10 +116,6 @@ func (d Deps) stage(namespaceID, name, content string) (string, error) {
 		return "", err
 	}
 	return ref, os.WriteFile(full, []byte(content), 0o600) //nolint:gosec // content is user data staged for k6
-}
-
-func (d Deps) readStaged(ref string) ([]byte, error) {
-	return ReadStaged(d.ScriptsDir, ref)
 }
 
 // ReadStaged reads staged content; ref must stay inside scriptsDir
@@ -183,12 +184,9 @@ func (d Deps) revalidate(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
-	if err := store.Transition(ctx, d.DB, "script", sc.ID, "VALIDATING", actor, "revalidate requested"); err != nil {
-		httpx.WriteCodeError(w, "INVALID_TRANSITION", "transition rejected by state machine")
+	if !d.startValidation(ctx, w, p, sc.ID, "revalidate requested") {
 		return
 	}
-	d.enqueue(ctx, sc.ID)
 	d.audit(ctx, r, p, "script.revalidate", sc.ID)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"id": sc.ID, "status": "VALIDATING"})
 }
@@ -209,52 +207,56 @@ func (d Deps) validations(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---------------------------------------------------------------------
 
+// loadNamespace fetches the namespace from the URL param, enforcing tenant
+// isolation + owner/admin via the shared store lookup (404 — no existence leak).
 func loadNamespace(w http.ResponseWriter, r *http.Request, p authz.Principal, db *gorm.DB) (store.Namespace, bool) {
-	id := chi.URLParam(r, "id")
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	var ns store.Namespace
-	q := db.WithContext(ctx).
-		Where("id = ? AND tenant_id = ? AND status <> ?", id, p.TenantID, "DELETED")
-	if !p.IsAdmin() {
-		q = q.Where("owner_user_id = ?", p.UserID)
-	}
-	if err := q.First(&ns).Error; err != nil || ns.ID == "" {
+	ns, err := store.LoadNamespaceScoped(ctx, db, p.TenantID, p.UserID, p.IsAdmin(), chi.URLParam(r, "id"))
+	if errors.Is(err, store.ErrNotFound) {
 		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "namespace not found")
+		return store.Namespace{}, false
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "namespace lookup failed")
 		return store.Namespace{}, false
 	}
 	return ns, true
 }
 
-// enqueue submits async validation; with a nil queue (unit tests) it runs
-// synchronously so tests observe the final status deterministically.
-func (d Deps) enqueue(ctx context.Context, scriptID string) {
+// startValidation moves a script into validation. With a queue: Submit FIRST —
+// when the queue is full the script is NOT transitioned (stays re-triggerable)
+// and the caller gets 429; on accept the handler performs →VALIDATING (the
+// worker only records + transitions to terminal). With a nil queue (unit
+// tests) validation runs synchronously so tests observe the final status.
+// Returns false when the response has already been written.
+func (d Deps) startValidation(ctx context.Context, w http.ResponseWriter, p authz.Principal, scriptID, reason string) bool {
+	if d.Queue != nil {
+		if !d.Queue.Submit(scriptID) {
+			httpx.WriteCodeError(w, "VALIDATION_FAILED", "validation queue full, retry")
+			return false
+		}
+	}
+	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
+	if err := store.Transition(ctx, d.DB, "script", scriptID, "VALIDATING", actor, reason); err != nil {
+		httpx.WriteCodeError(w, "INVALID_TRANSITION", "transition rejected by state machine")
+		return false
+	}
 	if d.Queue == nil {
 		_ = ValidateNow(ctx, d.DB, d.ScriptsDir, scriptID)
-		return
 	}
-	d.Queue.Submit(scriptID)
+	return true
 }
 
 func (d Deps) audit(ctx context.Context, _ *http.Request, p authz.Principal, action, objectID string) {
 	_ = d.DB.WithContext(ctx).Create(&store.AuditLog{
-		TenantID:   strPtr(p.TenantID),
-		Actor:      jsonBytes(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role}),
+		TenantID:   store.StrPtr(p.TenantID),
+		Actor:      []byte(store.ActorJSON(p.TenantID, p.UserID, p.Role)),
 		Action:     action,
 		ObjectType: "script",
-		ObjectID:   strPtr(objectID),
-		Details:    jsonBytes(map[string]any{}),
+		ObjectID:   store.StrPtr(objectID),
+		Details:    store.JSONBytes(map[string]any{}),
 	}).Error
-}
-
-func requireIdempotencyKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Idempotency-Key") == "" {
-			httpx.WriteCodeError(w, "VALIDATION_FAILED", "Idempotency-Key header is required")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func isUniqueViolation(err error) bool {
@@ -275,11 +277,4 @@ func sanitize(name string) string {
 		name = "script"
 	}
 	return name
-}
-
-func strPtr(s string) *string { return &s }
-
-func jsonBytes(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }

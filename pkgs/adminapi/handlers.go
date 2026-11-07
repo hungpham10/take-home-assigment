@@ -36,31 +36,23 @@ type Deps struct {
 	MasterKey []byte           // AES-256-GCM key for token encryption at rest
 }
 
-// Router mounts the nginx-internal endpoints (trusted channel: unix socket /
-// private upstream — no principal middleware; nginx calls carry no user
-// identity) plus the operator endpoints behind RequirePrincipal +
-// RequireSelfOrAdmin (pattern from opsense-rs require_self_or_admin: the app
-// must gate "self-only" itself, never trust the header blindly).
-func Router(d Deps) http.Handler {
-	r := chi.NewRouter()
-
-	// nginx-internal (security-sensitive, trusted channel only)
+// MountInternal registers the nginx-internal endpoints (trusted channel: unix
+// socket / private upstream — no principal middleware; nginx calls carry no
+// user identity).
+func MountInternal(r chi.Router, d Deps) {
 	r.Get("/tenant/{host}/id", d.resolveTenantID)
 	r.Get("/tenant/{host}/auth-config", d.authConfig)
 	r.Post("/token/introspect", d.introspect)
+}
 
-	// operator endpoints — fail-closed principal + self-or-admin gate
-	r.Route("/users", func(r chi.Router) {
-		r.Use(authz.RequirePrincipal)
-		r.Post("/{userID}/tokens", d.issueToken)
-		r.Get("/{userID}/tokens", d.listTokens)
-	})
-	r.Route("/tokens", func(r chi.Router) {
-		r.Use(authz.RequirePrincipal)
-		r.Post("/{tokenID}/revoke", d.revokeToken)
-		r.Post("/{tokenID}/reveal", d.revealToken)
-	})
-	return r
+// MountOperator registers the operator endpoints (self-or-admin gate is
+// enforced per-handler via authz.RequireSelfOrAdmin; the FAIL-CLOSED
+// principal middleware is applied by the composition root, not here).
+func MountOperator(r chi.Router, d Deps) {
+	r.Post("/users/{userID}/tokens", d.issueToken)
+	r.Get("/users/{userID}/tokens", d.listTokens)
+	r.Post("/tokens/{tokenID}/revoke", d.revokeToken)
+	r.Post("/tokens/{tokenID}/reveal", d.revealToken)
 }
 
 // --- tenant id ---------------------------------------------------------------
@@ -418,11 +410,11 @@ func (d Deps) now() time.Time {
 func (d Deps) audit(ctx context.Context, r *http.Request, action, objectType, objectID string) {
 	tenantID := r.Header.Get("X-Tenant-Id")
 	entry := store.AuditLog{
-		Actor:      jsonBytes(map[string]string{"user_id": r.Header.Get("X-User-Id")}),
+		Actor:      store.JSONBytes(map[string]string{"user_id": r.Header.Get("X-User-Id")}),
 		Action:     action,
 		ObjectType: objectType,
 		ObjectID:   &objectID,
-		Details:    jsonBytes(map[string]any{}),
+		Details:    store.JSONBytes(map[string]any{}),
 	}
 	if tenantID != "" {
 		entry.TenantID = &tenantID

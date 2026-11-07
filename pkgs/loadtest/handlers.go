@@ -16,6 +16,7 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/idempotency"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
@@ -27,15 +28,18 @@ type Deps struct {
 	Now    func() time.Time
 }
 
-// Router mounts loadtest routes (under /namespaces/{id}).
-func Router(d Deps) http.Handler {
-	r := chi.NewRouter()
-	r.With(requireIdempotencyKey).Post("/", d.create)
-	r.Get("/", d.list)
-	r.Get("/{ltID}", d.get)
-	r.With(requireIdempotencyKey).Post("/{ltID}/stop", d.stop)
-	r.Get("/{ltID}/events", d.events)
-	return r
+// Mount registers the loadtest routes FLAT on the passed-in router (server
+// composition root applies authz.RequirePrincipal). All patterns carry the
+// /namespaces/{id}/loadtests prefix.
+func Mount(r chi.Router, d Deps) {
+	prefix := "/namespaces/{id}/loadtests"
+	r.With(idempotency.RequireKey).
+		Post(prefix, idempotency.Replay("/api/loadtest/v1/loadtests", d.DB, d.create))
+	r.Get(prefix, d.list)
+	r.Get(prefix+"/{ltID}", d.get)
+	r.With(idempotency.RequireKey).
+		Post(prefix+"/{ltID}/stop", idempotency.Replay("/api/loadtest/v1/loadtests/stop", d.DB, d.stop))
+	r.Get(prefix+"/{ltID}/events", d.events)
 }
 
 // --- creation --------------------------------------------------------------------
@@ -92,8 +96,8 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		ScriptID:    sc.ID,
 		Name:        req.Name,
 		CreatedBy:   p.UserID,
-		LoadConfig:  jsonBytes(cfg),
-		Targets:     jsonBytes(targets),
+		LoadConfig:  store.JSONBytes(cfg),
+		Targets:     store.JSONBytes(targets),
 		RunnerType:  runnerMode(d.Runner),
 		Status:      "QUEUED",
 		Version:     1,
@@ -109,30 +113,57 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	d.audit(ctx, r, p, "loadtest.create", lt.ID)
 
 	// Provision synchronously; the reconciler advances PROVISIONING→RUNNING.
-	ref, err := d.Runner.Provision(ctx, runner.Spec{
+	spec := runner.Spec{
 		ID: lt.ID, Script: scriptContent(ctx, d.DB, sc), VUs: intOf(cfg["vusers"], 1),
 		Duration: strOf(cfg["duration"], "1m"), TargetsJSON: lt.Targets,
-	})
+	}
+	ref, err := d.Runner.Provision(ctx, spec)
 	if err != nil {
 		_ = store.Transition(ctx, d.DB, "loadtest", lt.ID, "FAILED",
 			store.ActorJSON(p.TenantID, p.UserID, p.Role), "provision failed: "+err.Error())
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "provision failed")
 		return
 	}
-	if err := d.DB.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
-		Updates(map[string]any{"runner_ref": ref, "status": "PROVISIONING", "version": lt.Version + 1}).Error; err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "runner ref update failed")
-		return
-	}
-	lt.RunnerRef = &ref
-	lt.Status = "PROVISIONING"
+
 	// timeout_at drives the reaper (load_config.timeout_minutes, default 15).
+	var timeoutAt *time.Time
 	if mins := intOf(cfg["timeout_minutes"], 15); mins > 0 {
 		at := d.now().Add(time.Duration(mins) * time.Minute)
-		lt.TimeoutAt = &at
-		_ = d.DB.Model(&store.LoadTest{}).Where("id = ?", lt.ID).Update("timeout_at", &at).Error
+		timeoutAt = &at
 	}
-	httpx.WriteJSON(w, http.StatusCreated, lt)
+
+	// QUEUED→PROVISIONING goes through the state machine; runner_ref and
+	// timeout_at are ancillary columns written in the SAME transaction. Never
+	// UPDATE status/version directly — the transition fn owns them.
+	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
+	if err := d.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := store.Transition(ctx, tx, "loadtest", lt.ID, "PROVISIONING", actor, "provisioned"); err != nil {
+			return err
+		}
+		return tx.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
+			Updates(map[string]any{"runner_ref": ref, "timeout_at": timeoutAt}).Error
+	}); err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "provisioning transition failed")
+		return
+	}
+
+	// Launch the run only after the transaction committed. Start failure is
+	// terminal FAILED (otherwise the reconciler polls a dead ref forever).
+	if err := d.Runner.Start(ctx, ref, spec); err != nil {
+		_ = store.Transition(ctx, d.DB, "loadtest", lt.ID, "FAILED",
+			actor, "runner start failed: "+err.Error())
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "runner start failed")
+		return
+	}
+
+	// Re-read: the response reflects the committed row (PROVISIONING, ref,
+	// timeout_at) rather than the pre-transaction struct.
+	var out store.LoadTest
+	if err := d.DB.WithContext(ctx).First(&out, "id = ?", lt.ID).Error; err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "load test re-read failed")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, out)
 }
 
 // collectTargets aggregates targets[] from all services' parsed summaries.
@@ -254,23 +285,13 @@ func (d Deps) now() time.Time {
 
 func (d Deps) audit(ctx context.Context, _ *http.Request, p authz.Principal, action, objectID string) {
 	_ = d.DB.WithContext(ctx).Create(&store.AuditLog{
-		TenantID:   strPtr(p.TenantID),
-		Actor:      jsonBytes(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role}),
+		TenantID:   store.StrPtr(p.TenantID),
+		Actor:      []byte(store.ActorJSON(p.TenantID, p.UserID, p.Role)),
 		Action:     action,
 		ObjectType: "loadtest",
-		ObjectID:   strPtr(objectID),
-		Details:    jsonBytes(map[string]any{}),
+		ObjectID:   store.StrPtr(objectID),
+		Details:    store.JSONBytes(map[string]any{}),
 	}).Error
-}
-
-func requireIdempotencyKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Idempotency-Key") == "" {
-			httpx.WriteCodeError(w, "VALIDATION_FAILED", "Idempotency-Key header is required")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func isUniqueViolation(err error) bool {
@@ -308,11 +329,4 @@ func strOf(v any, def string) string {
 		return s
 	}
 	return def
-}
-
-func strPtr(s string) *string { return &s }
-
-func jsonBytes(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }

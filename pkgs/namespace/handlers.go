@@ -5,13 +5,11 @@ package namespace
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,6 +17,7 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/idempotency"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
@@ -28,25 +27,31 @@ type Deps struct {
 	Now func() time.Time
 }
 
-// Router mounts namespace routes (under /api/loadtest/v1).
-func Router(d Deps) http.Handler {
-	r := chi.NewRouter()
-	r.With(requireIdempotencyKey).
-		Post("/", d.idempotencyReplay("/api/loadtest/v1/namespaces", d.create))
-	r.Get("/", d.list)
-	r.Get("/{id}", d.get)
-	r.Patch("/{id}", d.update)
+// Mount registers the namespace routes (namespace CRUD, services, lifecycle)
+// FLAT on the passed-in router (server composition root applies
+// authz.RequirePrincipal). All patterns carry the /namespaces prefix.
+func Mount(r chi.Router, d Deps) {
+	r.With(idempotency.RequireKey).
+		Post("/namespaces", idempotency.Replay("/api/loadtest/v1/namespaces", d.DB, d.create))
+	r.Get("/namespaces", d.list)
+	r.Get("/namespaces/{id}", d.get)
+	r.Patch("/namespaces/{id}", d.update)
 	// Soft delete: DRAFT/INVALID/READY/DEGRADED → DELETING (reaper finishes it).
-	r.Delete("/{id}", d.deleteNamespace)
-	r.Get("/{id}/events", d.events)
-	// NOTE: no Mount("/{id}", ...) — a chi subtree at the dynamic param path
-	// swallows the exact GET /{id} route.
-	r.Mount("/{id}/services", ServicesRouter(d))
-	r.Post("/{id}/validate", d.validateNamespace)
-	r.With(requireIdempotencyKey).
-		Post("/{id}/apply", d.idempotencyReplay("/api/loadtest/v1/apply", d.applyNamespace))
-	r.Get("/{id}/readiness", d.readiness)
-	return r
+	r.Delete("/namespaces/{id}", d.deleteNamespace)
+	r.Get("/namespaces/{id}/events", d.events)
+	// NOTE: all routes are registered flat on r — a chi subtree at the dynamic
+	// param path Mount("/{id}/...") swallows the exact GET /{id} route.
+	mountServices(r, d)
+	mountLifecycle(r, d)
+}
+
+// mountLifecycle registers validate / apply / readiness flat on r.
+func mountLifecycle(r chi.Router, d Deps) {
+	prefix := "/namespaces/{id}"
+	r.Post(prefix+"/validate", d.validateNamespace)
+	r.With(idempotency.RequireKey).
+		Post(prefix+"/apply", idempotency.Replay("/api/loadtest/v1/apply", d.DB, d.applyNamespace))
+	r.Get(prefix+"/readiness", d.readiness)
 }
 
 // --- handlers --------------------------------------------------------------------
@@ -75,7 +80,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		Status:        "DRAFT",
 		Version:       1,
 		TTLExpiresAt:  req.TTL,
-		CleanupPolicy: jsonBytes(map[string]any{}),
+		CleanupPolicy: store.JSONBytes(map[string]any{}),
 	}
 	if err := d.DB.WithContext(ctx).Create(&ns).Error; err != nil {
 		if isUniqueViolation(err) {
@@ -201,14 +206,8 @@ func (d Deps) loadOwned(w http.ResponseWriter, r *http.Request, p authz.Principa
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	var ns store.Namespace
-	q := d.DB.WithContext(ctx).
-		Where("id = ? AND tenant_id = ? AND status <> ?", id, p.TenantID, "DELETED")
-	if !p.IsAdmin() {
-		q = q.Where("owner_user_id = ?", p.UserID)
-	}
-	err := q.First(&ns).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && ns.ID == "") {
+	ns, err := store.LoadNamespaceScoped(ctx, d.DB, p.TenantID, p.UserID, p.IsAdmin(), id)
+	if errors.Is(err, store.ErrNotFound) {
 		httpx.WriteCodeError(w, "OBJECT_NOT_FOUND", "namespace not found")
 		return store.Namespace{}, false
 	}
@@ -245,87 +244,18 @@ func checkIfMatch(w http.ResponseWriter, r *http.Request, version int) bool {
 	return true
 }
 
-func trimEtag(s string) string { return trimEtagNormal(s) }
-
-// --- idempotency --------------------------------------------------------------------
-
-// requireIdempotencyKey enforces the mandatory Idempotency-Key header on
-// POST /namespaces, /apply, /loadtests, /loadtests/{id}/stop (docs contract).
-func requireIdempotencyKey(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Idempotency-Key") == "" {
-			httpx.WriteCodeError(w, "VALIDATION_FAILED", "Idempotency-Key header is required")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// idempotencyReplay replays a stored response for (tenant, endpoint, key)
-// with identical request hash; otherwise calls next and stores the response.
-func (d Deps) idempotencyReplay(endpoint string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		p := authz.PrincipalOf(r)
-		key := r.Header.Get("Idempotency-Key")
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			httpx.WriteCodeError(w, "BAD_REQUEST", "unreadable request body")
-			return
-		}
-		sum := sha256.Sum256(body)
-		reqHash := hex.EncodeToString(sum[:])
-
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-
-		var stored store.IdempotencyKey
-		err = d.DB.WithContext(ctx).
-			Where("tenant_id = ? AND endpoint = ? AND key = ?", p.TenantID, endpoint, key).
-			First(&stored).Error
-		switch {
-		case err == nil && stored.RequestHash != reqHash:
-			httpx.WriteCodeError(w, "VALIDATION_FAILED",
-				"Idempotency-Key reused with different request payload")
-			return
-		case err == nil && stored.ResponseStatus != nil && stored.ResponseBody != nil:
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Idempotency-Replayed", "true")
-			w.WriteHeader(*stored.ResponseStatus)
-			_, _ = w.Write([]byte(*stored.ResponseBody))
-			return
-		case err == nil:
-			// In-flight duplicate: first request still processing.
-			httpx.WriteCodeError(w, "INVALID_TRANSITION", "request with this Idempotency-Key is in progress")
-			return
-		}
-
-		rec := &captureWriter{ResponseWriter: w}
-		r.Body = io.NopCloser(bytesReader(body))
-		next(rec, r)
-
-		if rec.status >= 200 && rec.status < 500 {
-			_ = d.DB.WithContext(ctx).Create(&store.IdempotencyKey{
-				TenantID:       p.TenantID,
-				Endpoint:       endpoint,
-				Key:            key,
-				RequestHash:    reqHash,
-				ResponseStatus: &rec.status,
-				ResponseBody:   strPtr(rec.bodyString()),
-			}).Error
-		}
-	}
-}
+func trimEtag(s string) string { return strings.TrimPrefix(s, "W/") }
 
 // --- helpers ---------------------------------------------------------------------
 
 func (d Deps) audit(ctx context.Context, _ *http.Request, p authz.Principal, action, objectID string) {
 	_ = d.DB.WithContext(ctx).Create(&store.AuditLog{
-		TenantID:   strPtr(p.TenantID),
-		Actor:      jsonBytes(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role}),
+		TenantID:   store.StrPtr(p.TenantID),
+		Actor:      []byte(store.ActorJSON(p.TenantID, p.UserID, p.Role)),
 		Action:     action,
 		ObjectType: "namespace",
-		ObjectID:   strPtr(objectID),
-		Details:    jsonBytes(map[string]any{}),
+		ObjectID:   store.StrPtr(objectID),
+		Details:    store.JSONBytes(map[string]any{}),
 	}).Error
 }
 

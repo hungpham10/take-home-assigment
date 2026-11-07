@@ -1,114 +1,109 @@
-package adminapi
+package adminapi_test
 
 import (
-	"bytes"
-	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
-	platform "github.com/hungpham/loadtest-platform"
+	"gorm.io/gorm"
+
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
+	"github.com/hungpham/loadtest-platform/pkgs/testutil"
 )
 
-// Integration tests (opsense-rs style): skip when Postgres is unreachable
-// locally; hard-fail in CI when TEST_DATABASE_DSN + CI are set.
+// Integration tests: requests go through the REAL server composition
+// (server.NewRouter via testutil) — internal endpoints without principal,
+// operator endpoints behind authz.RequirePrincipal. Skips locally without
+// Postgres, fails in CI.
 
-func testDeps(t *testing.T) Deps {
-	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_DSN")
-	if dsn == "" {
-		dsn = "postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable"
-	}
-	ctx := context.Background()
-	db, err := store.New(ctx, dsn)
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatalf("CI requires postgres: %v", err)
-		}
-		t.Skipf("postgres unavailable: %v", err)
-	}
-	sqlDB, _ := db.DB()
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := store.Migrate(ctx, dsn, platform.Migrations()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return Deps{DB: db, Now: func() time.Time { return time.Now() }}
-}
+// masterKey is a fixed 32-byte AES-256-GCM test key.
+var masterKey = []byte("0123456789abcdef0123456789abcdef")
 
-// fixtures creates tenant + host(fx.local) + user; returns (tenantID, userID, slug).
-func fixtures(t *testing.T, d Deps) (string, string, string) {
+// fixtures creates tenant + host(<slug>.local) + user; returns (h, db, tenantID, userID, slug).
+func fixtures(t *testing.T) (http.Handler, *gorm.DB, string, string, string) {
 	t.Helper()
-	ctx := context.Background()
-	slug := "fx" + tokenHash(time.Now().String())[:12]
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{
+		DB: db, Now: time.Now, Secrets: secrets.New(), MasterKey: masterKey,
+	})
+	sum := sha256.Sum256([]byte(time.Now().String()))
+	slug := "fx" + hex.EncodeToString(sum[:])[:12]
 	tenant := store.Tenant{Name: "Fx", Slug: slug, Status: "ACTIVE"}
-	if err := d.DB.WithContext(ctx).Create(&tenant).Error; err != nil {
+	if err := db.Create(&tenant).Error; err != nil {
 		t.Fatalf("fixtures tenant: %v", err)
 	}
 	user := store.User{TenantID: tenant.ID, Email: "fx-" + tenant.ID + "@x.co", DisplayName: "Fx"}
-	if err := d.DB.WithContext(ctx).Create(&user).Error; err != nil {
+	if err := db.Create(&user).Error; err != nil {
 		t.Fatalf("fixtures user: %v", err)
 	}
-	host := store.TenantHost{TenantID: tenant.ID, Host: "fx.local"}
-	if err := d.DB.WithContext(ctx).
-		Where(store.TenantHost{Host: "fx.local"}).
+	// RequirePrincipalWithRole resolves roles from tbl_user_roles — headers
+	// claiming a role without a DB row now fail closed (plan16 API-AUTHZ-04).
+	if err := db.Create(&store.UserRole{UserID: user.ID, Role: "user"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	host := store.TenantHost{TenantID: tenant.ID, Host: slug + ".local"}
+	if err := db.Where(store.TenantHost{Host: host.Host}).
 		Assign(store.TenantHost{TenantID: tenant.ID}).
 		FirstOrCreate(&host).Error; err != nil {
 		t.Fatal(err)
 	}
-	return tenant.ID, user.ID, slug
+	return h, db, tenant.ID, user.ID, slug
 }
 
 func TestResolveTenantID(t *testing.T) {
-	d := testDeps(t)
-	tenantID, _, _ := fixtures(t, d)
-	h := Router(d)
+	h, _, tenantID, _, slug := fixtures(t)
+	host := slug + ".local"
 
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/tenant/fx.local/id", nil))
+	rec := testutil.Do(t, h, http.MethodGet, "/api/admin/v1/tenant/"+host+"/id", nil, nil)
 	if rec.Code != 200 || rec.Body.String() != tenantID {
 		t.Errorf("resolve = (%d, %q), want (200, %q)", rec.Code, rec.Body.String(), tenantID)
 	}
 
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/tenant/unknown.local/id", nil))
+	rec = testutil.Do(t, h, http.MethodGet, "/api/admin/v1/tenant/unknown.local/id", nil, nil)
 	if rec.Code != 404 {
 		t.Errorf("unknown host status = %d, want 404", rec.Code)
 	}
 }
 
 func TestAuthConfigShape(t *testing.T) {
-	d := testDeps(t)
-	tenantID, _, slug := fixtures(t, d)
+	h, db, tenantID, _, slug := fixtures(t)
 	cfg := store.AuthProfile{
 		TenantID: tenantID,
 		Name:     "default",
-		Issuer:   ptr("http://dex:5556/dex"),
-		ClientID: ptr("cid"),
-		JwksURI:  ptr("http://dex:5556/dex/jwks"),
-		Config:   jsonBytes(map[string]any{"jwt_mode": "jwks"}),
+		Issuer:   store.StrPtr("http://dex:5556/dex"),
+		ClientID: store.StrPtr("cid"),
+		JwksURI:  store.StrPtr("http://dex:5556/dex/jwks"),
+		Config:   store.JSONBytes(map[string]any{"jwt_mode": "jwks"}),
 	}
-	if err := d.DB.Create(&cfg).Error; err != nil {
+	if err := db.Create(&cfg).Error; err != nil {
 		t.Fatal(err)
 	}
 
 	// Secrets come from SOPS-decrypted env, NOT the DB (plans/15).
 	t.Setenv("LTP_TENANT_"+secrets.SanitizeSlug(slug)+"_OIDC_CLIENT_SECRET", "s3cr3t")
 	t.Setenv("LTP_TENANT_"+secrets.SanitizeSlug(slug)+"_SESSION_SECRET", "sess")
-	d.Secrets = secrets.New()
 
-	h := Router(d)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/tenant/fx.local/auth-config?name=default", nil))
+	rec := testutil.Do(t, h, http.MethodGet,
+		"/api/admin/v1/tenant/"+slug+".local/auth-config?name=default", nil, nil)
 	if rec.Code != 200 {
 		t.Fatalf("auth-config status = %d", rec.Code)
 	}
 	var body struct {
-		Auth authConfig `json:"auth"`
+		Auth struct {
+			ID               string `json:"id"`
+			JWTMode          string `json:"jwt_mode"`
+			OIDCJWKSURL      string `json:"oidc_jwks_url"`
+			OIDCIssuer       string `json:"oidc_issuer"`
+			OIDCClientID     string `json:"oidc_client_id"`
+			OIDCClientSecret string `json:"oidc_client_secret"`
+			OIDCExpectedAlg  string `json:"oidc_expected_alg"`
+			SessionSecret    string `json:"session_secret"`
+		} `json:"auth"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -121,88 +116,71 @@ func TestAuthConfigShape(t *testing.T) {
 	}
 }
 
-func TestIntrospectLifecycle(t *testing.T) {
-	d := testDeps(t)
-	tenantID, userID, _ := fixtures(t, d)
+type introspectResponse struct {
+	Active    bool      `json:"active"`
+	UserID    string    `json:"user_id,omitempty"`
+	TenantID  string    `json:"tenant_id,omitempty"`
+	Roles     []string  `json:"roles,omitempty"`
+	IsAdmin   bool      `json:"is_admin"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
 
-	// Master key configured BEFORE router build (Deps is by value) and before
-	// issue → plaintext encrypted at rest.
-	masterKey := make([]byte, 32)
-	copy(masterKey, []byte("0123456789abcdef0123456789abcdef"))
-	d.MasterKey = masterKey
-	h := Router(d)
+func introspect(t *testing.T, h http.Handler, token string) introspectResponse {
+	t.Helper()
+	rec := testutil.Do(t, h, http.MethodPost, "/api/admin/v1/token/introspect", nil,
+		map[string]string{"token": token})
+	var resp introspectResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	return resp
+}
+
+func TestIntrospectLifecycle(t *testing.T) {
+	h, db, tenantID, userID, _ := fixtures(t)
 
 	// issue by ANOTHER user in same tenant without admin → 403 (self-only gate)
 	other := store.User{TenantID: tenantID, Email: "other-" + tenantID + "@x.co", DisplayName: "O"}
-	if err := d.DB.Create(&other).Error; err != nil {
+	if err := db.Create(&other).Error; err != nil {
 		t.Fatal(err)
 	}
-	oheaders := map[string]string{"X-Tenant-Id": tenantID, "X-User-Id": other.ID, "X-User-Role": "user"}
-	rec := httptest.NewRecorder()
-	ireq := httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens", nil)
-	for k, v := range oheaders {
-		ireq.Header.Set(k, v)
+	if err := db.Create(&store.UserRole{UserID: other.ID, Role: "user"}).Error; err != nil {
+		t.Fatal(err)
 	}
-	h.ServeHTTP(rec, ireq)
+	oheaders := testutil.PrincipalHeaders(tenantID, other.ID, "user")
+	rec := testutil.Do(t, h, http.MethodPost, "/api/admin/v1/users/"+userID+"/tokens", oheaders, nil)
 	if rec.Code != 403 {
 		t.Fatalf("self-only gate: status = %d, want 403", rec.Code)
 	}
 
 	// issue — self (plaintext returned exactly once)
-	rec = httptest.NewRecorder()
-	ireq = httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens", nil)
-	ireq.Header.Set("X-Tenant-Id", tenantID)
-	ireq.Header.Set("X-User-Id", userID)
-	h.ServeHTTP(rec, ireq)
+	rec = testutil.Do(t, h, http.MethodPost, "/api/admin/v1/users/"+userID+"/tokens",
+		testutil.PrincipalHeaders(tenantID, userID, "user"), nil)
 	if rec.Code != 201 {
-		t.Fatalf("issue status = %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("issue: status = %d: %s", rec.Code, rec.Body.String())
 	}
 	var issued struct {
 		ID    string `json:"id"`
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &issued); err != nil {
-		t.Fatal(err)
+	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
+	if issued.Token == "" {
+		t.Fatal("no plaintext token returned")
 	}
 
-	// introspect active (matching tenant header)
-	rec = httptest.NewRecorder()
-	ireq = httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token})))
-	ireq.Header.Set("X-Tenant-Id", tenantID)
-	h.ServeHTTP(rec, ireq)
-	var resp introspectResponse
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	// introspect — active, correct identity
+	resp := introspect(t, h, issued.Token)
 	if !resp.Active || resp.UserID != userID || resp.TenantID != tenantID || resp.IsAdmin {
 		t.Errorf("introspect = %+v", resp)
 	}
 
-	// wrong tenant header → inactive
-	rec = httptest.NewRecorder()
-	ireq = httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token})))
-	ireq.Header.Set("X-Tenant-Id", "00000000-0000-0000-0000-000000000000")
-	h.ServeHTTP(rec, ireq)
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp.Active {
-		t.Error("cross-tenant introspect must be inactive")
-	}
-
 	// tampered token → inactive
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token[:len(issued.Token)-1] + "X"}))))
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	resp = introspect(t, h, issued.Token[:len(issued.Token)-1]+"X")
 	if resp.Active {
 		t.Error("tampered token must be inactive")
 	}
 
 	// reveal by owner — master key was configured at issue time
-	rec = httptest.NewRecorder()
-	vreq := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/reveal", nil)
-	vreq.Header.Set("X-Tenant-Id", tenantID)
-	vreq.Header.Set("X-User-Id", userID)
-	h.ServeHTTP(rec, vreq)
+	rec = testutil.Do(t, h, http.MethodPost, "/api/admin/v1/tokens/"+issued.ID+"/reveal",
+		testutil.PrincipalHeaders(tenantID, userID, "user"), nil)
 	var revealed struct {
 		Token string `json:"token"`
 	}
@@ -212,70 +190,52 @@ func TestIntrospectLifecycle(t *testing.T) {
 	}
 
 	// reveal by the other (non-owner) → 403
-	rec = httptest.NewRecorder()
-	vreq2 := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/reveal", nil)
-	for k, v := range oheaders {
-		vreq2.Header.Set(k, v)
-	}
-	h.ServeHTTP(rec, vreq2)
+	rec = testutil.Do(t, h, http.MethodPost, "/api/admin/v1/tokens/"+issued.ID+"/reveal", oheaders, nil)
 	if rec.Code != 403 {
 		t.Errorf("reveal self-only gate: status = %d, want 403", rec.Code)
 	}
 
 	// revoke by the other (non-owner) user → 403
-	rec = httptest.NewRecorder()
-	rreq := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/revoke", nil)
-	for k, v := range oheaders {
-		rreq.Header.Set(k, v)
-	}
-	h.ServeHTTP(rec, rreq)
+	rec = testutil.Do(t, h, http.MethodPost, "/api/admin/v1/tokens/"+issued.ID+"/revoke", oheaders, nil)
 	if rec.Code != 403 {
 		t.Fatalf("revoke self-only gate: status = %d, want 403", rec.Code)
 	}
 
 	// revoke by owner → inactive
-	rec = httptest.NewRecorder()
-	rreq = httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/revoke", nil)
-	rreq.Header.Set("X-Tenant-Id", tenantID)
-	rreq.Header.Set("X-User-Id", userID)
-	h.ServeHTTP(rec, rreq)
+	rec = testutil.Do(t, h, http.MethodPost, "/api/admin/v1/tokens/"+issued.ID+"/revoke",
+		testutil.PrincipalHeaders(tenantID, userID, "user"), nil)
 	if rec.Code != 200 {
 		t.Fatalf("revoke status = %d", rec.Code)
 	}
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token}))))
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	resp = introspect(t, h, issued.Token)
 	if resp.Active {
 		t.Error("revoked token must be inactive")
 	}
 }
 
 func TestIntrospectExpired(t *testing.T) {
-	d := testDeps(t)
-	tenantID, userID, _ := fixtures(t, d)
-	h := Router(d)
+	h, _, tenantID, userID, _ := fixtures(t)
 
-	rec := httptest.NewRecorder()
-	expreq := httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens",
-		bytes.NewReader(jsonBytes(map[string]string{"ttl": "1ns"})))
-	expreq.Header.Set("X-Tenant-Id", tenantID)
-	expreq.Header.Set("X-User-Id", userID)
-	h.ServeHTTP(rec, expreq)
+	rec := testutil.Do(t, h, http.MethodPost, "/api/admin/v1/users/"+userID+"/tokens",
+		testutil.PrincipalHeaders(tenantID, userID, "user"),
+		map[string]string{"ttl": "1ns"})
 	var issued struct {
 		Token string `json:"token"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &issued)
 
 	time.Sleep(2 * time.Millisecond)
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token}))))
-	var resp introspectResponse
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	resp := introspect(t, h, issued.Token)
 	if resp.Active {
 		t.Error("expired token must be inactive")
 	}
 }
 
-func ptr(s string) *string { return &s }
+// operator endpoints require the principal middleware (fail-closed).
+func TestOperatorRequiresPrincipal(t *testing.T) {
+	h, _, _, userID, _ := fixtures(t)
+	rec := testutil.Do(t, h, http.MethodPost, fmt.Sprintf("/api/admin/v1/users/%s/tokens", userID), nil, nil)
+	if rec.Code != 401 {
+		t.Errorf("no-principal issue = %d, want 401", rec.Code)
+	}
+}

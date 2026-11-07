@@ -25,3 +25,32 @@ func ActorJSON(tenantID, userID, role string) string {
 	b, _ := json.Marshal(map[string]string{"tenant_id": tenantID, "user_id": userID, "role": role})
 	return string(b)
 }
+
+// ErrNotFound is returned by scoped lookups when the row does not exist or
+// the principal may not see it (callers map to HTTP 404 — no existence leak).
+var ErrNotFound = gorm.ErrRecordNotFound
+
+// LoadNamespaceScoped fetches a namespace enforcing tenant isolation and
+// owner/admin visibility (single shared implementation — replaces per-package
+// loadNamespace/loadOwned duplicates).
+func LoadNamespaceScoped(ctx context.Context, db *gorm.DB, tenantID, userID string, isAdmin bool, id string) (Namespace, error) {
+	var ns Namespace
+	q := db.WithContext(ctx).
+		Where("id = ? AND tenant_id = ? AND status <> ?", id, tenantID, "DELETED")
+	if !isAdmin {
+		q = q.Where("owner_user_id = ?", userID)
+	}
+	if err := q.First(&ns).Error; err != nil {
+		return Namespace{}, ErrNotFound
+	}
+	return ns, nil
+}
+
+// JSONBytes marshals v, never fails for map/string inputs.
+func JSONBytes(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// StrPtr returns a pointer to s (audit/event nullable columns).
+func StrPtr(s string) *string { return &s }
