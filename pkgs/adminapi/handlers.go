@@ -422,6 +422,7 @@ func (d Deps) audit(ctx context.Context, r *http.Request, action, objectType, ob
 		Action:     action,
 		ObjectType: objectType,
 		ObjectID:   &objectID,
+		Details:    jsonBytes(map[string]any{}),
 	}
 	if tenantID != "" {
 		entry.TenantID = &tenantID

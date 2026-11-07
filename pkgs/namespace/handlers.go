@@ -39,6 +39,13 @@ func Router(d Deps) http.Handler {
 	// Soft delete: DRAFT/INVALID/READY/DEGRADED → DELETING (reaper finishes it).
 	r.Delete("/{id}", d.deleteNamespace)
 	r.Get("/{id}/events", d.events)
+	// NOTE: no Mount("/{id}", ...) — a chi subtree at the dynamic param path
+	// swallows the exact GET /{id} route.
+	r.Mount("/{id}/services", ServicesRouter(d))
+	r.Post("/{id}/validate", d.validateNamespace)
+	r.With(requireIdempotencyKey).
+		Post("/{id}/apply", d.idempotencyReplay("/api/loadtest/v1/apply", d.applyNamespace))
+	r.Get("/{id}/readiness", d.readiness)
 	return r
 }
 
@@ -158,7 +165,8 @@ func (d Deps) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := d.transition(ctx, ns.ID, "DELETING", p, "delete requested"); err != nil {
+	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
+	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "DELETING", actor, "delete requested"); err != nil {
 		// INVALID_TRANSITION from the DB function (e.g. APPLYING/DATA_LOADING).
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "namespace cannot be deleted from its current status")
 		return
@@ -184,15 +192,6 @@ func (d Deps) events(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"events": events})
-}
-
-// transition calls the DB state-machine function in a transaction. This is
-// the ONLY Raw kept in the package: GORM has no syntax for function calls,
-// and status changes must never bypass fn_*_transition (plans/04).
-func (d Deps) transition(ctx context.Context, id, to string, p authz.Principal, reason string) error {
-	return d.DB.WithContext(ctx).Exec(
-		`SELECT fn_namespace_transition(?::uuid, ?, ?::jsonb, ?)`,
-		id, to, authzJSON(p), reason).Error
 }
 
 // loadOwned fetches the namespace and enforces tenant isolation + owner/admin.
@@ -326,11 +325,8 @@ func (d Deps) audit(ctx context.Context, _ *http.Request, p authz.Principal, act
 		Action:     action,
 		ObjectType: "namespace",
 		ObjectID:   strPtr(objectID),
+		Details:    jsonBytes(map[string]any{}),
 	}).Error
-}
-
-func authzJSON(p authz.Principal) string {
-	return string(jsonBytes(map[string]string{"tenant_id": p.TenantID, "user_id": p.UserID, "role": p.Role}))
 }
 
 func isUniqueViolation(err error) bool {

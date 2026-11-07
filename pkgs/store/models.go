@@ -211,6 +211,9 @@ type Service struct {
 // TableName maps Service to its PostgreSQL table.
 func (Service) TableName() string { return "tbl_services" }
 
+// BeforeCreate fills the UUID primary key app-side.
+func (Service) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
 // Database is a namespace component (tbl_databases).
 type Database struct {
 	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
@@ -225,6 +228,9 @@ type Database struct {
 
 // TableName maps Database to its PostgreSQL table.
 func (Database) TableName() string { return "tbl_databases" }
+
+// BeforeCreate fills the UUID primary key app-side.
+func (Database) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // Ingress is a namespace component (tbl_ingress).
 type Ingress struct {
@@ -241,6 +247,9 @@ type Ingress struct {
 // TableName maps Ingress to its PostgreSQL table.
 func (Ingress) TableName() string { return "tbl_ingress" }
 
+// BeforeCreate fills the UUID primary key app-side.
+func (Ingress) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
 // Dependency references a service/database/mock used by the env (tbl_dependencies).
 type Dependency struct {
 	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
@@ -255,6 +264,9 @@ type Dependency struct {
 // TableName maps Dependency to its PostgreSQL table.
 func (Dependency) TableName() string { return "tbl_dependencies" }
 
+// BeforeCreate fills the UUID primary key app-side.
+func (Dependency) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
 // NetworkPolicy is the resolved egress spec (tbl_network_policies).
 type NetworkPolicy struct {
 	ID                 string    `gorm:"column:id;primaryKey;type:uuid"`
@@ -268,3 +280,6 @@ type NetworkPolicy struct {
 
 // TableName maps NetworkPolicy to its PostgreSQL table.
 func (NetworkPolicy) TableName() string { return "tbl_network_policies" }
+
+// BeforeCreate fills the UUID primary key app-side.
+func (NetworkPolicy) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
