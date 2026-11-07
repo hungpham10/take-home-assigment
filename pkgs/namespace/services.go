@@ -35,7 +35,8 @@ func mountServices(r chi.Router, d Deps) {
 
 // mockDef is the subset of the service mock JSONB we validate (docs §5).
 type mockDef struct {
-	Enabled    bool `json:"enabled"`
+	Enabled    bool   `json:"enabled"`
+	PoolClass  string `json:"pool_class"`
 	Operations []struct {
 		OperationID string `json:"operation_id"`
 	} `json:"operations"`
@@ -51,6 +52,19 @@ type bindingDef struct {
 // dependencyRef is one dependencies[] entry (service_id reference).
 type dependencyRef struct {
 	ServiceID string `json:"service_id"`
+}
+
+// validateMockShape checks the mock profile JSON shape (must be an object when
+// set). Shared by service (plans/17) and database (plans/18) definitions.
+func validateMockShape(raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m mockDef
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return specErr{"mock must be an object"}
+	}
+	return nil
 }
 
 // validateServiceDefinition checks the non-openapi parts of a service
@@ -136,27 +150,37 @@ type decodedServiceSpec struct {
 // RawField returns the raw JSON of a provided top-level key ("" when absent).
 func (d decodedServiceSpec) RawField(key string) []byte { return d.raw[key] }
 
+// decodeProvided reads the request body ONCE and decodes both the typed body
+// and the provided-key set (PATCH merge semantics). Shared by services,
+// databases, datasets and ingress bodies.
+func decodeProvided(r *http.Request, v any) (provided map[string]bool, raw map[string]json.RawMessage, err error) {
+	provided, raw = map[string]bool{}, map[string]json.RawMessage{}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return provided, raw, err
+	}
+	if len(body) == 0 {
+		return provided, raw, nil
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return provided, raw, err
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return provided, raw, err
+	}
+	for k := range raw {
+		provided[k] = true
+	}
+	return provided, raw, nil
+}
+
 // decodeServiceSpec reads the request body ONCE and decodes both the
 // definition and the provided-key set.
 func decodeServiceSpec(r *http.Request) (decodedServiceSpec, error) {
 	out := decodedServiceSpec{provided: map[string]bool{}, raw: map[string]json.RawMessage{}}
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		return out, err
-	}
-	if len(raw) == 0 {
-		return out, nil
-	}
-	if err := json.Unmarshal(raw, &out.serviceSpec); err != nil {
-		return out, err
-	}
-	if err := json.Unmarshal(raw, &out.raw); err != nil {
-		return out, err
-	}
-	for k := range out.raw {
-		out.provided[k] = true
-	}
-	return out, nil
+	provided, raw, err := decodeProvided(r, &out.serviceSpec)
+	out.provided, out.raw = provided, raw
+	return out, err
 }
 
 // --- create -----------------------------------------------------------------------
@@ -530,14 +554,9 @@ func (d Deps) serviceDeleteConflict(svc *store.Service) string {
 	var ingresses []store.Ingress
 	_ = d.DB.Where("namespace_id = ?", svc.NamespaceID).Find(&ingresses).Error
 	for _, ing := range ingresses {
-		var rules []struct {
-			ServiceID string `json:"service_id"`
-		}
-		if err := json.Unmarshal(ing.Hosts, &rules); err == nil {
-			for _, rule := range rules {
-				if rule.ServiceID == sid || rule.ServiceID == svc.Name {
-					return "service " + sid + " is referenced by ingress " + deref(ing.IngressID) + " host rules"
-				}
+		for _, rule := range ingressRulesOf(ing.Hosts) {
+			if rule.ServiceID == sid || rule.ServiceID == svc.Name {
+				return "service " + sid + " is referenced by ingress " + deref(ing.IngressID) + " host rules"
 			}
 		}
 	}

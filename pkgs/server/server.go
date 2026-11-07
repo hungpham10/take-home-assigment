@@ -75,6 +75,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Route("/api/loadtest/v1", func(r chi.Router) {
 		r.Use(authz.RequirePrincipalWithRole(d.DB))
 		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now})
+		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now})
 		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
 		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now})
 	})
