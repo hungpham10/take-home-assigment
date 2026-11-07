@@ -14,6 +14,7 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/adminapi"
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/namespace"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
@@ -50,7 +51,10 @@ func NewRouter(d Deps) http.Handler {
 	// internal calls carry no user identity).
 	r.Mount("/api/admin/v1", adminapi.Router(adminapi.Deps{DB: d.DB, Now: d.Now}))
 
-	// /api/loadtest/v1 mounts in plans 10-13 behind authz.RequirePrincipal.
-	_ = authz.RequirePrincipal
+	// /api/loadtest/v1 — data-plane BFF (plans 10-13), fail-closed principal.
+	r.Route("/api/loadtest/v1", func(r chi.Router) {
+		r.Use(authz.RequirePrincipal)
+		r.Mount("/namespaces", namespace.Router(namespace.Deps{DB: d.DB, Now: d.Now}))
+	})
 	return r
 }
