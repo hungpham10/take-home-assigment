@@ -21,3 +21,4 @@ Thứ tự thực thi từ đơn giản → phức tạp. Mỗi plan = 1 PR/feat
 | 15 | [sops-secrets](15-sops-secrets.md) | SOPS + age: secrets mã hoá, tách khỏi DB, resolver LTP_TENANT_<SLUG>_* | 08–09 |
 
 Sau 14: mock-service (phase sau), CodeGraph review, bump version, release.
+| 16 | [harness-testing-integrity](16-harness-testing-integrity.md) | Harness tests: ACID/invariants, crash/exception/network faults, idempotency/retry, runner/egress safety | 03–13 |

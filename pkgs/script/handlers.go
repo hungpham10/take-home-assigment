@@ -114,12 +114,17 @@ func (d Deps) stage(namespaceID, name, content string) (string, error) {
 }
 
 func (d Deps) readStaged(ref string) ([]byte, error) {
-	// Prevent path traversal: ref must stay inside ScriptsDir.
+	return ReadStaged(d.ScriptsDir, ref)
+}
+
+// ReadStaged reads staged content; ref must stay inside scriptsDir
+// (path-traversal safe).
+func ReadStaged(scriptsDir, ref string) ([]byte, error) {
 	clean := filepath.Clean(ref)
 	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
 		return nil, errors.New("script: bad ref")
 	}
-	return os.ReadFile(filepath.Join(d.ScriptsDir, clean))
+	return os.ReadFile(filepath.Join(scriptsDir, clean))
 }
 
 func (d Deps) list(w http.ResponseWriter, r *http.Request) {

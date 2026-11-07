@@ -325,6 +325,8 @@ Base: `/api/loadtest/v1` (details in `docs/bff-loadtest-api-spec.md`).
 
 ## 7. Security & operations
 
+**Integrity/fault harness (release gate):** see [`docs/harness-testing.md`](harness-testing.md) for ACID/invariant proofs, crash/exception/network-fault scenarios, idempotency/retry/runner safety, and CI placement. These complement unit/E2E/k6 perf tests.
+
 - Trust only nginx-injected identity at the boundary; fail closed; never trust client owner/tenant. **Enforce trust boundary:** backend reachable only via trusted nginx path (unix socket/private upstream) and/or nginx strips client-supplied `X-Tenant-Id`/`X-User-*` and sets them; backend rejects requests missing required headers on protected routes.
 - Tenant isolation always; owner/admin RBAC in BFF.
 - Service OpenAPI, JS scripts, and target refs are validated and size/guardrail-limited. **JS scripts are untrusted:** `targets[]` metadata is validated, but script behavior must be constrained by **runner NetworkPolicy/egress allowlists** (only resolved targets/declared deps + required platform endpoints), no platform/K8s credentials in runner, resource/time/size quotas (ConfigMap 1 MiB, script size, vusers/duration), and SSRF-safe target resolution.

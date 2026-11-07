@@ -14,7 +14,9 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/adminapi"
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
 	"github.com/hungpham/loadtest-platform/pkgs/namespace"
+	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
@@ -28,6 +30,7 @@ type Deps struct {
 	MasterKey  []byte           // AES-256-GCM master key (token encryption at rest)
 	ScriptsDir string           // staging dir for k6 scripts
 	ScriptQ    *script.Queue    // async validation queue (nil → sync in tests)
+	Runner     runner.Runner    // load-test execution backend (local/k8s)
 }
 
 // NewRouter builds the full HTTP handler.
@@ -64,6 +67,13 @@ func NewRouter(d Deps) http.Handler {
 		r.Mount("/namespaces/{id}/scripts", script.Router(script.Deps{
 			DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now,
 		}))
+		r.Mount("/namespaces/{id}/loadtests", loadtest.Router(loadtest.Deps{
+			DB: d.DB, Runner: d.Runner, Now: d.Now,
+		}))
 	})
+	// Script content reader for the runner (staged files).
+	loadtest.ScriptContentOf = func(ref string) ([]byte, error) {
+		return script.ReadStaged(d.ScriptsDir, ref)
+	}
 	return r
 }
