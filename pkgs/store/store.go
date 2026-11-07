@@ -1,5 +1,6 @@
-// Package store provides the PostgreSQL connection pool and the migration
-// runner. sql/ migrations are the single source of truth for the schema.
+// Package store provides the PostgreSQL data layer: GORM connection for
+// queries and a migration runner. sql/ migrations are the single source of
+// truth for the schema.
 package store
 
 import (
@@ -13,7 +14,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // ErrNoMigrations is returned by Migrate when no migration files exist.
@@ -21,30 +24,44 @@ var ErrNoMigrations = errors.New("store: no migration files found")
 
 var migrationNameRe = regexp.MustCompile(`^[0-9]+_[a-z0-9_]+\.sql$`)
 
-// New opens a pgx connection pool with bounded lifetimes.
-func New(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("store: parse dsn: %w", err)
-	}
-	cfg.MaxConns = 10
-	cfg.MaxConnLifetime = time.Hour
-	cfg.MaxConnIdleTime = 15 * time.Minute
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+// New opens a GORM connection with sane production settings.
+func New(ctx context.Context, dsn string) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger:  logger.Default.LogMode(logger.Warn),
+		NowFunc: func() time.Time { return time.Now().UTC() },
+	})
 	if err != nil {
 		return nil, fmt.Errorf("store: connect: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("store: sql db handle: %w", err)
+	}
+	sqlDB.SetMaxOpenConns(10)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+	sqlDB.SetConnMaxIdleTime(15 * time.Minute)
+	if err := sqlDB.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("store: ping: %w", err)
 	}
-	return pool, nil
+	return db.WithContext(ctx), nil
+}
+
+// Ping checks database reachability (used by /ready, fail-closed).
+func Ping(ctx context.Context, db *gorm.DB) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return sqlDB.PingContext(ctx)
 }
 
 // Migrate applies all embedded migrations in filename order exactly once,
 // tracked in tbl_schema_migrations. Migration files manage their own
 // transactions (BEGIN/COMMIT inside the file), so each file runs on a bare
-// connection with simple protocol (multi-statement support).
+// connection with simple protocol (multi-statement support). GORM is not
+// used here deliberately.
 func Migrate(ctx context.Context, dsn string, files embed.FS) error {
 	names, err := migrationNames(files, "sql")
 	if err != nil {
@@ -118,7 +135,7 @@ func isApplied(ctx context.Context, conn *pgx.Conn, name string) (bool, error) {
 }
 
 func applyOne(ctx context.Context, conn *pgx.Conn, files embed.FS, name string) error {
-	body, err := files.ReadFile("sql/" + name) // dir is fixed "sql" for the real embed
+	body, err := files.ReadFile("sql/" + name)
 	if err != nil {
 		return err
 	}

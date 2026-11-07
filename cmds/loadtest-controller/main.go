@@ -41,15 +41,19 @@ func run() error {
 	}
 	slog.Info("migrations applied")
 
-	pool, err := store.New(ctx, cfg.DatabaseDSN)
+	db, err := store.New(ctx, cfg.DatabaseDSN)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sqlDB.Close() }()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{Pool: pool}),
+		Handler:           server.NewRouter(server.Deps{DB: db}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
