@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -91,10 +92,16 @@ func (d Deps) readinessGates(ctx context.Context, ns store.Namespace) readinessR
 		if len(dbRow.DataSource) == 0 || json.Unmarshal(dbRow.DataSource, &ds) != nil || ds.DatasetID == "" {
 			continue // no data_source → counts as ready
 		}
-		available := d.datasetAvailableForTenant(ctx, ns.TenantID, ds.DatasetID)
+		dataset, available := d.datasetForTenant(ctx, ns.TenantID, ds.DatasetID)
 		if !available {
 			dbBlock.Blocking = append(dbBlock.Blocking,
 				"database "+dbRow.Name+": dataset "+ds.DatasetID+" not available")
+		} else {
+			// Restore-source compatibility: dataset engine/engine_version must
+			// match the database when both sides declare them.
+			if reason := datasetEngineMismatch(dataset, &dbRow); reason != "" {
+				dbBlock.Blocking = append(dbBlock.Blocking, "database "+dbRow.Name+": "+reason)
+			}
 		}
 		if ds.Mode == "restore" {
 			restoreDatasets[ds.DatasetID] = available
@@ -123,13 +130,7 @@ func (d Deps) readinessGates(ctx context.Context, ns store.Namespace) readinessR
 	_ = d.DB.WithContext(ctx).Where("namespace_id = ?", ns.ID).Find(&ingresses).Error
 	ingBlock := componentBlock{Total: intPtr(len(ingresses)), Blocking: []string{}}
 	for _, ing := range ingresses {
-		var rules []struct {
-			ServiceID string `json:"service_id"`
-		}
-		if err := json.Unmarshal(ing.Hosts, &rules); err != nil {
-			continue
-		}
-		for _, rule := range rules {
+		for _, rule := range ingressRulesOf(ing.Hosts) {
 			if !svcRefs[rule.ServiceID] {
 				ingBlock.Blocking = append(ingBlock.Blocking,
 					"ingress "+deref(ing.IngressID)+": unknown service "+rule.ServiceID)
@@ -213,16 +214,35 @@ func (d Deps) readinessGates(ctx context.Context, ns store.Namespace) readinessR
 	return report
 }
 
-// datasetAvailableForTenant reports whether a dataset is AVAILABLE in the
-// given tenant (false on query error — fail closed).
-func (d Deps) datasetAvailableForTenant(ctx context.Context, tenantID, datasetID string) bool {
-	var count int64
-	if err := d.DB.WithContext(ctx).Model(&store.Dataset{}).
+// datasetForTenant loads an AVAILABLE dataset in the given tenant (nil, false
+// on query error — fail closed).
+func (d Deps) datasetForTenant(ctx context.Context, tenantID, datasetID string) (*store.Dataset, bool) {
+	var ds store.Dataset
+	if err := d.DB.WithContext(ctx).
 		Where("id = ? AND tenant_id = ? AND status = ?", datasetID, tenantID, "AVAILABLE").
-		Count(&count).Error; err != nil {
-		return false
+		First(&ds).Error; err != nil {
+		return nil, false
 	}
-	return count > 0
+	return &ds, true
+}
+
+// datasetEngineMismatch returns a blocking reason ("" when compatible) when a
+// restore dataset's engine/engine_version do not match the target database.
+func datasetEngineMismatch(ds *store.Dataset, dbRow *store.Database) string {
+	if ds == nil {
+		return ""
+	}
+	if ds.Engine != nil && *ds.Engine != "" && *ds.Engine != dbRow.Engine {
+		return "dataset " + ds.ID + " engine mismatch (dataset " + *ds.Engine +
+			" vs database " + dbRow.Engine + ")"
+	}
+	if ds.EngineVersion != nil && *ds.EngineVersion != "" &&
+		dbRow.EngineVersion != nil && *dbRow.EngineVersion != "" &&
+		*ds.EngineVersion != *dbRow.EngineVersion {
+		return "dataset " + ds.ID + " engine_version mismatch (dataset " + *ds.EngineVersion +
+			" vs database " + *dbRow.EngineVersion + ")"
+	}
+	return ""
 }
 
 // errValidationFailed marks readiness-gate failure inside runValidation.
@@ -231,6 +251,13 @@ var errValidationFailed = errors.New("readiness gates failed")
 // errMockCapacity marks the apply-time mock-capacity gate (plans/17: mock-enabled
 // specs cannot reach READY until a mock-service runtime exists — fail closed).
 var errMockCapacity = errors.New("mock runtime not available (MVP stub)")
+
+// applyValidationErr marks an apply-time restore-source gate failure: the
+// datasets a database restores from are missing/unavailable or their
+// engine/engine_version mismatch the target database → 422 VALIDATION_FAILED.
+type applyValidationErr struct{ reasons []string }
+
+func (e applyValidationErr) Error() string { return strings.Join(e.reasons, "; ") }
 
 // runValidation is the status-machine core of POST /{id}/validate, callable
 // without HTTP objects: DRAFT/INVALID → VALIDATING → gates → INVALID|APPLYING.
@@ -260,13 +287,27 @@ func (d Deps) runValidation(ctx context.Context, ns store.Namespace, actor strin
 func (d Deps) runApply(ctx context.Context, ns store.Namespace, actor string) error {
 	// Mock-capacity gate BEFORE transitioning to DATA_LOADING: mock-enabled
 	// specs must not reach READY without a mock runtime (plans/17, docs §mocks).
-	if report := d.readinessGates(ctx, ns); report.MocksBlocking {
+	// Restore-source gate: dataset engine/engine_version mismatches (and
+	// unavailable/missing restore datasets) block apply with VALIDATION_FAILED.
+	report := d.readinessGates(ctx, ns)
+	if report.MocksBlocking {
 		return errMockCapacity
+	}
+	var restoreReasons []string
+	restoreReasons = append(restoreReasons, report.Components["databases"].(componentBlock).Blocking...)
+	restoreReasons = append(restoreReasons, report.Components["data_load"].(componentBlock).Blocking...)
+	if len(restoreReasons) > 0 {
+		return applyValidationErr{reasons: restoreReasons}
 	}
 	return d.DB.Transaction(func(tx *gorm.DB) error {
 		if err := store.Transition(ctx, tx, "namespace", ns.ID, "DATA_LOADING", actor, "apply requested"); err != nil {
 			return err
 		}
+		// MVP restore stub: after DATA_LOADING the actual pg_restore runs here
+		// in a later plan (K8s pg_restore Job — plans/18 §6). For now the
+		// dataset existence / AVAILABLE status / engine compatibility were
+		// verified by the readiness gates above, and apply transitions
+		// straight to READY.
 		// Resolve dependencies → egress policy spec (MVP: direct allow-list).
 		var deps []store.Dependency
 		if err := tx.Where("namespace_id = ?", ns.ID).Find(&deps).Error; err != nil {
@@ -343,7 +384,14 @@ func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
 
 	err := d.runApply(ctx, ns, actor)
+	var ave applyValidationErr
 	switch {
+	case errors.As(err, &ave):
+		httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":            httpx.Error{Code: "VALIDATION_FAILED", Message: "restore sources failed validation"},
+			"blocking_reasons": ave.reasons,
+		})
+		return
 	case errors.Is(err, errMockCapacity):
 		httpx.WriteCodeError(w, "INSUFFICIENT_MOCK_CAPACITY", err.Error())
 		return

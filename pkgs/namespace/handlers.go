@@ -42,6 +42,9 @@ func Mount(r chi.Router, d Deps) {
 	// NOTE: all routes are registered flat on r — a chi subtree at the dynamic
 	// param path Mount("/{id}/...") swallows the exact GET /{id} route.
 	mountServices(r, d)
+	mountDatabases(r, d)
+	mountIngress(r, d)
+	mountViews(r, d)
 	mountLifecycle(r, d)
 }
 

@@ -215,6 +215,49 @@ func TestAPIAUTHZ02CrossTenantNoLeak(t *testing.T) {
 	if strings.Contains(rec.Body.String(), nsID) {
 		t.Errorf("cross-tenant namespace list leaked A's namespace: %s", rec.Body.String())
 	}
+
+	// --- plan 18 PR C: databases + datasets cross-owner (API-AUTHZ-02) ---
+	rec = api(t, h, http.MethodPost, "/namespaces/"+nsID+"/databases",
+		testutil.WithKey(headersA, "hz-db"), map[string]any{"name": "cross-db"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create database: %d %s", rec.Code, rec.Body.String())
+	}
+	var dbr struct {
+		DatabaseID *string `json:"database_id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dbr)
+	rec = api(t, h, http.MethodPost, "/datasets",
+		testutil.WithKey(headersA, "hz-ds"), map[string]any{
+			"name":     "cross-ds",
+			"location": map[string]any{"provider": "s3", "bucket": "b", "key": "k.dump"},
+		})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create dataset: %d %s", rec.Code, rec.Body.String())
+	}
+	var dsr struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dsr)
+
+	// B GET single resources → 404 (no existence leak)
+	for _, tc := range []struct{ path, what string }{
+		{"/namespaces/" + nsID + "/databases/" + *dbr.DatabaseID, "database"},
+		{"/datasets/" + dsr.ID, "dataset"},
+	} {
+		if rec := api(t, h, http.MethodGet, tc.path, headersB, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("cross-tenant %s: %d, want 404", tc.what, rec.Code)
+		}
+	}
+	// list endpoints must not contain A's ids
+	for _, tc := range []struct{ path, what, secret string }{
+		{"/namespaces/" + nsID + "/databases", "database list", *dbr.DatabaseID},
+		{"/datasets", "dataset list", dsr.ID},
+	} {
+		rec := api(t, h, http.MethodGet, tc.path, headersB, nil)
+		if strings.Contains(rec.Body.String(), tc.secret) {
+			t.Errorf("%s leaked ID %s: %s", tc.what, tc.secret, rec.Body.String())
+		}
+	}
 }
 
 // --- API-AUTHZ-03 -----------------------------------------------------------------
