@@ -191,6 +191,34 @@ func TestIntrospectLifecycle(t *testing.T) {
 		t.Error("tampered token must be inactive")
 	}
 
+	// reveal by owner — with master key configured
+	masterKey := make([]byte, 32)
+	copy(masterKey, []byte("0123456789abcdef0123456789abcdef"))
+	d.MasterKey = masterKey
+	rec = httptest.NewRecorder()
+	vreq := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/reveal", nil)
+	vreq.Header.Set("X-Tenant-Id", tenantID)
+	vreq.Header.Set("X-User-Id", userID)
+	h.ServeHTTP(rec, vreq)
+	var revealed struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &revealed)
+	if rec.Code != 200 || revealed.Token != issued.Token {
+		t.Errorf("reveal = (%d, %q), want (200, %q)", rec.Code, revealed.Token, issued.Token)
+	}
+
+	// reveal by the other (non-owner) → 403
+	rec = httptest.NewRecorder()
+	vreq2 := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/reveal", nil)
+	for k, v := range oheaders {
+		vreq2.Header.Set(k, v)
+	}
+	h.ServeHTTP(rec, vreq2)
+	if rec.Code != 403 {
+		t.Errorf("reveal self-only gate: status = %d, want 403", rec.Code)
+	}
+
 	// revoke by the other (non-owner) user → 403
 	rec = httptest.NewRecorder()
 	rreq := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/revoke", nil)

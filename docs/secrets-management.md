@@ -31,6 +31,15 @@ Mọi secret (client_secret, session_secret, jwt_secret, DB DSN...) **không n�
 - CI **không có age key**: test không phụ thuộc secret; resolver test bằng env injection.
 - Rotate secret: sửa plaintext → re-encrypt → commit `.enc` mới; nginx cache 600s tự hết hạn.
 
+## Mã hoá at rest (field-level, pattern `sops.rs`)
+
+Bên cạnh SOPS file-level, các giá trị nhạy cảm **phải recoverable trong DB** (vd `abt_` plaintext cho admin reveal) được mã hoá **AES-256-GCM** bằng `LTP_MASTER_KEY` (từ SOPS env): blob = `nonce(12) || ciphertext` — pattern `opsense-rs/crates/opsense-mlib/src/sops.rs`.
+
+- `pkgs/secrets/crypto.go` — `Encrypt`/`Decrypt`/`LoadMasterKey`/`GenerateMasterKey`
+- `tbl_access_tokens.token_encrypted` (migration 0008) — plaintext đã mã hoá; `token_hash` vẫn là đường xác thực (introspect)
+- `POST /api/admin/v1/tokens/{id}/reveal` — self-or-admin (audit-logged); 503 khi chưa cấu hình `LTP_MASTER_KEY`
+- Sinh key: `openssl rand -hex 32`
+
 ## Nguồn tham khảo
 - `scripts/release.sh` (decrypt_secrets) — pattern có sẵn của repo.
 - `plans/15-sops-secrets.md` — thiết kế chi tiết.

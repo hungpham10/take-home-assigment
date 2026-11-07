@@ -54,7 +54,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New()}),
+		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey()}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

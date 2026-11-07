@@ -33,3 +33,5 @@ func TestResolveFromEnv(t *testing.T) {
 		t.Errorf("ResolveAll = %v", all)
 	}
 }
+
+func randRead(b []byte) (int, error) { return copy(b, []byte("0123456789abcdef0123456789abcdef")), nil }
