@@ -78,3 +78,12 @@ Stream runtime append-only, unique `(load_test_id, seq)`, `type log|metric|statu
   `SELECT ... FOR UPDATE` → check `tbl_status_transitions` → `UPDATE status, version+1` → `INSERT tbl_<object>_events` — tất cả trong 1 transaction; transition trái phép → exception (app map `409/422`).
 - `tbl_<object>` = current state, nguồn đọc cho list/get (JOIN + index); `tbl_<object>_events` append-only, chỉ JOIN khi xem lịch sử.
 - Bảng transition map: `tbl_status_transitions (object_type, from_status, to_status, allowed)` — seed toàn bộ transition hợp lệ.
+
+## Migration 0005 — Platform plumbing
+
+- `tbl_idempotency_keys`: UNIQUE `(tenant_id, endpoint, key)` — middleware Idempotency-Key; reaper dọn >24h.
+- `tbl_outbox_events`: transactional outbox — ghi cùng transaction với state change, worker dispatch; partial index trên `dispatched_at IS NULL`.
+- `tbl_reservation_ledger`: quota `vusers|concurrent_loadtests|mock_pool`, state `RESERVED→COMMITTED|RELEASED`; vượt quota → 429.
+- `tbl_datasets`: `pii_classification masked|synthetic|non_prod_raw`, restore_config JSONB; lifecycle 7 trạng thái qua `fn_dataset_transition`.
+
+> Schema SQL MVP controller chốt tại migration này. Mọi thay đổi sau = migration mới + update doc này.
