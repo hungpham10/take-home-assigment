@@ -25,12 +25,12 @@ func beforeCreateUUID(db *gorm.DB) error {
 
 // Tenant is an org boundary (tbl_tenants).
 type Tenant struct {
-	ID        string    `gorm:"column:id;primaryKey;type:uuid"`
-	Name      string    `gorm:"column:name"`
-	Slug      string    `gorm:"column:slug"`
-	Status    string    `gorm:"column:status"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
+	ID        string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	Name      string    `gorm:"column:name" json:"name"`
+	Slug      string    `gorm:"column:slug" json:"slug"`
+	Status    string    `gorm:"column:status" json:"status"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Tenant to its PostgreSQL table.
@@ -41,12 +41,12 @@ func (Tenant) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // TenantHost maps a hostname to a tenant (tbl_tenant_hosts).
 type TenantHost struct {
-	ID        string    `gorm:"column:id;primaryKey;type:uuid"`
-	TenantID  string    `gorm:"column:tenant_id"`
-	Host      string    `gorm:"column:host"`
-	IsDefault bool      `gorm:"column:is_default"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
+	ID        string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID  string    `gorm:"column:tenant_id" json:"tenant_id"`
+	Host      string    `gorm:"column:host" json:"host"`
+	IsDefault bool      `gorm:"column:is_default" json:"is_default"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps TenantHost to its PostgreSQL table.
@@ -57,15 +57,15 @@ func (TenantHost) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) 
 
 // AuthProfile is a per-tenant OIDC/JWT config (tbl_tenant_auth_profiles).
 type AuthProfile struct {
-	ID        string    `gorm:"column:id;primaryKey;type:uuid"`
-	TenantID  string    `gorm:"column:tenant_id"`
-	Name      string    `gorm:"column:name"`
-	Issuer    *string   `gorm:"column:issuer"`
-	ClientID  *string   `gorm:"column:client_id"`
-	JwksURI   *string   `gorm:"column:jwks_uri"`
-	Config    []byte    `gorm:"column:config;type:jsonb"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
+	ID        string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID  string    `gorm:"column:tenant_id" json:"tenant_id"`
+	Name      string    `gorm:"column:name" json:"name"`
+	Issuer    *string   `gorm:"column:issuer" json:"issuer"`
+	ClientID  *string   `gorm:"column:client_id" json:"client_id"`
+	JwksURI   *string   `gorm:"column:jwks_uri" json:"jwks_uri"`
+	Config    []byte    `gorm:"column:config;type:jsonb" json:"config"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps AuthProfile to its PostgreSQL table.
@@ -76,13 +76,13 @@ func (AuthProfile) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db)
 
 // User is a tenant-scoped principal (tbl_users).
 type User struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
-	TenantID    string    `gorm:"column:tenant_id"`
-	Email       string    `gorm:"column:email"`
-	DisplayName string    `gorm:"column:display_name"`
-	OwnerUserID *string   `gorm:"column:owner_user_id"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at"`
+	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID    string    `gorm:"column:tenant_id" json:"tenant_id"`
+	Email       string    `gorm:"column:email" json:"email"`
+	DisplayName string    `gorm:"column:display_name" json:"display_name"`
+	OwnerUserID *string   `gorm:"column:owner_user_id" json:"owner_user_id"`
+	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps User to its PostgreSQL table.
@@ -93,10 +93,10 @@ func (User) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // UserRole assigns a role to a user (tbl_user_roles).
 type UserRole struct {
-	ID        string    `gorm:"column:id;primaryKey;type:uuid"`
-	UserID    string    `gorm:"column:user_id"`
-	Role      string    `gorm:"column:role"`
-	CreatedAt time.Time `gorm:"column:created_at"`
+	ID        string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	UserID    string    `gorm:"column:user_id" json:"user_id"`
+	Role      string    `gorm:"column:role" json:"role"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 // TableName maps UserRole to its PostgreSQL table.
@@ -107,16 +107,16 @@ func (UserRole) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // AccessToken is a hashed abt_ service token (tbl_access_tokens).
 type AccessToken struct {
-	ID             string     `gorm:"column:id;primaryKey;type:uuid"`
-	UserID         string     `gorm:"column:user_id"`
-	Name           string     `gorm:"column:name"`
-	TokenHash      string     `gorm:"column:token_hash"`
-	Prefix         string     `gorm:"column:prefix"`
-	TokenEncrypted []byte     `gorm:"column:token_encrypted;type:bytea"`
-	ExpiresAt      *time.Time `gorm:"column:expires_at"`
-	RevokedAt      *time.Time `gorm:"column:revoked_at"`
-	CreatedAt      time.Time  `gorm:"column:created_at"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at"`
+	ID             string     `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	UserID         string     `gorm:"column:user_id" json:"user_id"`
+	Name           string     `gorm:"column:name" json:"name"`
+	TokenHash      string     `gorm:"column:token_hash" json:"token_hash"`
+	Prefix         string     `gorm:"column:prefix" json:"prefix"`
+	TokenEncrypted []byte     `gorm:"column:token_encrypted;type:bytea" json:"token_encrypted"`
+	ExpiresAt      *time.Time `gorm:"column:expires_at" json:"expires_at"`
+	RevokedAt      *time.Time `gorm:"column:revoked_at" json:"revoked_at"`
+	CreatedAt      time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps AccessToken to its PostgreSQL table.
@@ -127,14 +127,14 @@ func (AccessToken) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db)
 
 // AuditLog is the append-only audit trail (tbl_audit_log).
 type AuditLog struct {
-	ID         int64     `gorm:"column:id;primaryKey"`
-	TenantID   *string   `gorm:"column:tenant_id"`
-	Actor      []byte    `gorm:"column:actor;type:jsonb"`
-	Action     string    `gorm:"column:action"`
-	ObjectType string    `gorm:"column:object_type"`
-	ObjectID   *string   `gorm:"column:object_id"`
-	Details    []byte    `gorm:"column:details;type:jsonb"`
-	CreatedAt  time.Time `gorm:"column:created_at"`
+	ID         int64     `gorm:"column:id;primaryKey" json:"id"`
+	TenantID   *string   `gorm:"column:tenant_id" json:"tenant_id"`
+	Actor      []byte    `gorm:"column:actor;type:jsonb" json:"actor"`
+	Action     string    `gorm:"column:action" json:"action"`
+	ObjectType string    `gorm:"column:object_type" json:"object_type"`
+	ObjectID   *string   `gorm:"column:object_id" json:"object_id"`
+	Details    []byte    `gorm:"column:details;type:jsonb" json:"details"`
+	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 // TableName maps AuditLog to its PostgreSQL table.
@@ -142,18 +142,18 @@ func (AuditLog) TableName() string { return "tbl_audit_log" }
 
 // Namespace is the current-state environment row (tbl_namespaces).
 type Namespace struct {
-	ID               string     `gorm:"column:id;primaryKey;type:uuid"`
-	TenantID         string     `gorm:"column:tenant_id"`
-	OwnerUserID      string     `gorm:"column:owner_user_id"`
-	Name             string     `gorm:"column:name"`
-	Description      string     `gorm:"column:description"`
-	Status           string     `gorm:"column:status"`
-	ReadyForLoadtest bool       `gorm:"column:ready_for_loadtest"`
-	Version          int        `gorm:"column:version"`
-	TTLExpiresAt     *time.Time `gorm:"column:ttl_expires_at"`
-	CleanupPolicy    []byte     `gorm:"column:cleanup_policy;type:jsonb"`
-	CreatedAt        time.Time  `gorm:"column:created_at"`
-	UpdatedAt        time.Time  `gorm:"column:updated_at"`
+	ID               string     `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID         string     `gorm:"column:tenant_id" json:"tenant_id"`
+	OwnerUserID      string     `gorm:"column:owner_user_id" json:"owner_user_id"`
+	Name             string     `gorm:"column:name" json:"name"`
+	Description      string     `gorm:"column:description" json:"description"`
+	Status           string     `gorm:"column:status" json:"status"`
+	ReadyForLoadtest bool       `gorm:"column:ready_for_loadtest" json:"ready_for_loadtest"`
+	Version          int        `gorm:"column:version" json:"version"`
+	TTLExpiresAt     *time.Time `gorm:"column:ttl_expires_at" json:"ttl_expires_at"`
+	CleanupPolicy    []byte     `gorm:"column:cleanup_policy;type:jsonb" json:"cleanup_policy"`
+	CreatedAt        time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Namespace to its PostgreSQL table.
@@ -164,14 +164,14 @@ func (Namespace) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // NamespaceEvent is an append-only status transition log (tbl_namespace_events).
 type NamespaceEvent struct {
-	ID         int64     `gorm:"column:id;primaryKey"`
-	ObjectID   string    `gorm:"column:object_id"`
-	FromStatus *string   `gorm:"column:from_status"`
-	ToStatus   string    `gorm:"column:to_status"`
-	Reason     *string   `gorm:"column:reason"`
-	Actor      []byte    `gorm:"column:actor;type:jsonb"`
-	Metadata   []byte    `gorm:"column:metadata;type:jsonb"`
-	CreatedAt  time.Time `gorm:"column:created_at"`
+	ID         int64     `gorm:"column:id;primaryKey" json:"id"`
+	ObjectID   string    `gorm:"column:object_id" json:"object_id"`
+	FromStatus *string   `gorm:"column:from_status" json:"from_status"`
+	ToStatus   string    `gorm:"column:to_status" json:"to_status"`
+	Reason     *string   `gorm:"column:reason" json:"reason"`
+	Actor      []byte    `gorm:"column:actor;type:jsonb" json:"actor"`
+	Metadata   []byte    `gorm:"column:metadata;type:jsonb" json:"metadata"`
+	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 // TableName maps NamespaceEvent to its PostgreSQL table.
@@ -179,14 +179,14 @@ func (NamespaceEvent) TableName() string { return "tbl_namespace_events" }
 
 // IdempotencyKey stores replayable POST responses (tbl_idempotency_keys).
 type IdempotencyKey struct {
-	ID             string    `gorm:"column:id;primaryKey;type:uuid"`
-	TenantID       string    `gorm:"column:tenant_id"`
-	Endpoint       string    `gorm:"column:endpoint"`
-	Key            string    `gorm:"column:key"`
-	RequestHash    string    `gorm:"column:request_hash"`
-	ResponseStatus *int      `gorm:"column:response_status"`
-	ResponseBody   *string   `gorm:"column:response_body"`
-	CreatedAt      time.Time `gorm:"column:created_at"`
+	ID             string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID       string    `gorm:"column:tenant_id" json:"tenant_id"`
+	Endpoint       string    `gorm:"column:endpoint" json:"endpoint"`
+	Key            string    `gorm:"column:key" json:"key"`
+	RequestHash    string    `gorm:"column:request_hash" json:"request_hash"`
+	ResponseStatus *int      `gorm:"column:response_status" json:"response_status"`
+	ResponseBody   *string   `gorm:"column:response_body" json:"response_body"`
+	CreatedAt      time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 // TableName maps IdempotencyKey to its PostgreSQL table.
@@ -197,15 +197,15 @@ func (IdempotencyKey) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(
 
 // Service is a namespace component with an OpenAPI spec (tbl_services).
 type Service struct {
-	ID            string    `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID   string    `gorm:"column:namespace_id"`
-	Name          string    `gorm:"column:name"`
-	OpenAPISpec   []byte    `gorm:"column:openapi_spec;type:jsonb"`
-	SpecHash      *string   `gorm:"column:spec_hash"`
-	ParsedSummary []byte    `gorm:"column:parsed_summary;type:jsonb"`
-	Version       int       `gorm:"column:version"`
-	CreatedAt     time.Time `gorm:"column:created_at"`
-	UpdatedAt     time.Time `gorm:"column:updated_at"`
+	ID            string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID   string    `gorm:"column:namespace_id" json:"namespace_id"`
+	Name          string    `gorm:"column:name" json:"name"`
+	OpenAPISpec   []byte    `gorm:"column:openapi_spec;type:jsonb" json:"openapi_spec"`
+	SpecHash      *string   `gorm:"column:spec_hash" json:"spec_hash"`
+	ParsedSummary []byte    `gorm:"column:parsed_summary;type:jsonb" json:"parsed_summary"`
+	Version       int       `gorm:"column:version" json:"version"`
+	CreatedAt     time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Service to its PostgreSQL table.
@@ -216,14 +216,14 @@ func (Service) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // Database is a namespace component (tbl_databases).
 type Database struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID string    `gorm:"column:namespace_id"`
-	Name        string    `gorm:"column:name"`
-	Engine      string    `gorm:"column:engine"`
-	Profile     []byte    `gorm:"column:profile;type:jsonb"`
-	Version     int       `gorm:"column:version"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at"`
+	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID string    `gorm:"column:namespace_id" json:"namespace_id"`
+	Name        string    `gorm:"column:name" json:"name"`
+	Engine      string    `gorm:"column:engine" json:"engine"`
+	Profile     []byte    `gorm:"column:profile;type:jsonb" json:"profile"`
+	Version     int       `gorm:"column:version" json:"version"`
+	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Database to its PostgreSQL table.
@@ -234,14 +234,14 @@ func (Database) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // Ingress is a namespace component (tbl_ingress).
 type Ingress struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID string    `gorm:"column:namespace_id"`
-	Name        string    `gorm:"column:name"`
-	Host        string    `gorm:"column:host"`
-	Paths       []byte    `gorm:"column:paths;type:jsonb"`
-	Version     int       `gorm:"column:version"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at"`
+	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID string    `gorm:"column:namespace_id" json:"namespace_id"`
+	Name        string    `gorm:"column:name" json:"name"`
+	Host        string    `gorm:"column:host" json:"host"`
+	Paths       []byte    `gorm:"column:paths;type:jsonb" json:"paths"`
+	Version     int       `gorm:"column:version" json:"version"`
+	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Ingress to its PostgreSQL table.
@@ -252,13 +252,13 @@ func (Ingress) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // Dependency references a service/database/mock used by the env (tbl_dependencies).
 type Dependency struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID string    `gorm:"column:namespace_id"`
-	Type        string    `gorm:"column:type"`
-	RefID       *string   `gorm:"column:ref_id"`
-	Config      []byte    `gorm:"column:config;type:jsonb"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at"`
+	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID string    `gorm:"column:namespace_id" json:"namespace_id"`
+	Type        string    `gorm:"column:type" json:"type"`
+	RefID       *string   `gorm:"column:ref_id" json:"ref_id"`
+	Config      []byte    `gorm:"column:config;type:jsonb" json:"config"`
+	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Dependency to its PostgreSQL table.
@@ -269,13 +269,13 @@ func (Dependency) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) 
 
 // NetworkPolicy is the resolved egress spec (tbl_network_policies).
 type NetworkPolicy struct {
-	ID                 string    `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID        string    `gorm:"column:namespace_id"`
-	ResolvedFromDeps   bool      `gorm:"column:resolved_from_deps"`
-	Spec               []byte    `gorm:"column:spec;type:jsonb"`
-	ObservedGeneration int64     `gorm:"column:observed_generation"`
-	CreatedAt          time.Time `gorm:"column:created_at"`
-	UpdatedAt          time.Time `gorm:"column:updated_at"`
+	ID                 string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID        string    `gorm:"column:namespace_id" json:"namespace_id"`
+	ResolvedFromDeps   bool      `gorm:"column:resolved_from_deps" json:"resolved_from_deps"`
+	Spec               []byte    `gorm:"column:spec;type:jsonb" json:"spec"`
+	ObservedGeneration int64     `gorm:"column:observed_generation" json:"observed_generation"`
+	CreatedAt          time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt          time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps NetworkPolicy to its PostgreSQL table.
@@ -286,16 +286,16 @@ func (NetworkPolicy) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(d
 
 // Script is the current-state k6 script row (tbl_scripts).
 type Script struct {
-	ID          string    `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID string    `gorm:"column:namespace_id"`
-	Name        string    `gorm:"column:name"`
-	ContentRef  string    `gorm:"column:content_ref"`
-	ContentHash string    `gorm:"column:content_hash"`
-	SizeBytes   int       `gorm:"column:size_bytes"`
-	Status      string    `gorm:"column:status"`
-	Version     int       `gorm:"column:version"`
-	CreatedAt   time.Time `gorm:"column:created_at"`
-	UpdatedAt   time.Time `gorm:"column:updated_at"`
+	ID          string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID string    `gorm:"column:namespace_id" json:"namespace_id"`
+	Name        string    `gorm:"column:name" json:"name"`
+	ContentRef  string    `gorm:"column:content_ref" json:"content_ref"`
+	ContentHash string    `gorm:"column:content_hash" json:"content_hash"`
+	SizeBytes   int       `gorm:"column:size_bytes" json:"size_bytes"`
+	Status      string    `gorm:"column:status" json:"status"`
+	Version     int       `gorm:"column:version" json:"version"`
+	CreatedAt   time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Script to its PostgreSQL table.
@@ -306,12 +306,12 @@ func (Script) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // ScriptValidation records one validation attempt (tbl_script_validations).
 type ScriptValidation struct {
-	ID          int64     `gorm:"column:id;primaryKey"`
-	ScriptID    string    `gorm:"column:script_id"`
-	Attempt     int       `gorm:"column:attempt"`
-	Status      string    `gorm:"column:status"`
-	Errors      []byte    `gorm:"column:errors;type:jsonb"`
-	ValidatedAt time.Time `gorm:"column:validated_at"`
+	ID          int64     `gorm:"column:id;primaryKey" json:"id"`
+	ScriptID    string    `gorm:"column:script_id" json:"script_id"`
+	Attempt     int       `gorm:"column:attempt" json:"attempt"`
+	Status      string    `gorm:"column:status" json:"status"`
+	Errors      []byte    `gorm:"column:errors;type:jsonb" json:"errors"`
+	ValidatedAt time.Time `gorm:"column:validated_at" json:"validated_at"`
 }
 
 // TableName maps ScriptValidation to its PostgreSQL table.
@@ -319,22 +319,22 @@ func (ScriptValidation) TableName() string { return "tbl_script_validations" }
 
 // LoadTest is the current-state load test row (tbl_load_tests).
 type LoadTest struct {
-	ID          string     `gorm:"column:id;primaryKey;type:uuid"`
-	NamespaceID string     `gorm:"column:namespace_id"`
-	ScriptID    string     `gorm:"column:script_id"`
-	Name        string     `gorm:"column:name"`
-	CreatedBy   string     `gorm:"column:created_by"`
-	LoadConfig  []byte     `gorm:"column:load_config;type:jsonb"`
-	Targets     []byte     `gorm:"column:targets;type:jsonb"`
-	RunnerType  string     `gorm:"column:runner_type"`
-	RunnerRef   *string    `gorm:"column:runner_ref"`
-	Status      string     `gorm:"column:status"`
-	StartedAt   *time.Time `gorm:"column:started_at"`
-	FinishedAt  *time.Time `gorm:"column:finished_at"`
-	TimeoutAt   *time.Time `gorm:"column:timeout_at"`
-	Version     int        `gorm:"column:version"`
-	CreatedAt   time.Time  `gorm:"column:created_at"`
-	UpdatedAt   time.Time  `gorm:"column:updated_at"`
+	ID          string     `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	NamespaceID string     `gorm:"column:namespace_id" json:"namespace_id"`
+	ScriptID    string     `gorm:"column:script_id" json:"script_id"`
+	Name        string     `gorm:"column:name" json:"name"`
+	CreatedBy   string     `gorm:"column:created_by" json:"created_by"`
+	LoadConfig  []byte     `gorm:"column:load_config;type:jsonb" json:"load_config"`
+	Targets     []byte     `gorm:"column:targets;type:jsonb" json:"targets"`
+	RunnerType  string     `gorm:"column:runner_type" json:"runner_type"`
+	RunnerRef   *string    `gorm:"column:runner_ref" json:"runner_ref"`
+	Status      string     `gorm:"column:status" json:"status"`
+	StartedAt   *time.Time `gorm:"column:started_at" json:"started_at"`
+	FinishedAt  *time.Time `gorm:"column:finished_at" json:"finished_at"`
+	TimeoutAt   *time.Time `gorm:"column:timeout_at" json:"timeout_at"`
+	Version     int        `gorm:"column:version" json:"version"`
+	CreatedAt   time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps LoadTest to its PostgreSQL table.
@@ -345,14 +345,14 @@ func (LoadTest) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
 // LoadTestEvent is an append-only transition log (tbl_loadtest_events).
 type LoadTestEvent struct {
-	ID         int64     `gorm:"column:id;primaryKey"`
-	ObjectID   string    `gorm:"column:object_id"`
-	FromStatus *string   `gorm:"column:from_status"`
-	ToStatus   string    `gorm:"column:to_status"`
-	Reason     *string   `gorm:"column:reason"`
-	Actor      []byte    `gorm:"column:actor;type:jsonb"`
-	Metadata   []byte    `gorm:"column:metadata;type:jsonb"`
-	CreatedAt  time.Time `gorm:"column:created_at"`
+	ID         int64     `gorm:"column:id;primaryKey" json:"id"`
+	ObjectID   string    `gorm:"column:object_id" json:"object_id"`
+	FromStatus *string   `gorm:"column:from_status" json:"from_status"`
+	ToStatus   string    `gorm:"column:to_status" json:"to_status"`
+	Reason     *string   `gorm:"column:reason" json:"reason"`
+	Actor      []byte    `gorm:"column:actor;type:jsonb" json:"actor"`
+	Metadata   []byte    `gorm:"column:metadata;type:jsonb" json:"metadata"`
+	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 // TableName maps LoadTestEvent to its PostgreSQL table.
@@ -360,12 +360,12 @@ func (LoadTestEvent) TableName() string { return "tbl_loadtest_events" }
 
 // TestEvent is the runtime event stream (tbl_test_events).
 type TestEvent struct {
-	ID         int64     `gorm:"column:id;primaryKey"`
-	LoadTestID string    `gorm:"column:load_test_id"`
-	Seq        int64     `gorm:"column:seq"`
-	Type       string    `gorm:"column:type"`
-	Payload    []byte    `gorm:"column:payload;type:jsonb"`
-	CreatedAt  time.Time `gorm:"column:created_at"`
+	ID         int64     `gorm:"column:id;primaryKey" json:"id"`
+	LoadTestID string    `gorm:"column:load_test_id" json:"load_test_id"`
+	Seq        int64     `gorm:"column:seq" json:"seq"`
+	Type       string    `gorm:"column:type" json:"type"`
+	Payload    []byte    `gorm:"column:payload;type:jsonb" json:"payload"`
+	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
 }
 
 // TableName maps TestEvent to its PostgreSQL table.
