@@ -29,6 +29,10 @@ type Spec struct {
 type Status struct {
 	State string // PROVISIONING | RUNNING | COMPLETED | FAILED | STOPPED
 	Msg   string
+	// Missing is true when the ref is unknown to the runner (e.g. after a
+	// controller restart lost the in-process table). The reconciler treats
+	// Missing as "runner lost the run" → FAILED, not a normal STOPPED.
+	Missing bool
 }
 
 // Runner executes load tests.
@@ -109,7 +113,7 @@ func (l *Local) Stop(_ context.Context, ref string) error {
 func (l *Local) Status(_ context.Context, ref string) (Status, error) {
 	p, ok := l.procs.get(ref)
 	if !ok {
-		return Status{State: "STOPPED", Msg: "no such run"}, nil
+		return Status{State: "STOPPED", Msg: "no such run", Missing: true}, nil
 	}
 	// Short grace window: a just-exited process should be observed on the
 	// same poll (reconcilers poll at seconds, so 200ms is invisible). reap

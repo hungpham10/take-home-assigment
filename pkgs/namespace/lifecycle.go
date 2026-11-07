@@ -145,7 +145,7 @@ func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
 		}
 		policy := store.NetworkPolicy{
 			NamespaceID: ns.ID, ResolvedFromDeps: true,
-			Spec: jsonBytes(spec), ObservedGeneration: 1,
+			Spec: store.JSONBytes(spec), ObservedGeneration: 1,
 		}
 		var existing store.NetworkPolicy
 		if err := tx.Where("namespace_id = ?", ns.ID).First(&existing).Error; err == nil {

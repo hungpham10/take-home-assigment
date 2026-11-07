@@ -3,7 +3,6 @@ package adminapi
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 )
@@ -19,8 +18,3 @@ func newToken() (string, error) {
 }
 
 func readAll(r io.Reader) ([]byte, error) { return io.ReadAll(r) }
-
-func jsonBytes(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
-}

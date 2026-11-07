@@ -1,96 +1,78 @@
-package namespace
+package namespace_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
-	platform "github.com/hungpham/loadtest-platform"
-	"github.com/hungpham/loadtest-platform/pkgs/authz"
+	"gorm.io/gorm"
+
 	"github.com/hungpham/loadtest-platform/pkgs/store"
+	"github.com/hungpham/loadtest-platform/pkgs/testutil"
 )
 
 // Integration tests (opsense-rs style): skip when Postgres unreachable
-// locally, hard-fail in CI (TEST_DATABASE_DSN + CI set).
+// locally, hard-fail in CI (TEST_DATABASE_DSN + CI set). All requests go
+// through the REAL server composition (server.NewRouter) — tests exercise
+// /api/loadtest/v1/namespaces exactly as nginx routes them.
 
-func testDeps(t *testing.T) Deps {
+func testServer(t *testing.T) (http.Handler, *gorm.DB) {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_DSN")
-	if dsn == "" {
-		dsn = "postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable"
-	}
-	db, err := store.New(context.Background(), dsn)
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatalf("CI requires postgres: %v", err)
-		}
-		t.Skipf("postgres unavailable: %v", err)
-	}
-	sqlDB, _ := db.DB()
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := store.Migrate(context.Background(), dsn, platform.Migrations()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return Deps{DB: db, Now: func() time.Time { return time.Now() }}
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now})
+	return h, db
 }
 
-// userFixture creates a tenant + user (+role) and returns principal headers.
-func userFixture(t *testing.T, d Deps, role string) map[string]string {
-	t.Helper()
-	suffix := store.Tenant{Slug: "ns-" + fmt.Sprintf("%x", time.Now().UnixNano())}
-	tenant := store.Tenant{Name: "Ns", Slug: suffix.Slug, Status: "ACTIVE"}
-	if err := d.DB.Create(&tenant).Error; err != nil {
-		t.Fatalf("userFixture tenant: %v", err)
+// staleIfMatch returns headers plus an If-Match header.
+func staleIfMatch(h map[string]string, etag string) map[string]string {
+	out := map[string]string{"If-Match": etag}
+	for k, v := range h {
+		out[k] = v
 	}
-	user := store.User{TenantID: tenant.ID, Email: "ns-" + tenant.ID + "@x.co", DisplayName: "Ns"}
-	if err := d.DB.Create(&user).Error; err != nil {
-		t.Fatalf("userFixture user: %v", err)
-	}
-	if role != "" {
-		if err := d.DB.Create(&store.UserRole{UserID: user.ID, Role: role}).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
-	tenantID, userID := tenant.ID, user.ID
-	_ = suffix
-	return map[string]string{"X-Tenant-Id": tenantID, "X-User-Id": userID, "X-User-Role": role}
+	return out
 }
 
-func do(t *testing.T, d Deps, method, path string, headers map[string]string, body any) *httptest.ResponseRecorder {
+// sameTenantAdmin creates an admin user in an existing tenant; returns headers.
+func sameTenantAdmin(t *testing.T, db *gorm.DB, tenantID string) map[string]string {
 	t.Helper()
-	var rdr *bytes.Reader
-	if body != nil {
-		rdr = bytes.NewReader(jsonBytes(body))
-	} else {
-		rdr = bytes.NewReader(nil)
+	suffix := time.Now().UnixNano()
+	user := store.User{TenantID: tenantID, Email: "adm-" + itoa(suffix) + "@x.co", DisplayName: "A"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
 	}
-	req := httptest.NewRequest(method, path, rdr)
-	for k, v := range headers {
-		req.Header.Set(k, v)
+	if err := db.Create(&store.UserRole{UserID: user.ID, Role: "admin"}).Error; err != nil {
+		t.Fatal(err)
 	}
-	rec := httptest.NewRecorder()
-	authz.RequirePrincipal(Router(d)).ServeHTTP(rec, req)
-	return rec
+	return testutil.PrincipalHeaders(tenantID, user.ID, "admin")
+}
+
+func itoa(n int64) string {
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }
 
 func TestNamespaceCRUDAndETag(t *testing.T) {
-	d := testDeps(t)
-	h := userFixture(t, d, "user")
+	h, db := testServer(t)
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
 
 	// missing idempotency key → 422
-	rec := do(t, d, http.MethodPost, "/", h, map[string]string{"name": "ns1"})
+	rec := testutil.Do(t, h, http.MethodPost, base, principal, map[string]string{"name": "ns1"})
 	if rec.Code != 422 {
 		t.Fatalf("missing Idempotency-Key: status = %d", rec.Code)
 	}
 
 	// create
-	rec = do(t, d, http.MethodPost, "/", withKey(h, "k1"), map[string]string{"name": "ns1", "description": "first"})
+	rec = testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"),
+		map[string]string{"name": "ns1", "description": "first"})
 	if rec.Code != 201 {
 		t.Fatalf("create: status = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -105,26 +87,26 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	}
 
 	// duplicate name → 422
-	rec = do(t, d, http.MethodPost, "/", withKey(h, "k2"), map[string]string{"name": "ns1"})
+	rec = testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k2"), map[string]string{"name": "ns1"})
 	if rec.Code != 422 {
 		t.Errorf("duplicate create: status = %d, want 422", rec.Code)
 	}
 
 	// get with ETag
-	rec = do(t, d, http.MethodGet, "/"+ns.ID, h, nil)
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, principal, nil)
 	if rec.Code != 200 || rec.Header().Get("ETag") != etag {
 		t.Errorf("get = (%d, %q)", rec.Code, rec.Header().Get("ETag"))
 	}
 
 	// stale If-Match → 412
-	rec = do(t, d, http.MethodPatch, "/"+ns.ID, staleIfMatch(h, `"99"`),
+	rec = testutil.Do(t, h, http.MethodPatch, base+"/"+ns.ID, staleIfMatch(principal, `"99"`),
 		map[string]any{"description": "x"})
 	if rec.Code != 412 {
 		t.Errorf("stale If-Match: status = %d, want 412", rec.Code)
 	}
 
 	// patch with correct If-Match
-	rec = do(t, d, http.MethodPatch, "/"+ns.ID, staleIfMatch(h, etag),
+	rec = testutil.Do(t, h, http.MethodPatch, base+"/"+ns.ID, staleIfMatch(principal, etag),
 		map[string]any{"description": "updated"})
 	if rec.Code != 200 {
 		t.Fatalf("patch: status = %d: %s", rec.Code, rec.Body.String())
@@ -136,8 +118,8 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	}
 
 	// idempotent replay returns identical response
-	rec1 := do(t, d, http.MethodPost, "/", withKey(h, "k3"), map[string]string{"name": "ns2"})
-	rec2 := do(t, d, http.MethodPost, "/", withKey(h, "k3"), map[string]string{"name": "ns2"})
+	rec1 := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k3"), map[string]string{"name": "ns2"})
+	rec2 := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k3"), map[string]string{"name": "ns2"})
 	if rec1.Code != 201 || rec2.Code != 201 || rec2.Header().Get("Idempotency-Replayed") != "true" {
 		t.Errorf("replay: rec1=%d rec2=%d replayed=%q",
 			rec1.Code, rec2.Code, rec2.Header().Get("Idempotency-Replayed"))
@@ -150,19 +132,19 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	}
 
 	// same key different payload → 422
-	rec = do(t, d, http.MethodPost, "/", withKey(h, "k3"), map[string]string{"name": "ns9"})
+	rec = testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k3"), map[string]string{"name": "ns9"})
 	if rec.Code != 422 {
 		t.Errorf("key reuse with different payload: status = %d, want 422", rec.Code)
 	}
 
 	// delete (DRAFT → DELETING) → 202
-	rec = do(t, d, http.MethodDelete, "/"+ns.ID, h, nil)
+	rec = testutil.Do(t, h, http.MethodDelete, base+"/"+ns.ID, principal, nil)
 	if rec.Code != 202 {
 		t.Fatalf("delete: status = %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// after delete: status DELETING (reaper finishes to DELETED), still visible
-	rec = do(t, d, http.MethodGet, "/"+ns.ID, h, nil)
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, principal, nil)
 	if rec.Code != 200 {
 		t.Errorf("get after delete: status = %d, want 200", rec.Code)
 	}
@@ -173,13 +155,13 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	}
 
 	// events endpoint still serves the namespace
-	rec = do(t, d, http.MethodGet, "/"+ns.ID+"/events", h, nil)
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID+"/events", principal, nil)
 	if rec.Code != 200 || !bytes.Contains(rec.Body.Bytes(), []byte("DELETING")) {
 		t.Errorf("events after delete = (%d, %s)", rec.Code, rec.Body.String())
 	}
 	// delete transition recorded in events table (DRAFT -> DELETING)
 	var eventCount int64
-	if err := d.DB.Model(&store.NamespaceEvent{}).
+	if err := db.Model(&store.NamespaceEvent{}).
 		Where("object_id = ? AND to_status = ?", ns.ID, "DELETING").
 		Count(&eventCount).Error; err != nil || eventCount != 1 {
 		t.Errorf("delete event count = %d, err = %v", eventCount, err)
@@ -187,12 +169,13 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 }
 
 func TestOwnerIsolationAndAdminOverride(t *testing.T) {
-	d := testDeps(t)
-	owner := userFixture(t, d, "user")
-	admin := userFixture(t, d, "admin")
-	other := userFixture(t, d, "user")
+	h, db := testServer(t)
+	base := "/api/loadtest/v1/namespaces"
+	owner := testutil.TenantUserHeaders(t, db, "user")
+	admin := testutil.TenantUserHeaders(t, db, "admin")
+	other := testutil.TenantUserHeaders(t, db, "user")
 
-	rec := do(t, d, http.MethodPost, "/", withKey(owner, "ko1"), map[string]string{"name": "owned"})
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(owner, "ko1"), map[string]string{"name": "owned"})
 	if rec.Code != 201 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
@@ -200,58 +183,23 @@ func TestOwnerIsolationAndAdminOverride(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
 
 	// other user cannot see it (404 — no existence leak)
-	if rec = do(t, d, http.MethodGet, "/"+ns.ID, other, nil); rec.Code != 404 {
+	if rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, other, nil); rec.Code != 404 {
 		t.Errorf("cross-owner get: status = %d, want 404", rec.Code)
 	}
 	// other user does not see it in list either
-	rec = do(t, d, http.MethodGet, "/", other, nil)
+	rec = testutil.Do(t, h, http.MethodGet, base, other, nil)
 	if bytes.Contains(rec.Body.Bytes(), []byte(ns.ID)) {
 		t.Error("cross-owner list leaked namespace")
 	}
 	// admin in a DIFFERENT tenant also cannot (tenant isolation always)
-	if rec = do(t, d, http.MethodGet, "/"+ns.ID, admin, nil); rec.Code != 404 {
+	if rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, admin, nil); rec.Code != 404 {
 		t.Errorf("cross-tenant admin get: status = %d, want 404", rec.Code)
 	}
 
 	// admin in the SAME tenant can manage across owners
-	adminHeaders := sameTenantAdmin(t, d, owner["X-Tenant-Id"])
-	rec = do(t, d, http.MethodGet, "/"+ns.ID, adminHeaders, nil)
+	adminHeaders := sameTenantAdmin(t, db, owner["X-Tenant-Id"])
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, adminHeaders, nil)
 	if rec.Code != 200 {
 		t.Errorf("same-tenant admin get: status = %d, want 200", rec.Code)
-	}
-}
-
-func withKey(h map[string]string, key string) map[string]string {
-	out := map[string]string{"Idempotency-Key": key}
-	for k, v := range h {
-		out[k] = v
-	}
-	return out
-}
-
-func staleIfMatch(h map[string]string, etag string) map[string]string {
-	out := map[string]string{"If-Match": etag}
-	for k, v := range h {
-		out[k] = v
-	}
-	return out
-}
-
-func tokenSuffix() string {
-	return fmt.Sprintf("%x", time.Now().UnixNano())
-}
-
-func sameTenantAdmin(t *testing.T, d Deps, tenantID string) map[string]string {
-	t.Helper()
-	user := store.User{TenantID: tenantID, Email: "adm-" + tokenSuffix() + "@x.co", DisplayName: "A"}
-	if err := d.DB.Create(&user).Error; err != nil {
-		return nil
-	}
-	if err := d.DB.Create(&store.UserRole{UserID: user.ID, Role: "admin"}).Error; err != nil {
-		return nil
-	}
-	userID := user.ID
-	return map[string]string{
-		"X-Tenant-Id": tenantID, "X-User-Id": userID, "X-User-Role": "admin",
 	}
 }

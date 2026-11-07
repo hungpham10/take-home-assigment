@@ -40,13 +40,16 @@ func NewQueue(ctx context.Context, db *gorm.DB, scriptsDir string, workers, buff
 	return q
 }
 
-// Submit enqueues a script ID; drops (with a log) when full — the client can
-// re-trigger validation via POST /{id}/validate.
-func (q *Queue) Submit(scriptID string) {
+// Submit enqueues a script ID and reports whether it was buffered. When the
+// queue is full it returns false (caller must NOT transition to VALIDATING and
+// should surface 429 — the client can retry via POST /{id}/validate).
+func (q *Queue) Submit(scriptID string) bool {
 	select {
 	case q.ch <- scriptID:
+		return true
 	default:
-		slog.Warn("validation queue full, dropping", "script", scriptID)
+		slog.Warn("validation queue full, rejecting", "script", scriptID)
+		return false
 	}
 }
 

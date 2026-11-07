@@ -57,6 +57,12 @@ func (rc Reconciler) reconcileOne(ctx context.Context, lt *store.LoadTest) {
 	}
 	actor := store.ActorJSON("", "system", "")
 	switch {
+	// Runner lost the ref (e.g. controller restart wiped its in-process
+	// table): STOPPED-with-Missing is NOT a normal stop — fail the run so it
+	// doesn't poll a dead ref forever.
+	case st.Missing && (lt.Status == "PROVISIONING" || lt.Status == "RUNNING"):
+		_ = store.Transition(ctx, rc.DB, "loadtest", lt.ID, "FAILED",
+			actor, "runner lost the run (controller restart?): "+st.Msg)
 	case lt.Status == "PROVISIONING" && st.State == "RUNNING":
 		// Transition FIRST (fn_*_transition updates status+version), then
 		// ancillary fields — never UPDATE status directly.

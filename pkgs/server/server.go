@@ -55,21 +55,28 @@ func NewRouter(d Deps) http.Handler {
 	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
 	// /api/admin/v1 — nginx integration + account management (plan 09).
-	// Trust boundary: mounted for the nginx→backend channel; middleware
-	// FailClosed applies to /api/loadtest/v1 (plan 10), not here (nginx
-	// internal calls carry no user identity).
-	r.Mount("/api/admin/v1", adminapi.Router(adminapi.Deps{DB: d.DB, Now: d.Now, Secrets: d.Secrets, MasterKey: d.MasterKey}))
+	// Trust boundary: mounted for the nginx→backend channel; principal
+	// middleware applies only to the operator group (nginx internal calls
+	// carry no user identity).
+	r.Route("/api/admin/v1", func(r chi.Router) {
+		adminapi.MountInternal(r, adminapi.Deps{
+			DB: d.DB, Now: d.Now, Secrets: d.Secrets, MasterKey: d.MasterKey,
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(authz.RequirePrincipalWithRole(d.DB))
+			adminapi.MountOperator(r, adminapi.Deps{
+				DB: d.DB, Now: d.Now, Secrets: d.Secrets, MasterKey: d.MasterKey,
+			})
+		})
+	})
 
-	// /api/loadtest/v1 — data-plane BFF (plans 10-13), fail-closed principal.
+	// /api/loadtest/v1 — data-plane BFF (plans 10-13), fail-closed principal
+	// with server-side role resolution (X-User-Role is not authoritative).
 	r.Route("/api/loadtest/v1", func(r chi.Router) {
-		r.Use(authz.RequirePrincipal)
-		r.Mount("/namespaces", namespace.Router(namespace.Deps{DB: d.DB, Now: d.Now}))
-		r.Mount("/namespaces/{id}/scripts", script.Router(script.Deps{
-			DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now,
-		}))
-		r.Mount("/namespaces/{id}/loadtests", loadtest.Router(loadtest.Deps{
-			DB: d.DB, Runner: d.Runner, Now: d.Now,
-		}))
+		r.Use(authz.RequirePrincipalWithRole(d.DB))
+		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now})
+		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
+		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now})
 	})
 	// Script content reader for the runner (staged files).
 	loadtest.ScriptContentOf = func(ref string) ([]byte, error) {
