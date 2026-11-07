@@ -21,8 +21,8 @@ import (
 
 // Deps carries everything the server routes need.
 type Deps struct {
-	DB      *gorm.DB
-	Now     func() time.Time // injectable clock (tests)
+	DB        *gorm.DB
+	Now       func() time.Time // injectable clock (tests)
 	Secrets   secrets.Resolver // SOPS-decrypted tenant secrets
 	MasterKey []byte           // AES-256-GCM master key (token encryption at rest)
 }
