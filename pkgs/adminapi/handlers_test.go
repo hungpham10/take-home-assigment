@@ -124,12 +124,13 @@ func TestAuthConfigShape(t *testing.T) {
 func TestIntrospectLifecycle(t *testing.T) {
 	d := testDeps(t)
 	tenantID, userID, _ := fixtures(t, d)
-	h := Router(d)
 
-	// Master key configured BEFORE issue → plaintext encrypted at rest.
+	// Master key configured BEFORE router build (Deps is by value) and before
+	// issue → plaintext encrypted at rest.
 	masterKey := make([]byte, 32)
 	copy(masterKey, []byte("0123456789abcdef0123456789abcdef"))
 	d.MasterKey = masterKey
+	h := Router(d)
 
 	// issue by ANOTHER user in same tenant without admin → 403 (self-only gate)
 	other := store.User{TenantID: tenantID, Email: "other-" + tenantID + "@x.co", DisplayName: "O"}
