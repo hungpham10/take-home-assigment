@@ -126,6 +126,11 @@ func TestIntrospectLifecycle(t *testing.T) {
 	tenantID, userID, _ := fixtures(t, d)
 	h := Router(d)
 
+	// Master key configured BEFORE issue → plaintext encrypted at rest.
+	masterKey := make([]byte, 32)
+	copy(masterKey, []byte("0123456789abcdef0123456789abcdef"))
+	d.MasterKey = masterKey
+
 	// issue by ANOTHER user in same tenant without admin → 403 (self-only gate)
 	other := store.User{TenantID: tenantID, Email: "other-" + tenantID + "@x.co", DisplayName: "O"}
 	if err := d.DB.Create(&other).Error; err != nil {
@@ -191,10 +196,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 		t.Error("tampered token must be inactive")
 	}
 
-	// reveal by owner — with master key configured
-	masterKey := make([]byte, 32)
-	copy(masterKey, []byte("0123456789abcdef0123456789abcdef"))
-	d.MasterKey = masterKey
+	// reveal by owner — master key was configured at issue time
 	rec = httptest.NewRecorder()
 	vreq := httptest.NewRequest(http.MethodPost, "/tokens/"+issued.ID+"/reveal", nil)
 	vreq.Header.Set("X-Tenant-Id", tenantID)
