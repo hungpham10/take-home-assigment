@@ -73,6 +73,6 @@ jobs:
         run: |
           for f in $(ls sql/[0-9]*_*.sql | sort); do
             echo "== applying $f"
-            PGPASSWORD=ltp psql -h localhost -U ltp -v ON_ERROR_STOP=1 -f "$f" || exit 1
+            PGPASSWORD=ltp psql -h localhost -U ltp -d ltp -v ON_ERROR_STOP=1 -f "$f" || exit 1
           done
           echo "All migrations applied cleanly."
