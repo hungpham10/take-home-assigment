@@ -117,6 +117,14 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 6. **CodeGraph final review + bump version** (`scripts/bump.sh`) — theo AGENTS.md trước khi coi là release
 7. Plans 16 (harness-testing-integrity) — do user tạo, chưa implement
 
+## 7b. Harness (plans/16 — PR #20/#21, 2026-11-07)
+- Composition root tập trung: `Mount(r chi.Router, d Deps)`, server.go duy nhất configure middleware; tests qua `pkgs/testutil.NewServer` (không tái tạo auth)
+- Fix High: loadtest create transition-in-tx + Runner.Start; queue-full → 429 (không kẹt VALIDATING); reconciler runner-lost → FAILED
+- Role verify DB server-side (`RequirePrincipalWithRole`) — spoof header chặn
+- Harness matrix: `tests/harness/` (AUTHZ-01..04, IDEM, CONC, VAL, STATE-*, RUN-*) + `tests/sql/harness_test.sql` (DB-TXN-01..05...) — **TDD proof: phá invariant → đỏ**
+- Bonus fix: cross-tenant token issue hole (bắt bởi harness)
+- Deviation ghi nhận: `POST /tokens/{id}/revoke` thay `DELETE /users/{uid}/tokens/{tid}`; admin CRUD surface defer
+
 ## 8. Điểm nên review kỹ khi code review
 
 1. `pkgs/store/transitions.go` — điểm Raw duy nhất; mọi status change phải đi qua đây

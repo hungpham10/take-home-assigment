@@ -121,6 +121,16 @@ Thiết lập **harness test** chứng minh metadata/control-plane **an toàn v�
 - **Medium**: metadata (started_at/finished_at) gộp transition transaction khi có thể; spec update → ready_for_loadtest=false là effective gate (đã đúng, thêm test)
 - **Authz**: RequirePrincipal verify role từ `tbl_user_roles` (DB server-side)
 
+### Implemented (2026-11-07 — PR #20 + #21)
+- [x] Composition-root refactor: Mount pattern + pkgs/testutil (NewServer thật) + pkgs/idempotency
+- [x] Fix High-1/2/3 (loadtest create transition+Start, queue accepted bool, reconciler Missing→FAILED)
+- [x] API-AUTHZ-01..04 + API-CONC-01 + API-IDEM-01 + API-VAL-01 + STATE-QUEUE/DB/MEM-01 + RUN-STOP/TIMEOUT
+- [x] SQL harness DB-TXN-01..05 + IDEM/RESERVATION/TERMINAL/APPEND
+- [x] K8s scaffold (build tag harness_k8s)
+- [x] **Bonus bug thật**: adminapi issueToken/listTokens resolve target tenant từ DB (trước: admin tenant B issue token trong tenant A) — bắt bởi API-AUTHZ-03
+- [x] TDD proof: bỏ RequireSelfOrAdmin → 2 case đỏ → restore xanh
+- Prod tweak: queue-full → 429 QUOTA_EXCEEDED
+
 ### DEFER (ghi rõ, không làm đợt này)
 - Admin CRUD surface: tenants/users/auth-profiles CRUD, `/audit` read API, `/me` — plan riêng
 - RESOURCE-DECL-*: chỉ skeleton test silent-drop; full declaration surface theo docs là phase sau
