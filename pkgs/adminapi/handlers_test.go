@@ -42,26 +42,23 @@ func testDeps(t *testing.T) Deps {
 // fixtures creates tenant + host(fx.local) + user; returns (tenantID, userID).
 func fixtures(t *testing.T, d Deps) (string, string) {
 	t.Helper()
-	var tenantID, userID string
-	err := d.DB.Raw(`
-		WITH t AS (
-			INSERT INTO tbl_tenants (name, slug) VALUES ('Fx', 'fx-' || gen_random_uuid()::text)
-			RETURNING id
-		), u AS (
-			INSERT INTO tbl_users (tenant_id, email, display_name)
-			SELECT t.id, 'fx-' || gen_random_uuid()::text || '@x.co', 'Fx' FROM t
-			RETURNING id, tenant_id
-		)
-		SELECT u.tenant_id::text, u.id::text FROM u`).Row().Scan(&tenantID, &userID)
-	if err != nil {
-		t.Fatalf("fixtures: %v", err)
+	ctx := context.Background()
+	tenant := store.Tenant{Name: "Fx", Slug: "fx-" + tokenHash(time.Now().String())[:16], Status: "ACTIVE"}
+	if err := d.DB.WithContext(ctx).Create(&tenant).Error; err != nil {
+		t.Fatalf("fixtures tenant: %v", err)
 	}
-	if err := d.DB.Exec(
-		`INSERT INTO tbl_tenant_hosts (tenant_id, host) VALUES (?, 'fx.local')
-		 ON CONFLICT (host) DO UPDATE SET tenant_id = EXCLUDED.tenant_id`, tenantID).Error; err != nil {
+	user := store.User{TenantID: tenant.ID, Email: "fx-" + tenant.ID + "@x.co", DisplayName: "Fx"}
+	if err := d.DB.WithContext(ctx).Create(&user).Error; err != nil {
+		t.Fatalf("fixtures user: %v", err)
+	}
+	host := store.TenantHost{TenantID: tenant.ID, Host: "fx.local"}
+	if err := d.DB.WithContext(ctx).
+		Where(store.TenantHost{Host: "fx.local"}).
+		Assign(store.TenantHost{TenantID: tenant.ID}).
+		FirstOrCreate(&host).Error; err != nil {
 		t.Fatal(err)
 	}
-	return tenantID, userID
+	return tenant.ID, user.ID
 }
 
 func TestResolveTenantID(t *testing.T) {
@@ -85,10 +82,15 @@ func TestResolveTenantID(t *testing.T) {
 func TestAuthConfigShape(t *testing.T) {
 	d := testDeps(t)
 	tenantID, _ := fixtures(t, d)
-	if err := d.DB.Exec(`
-		INSERT INTO tbl_tenant_auth_profiles (tenant_id, name, issuer, client_id, jwks_uri, config)
-		VALUES (?, 'default', 'http://dex:5556/dex', 'cid', 'http://dex:5556/dex/jwks',
-		        '{"oidc_client_secret":"s3cr3t","session_secret":"sess"}')`, tenantID).Error; err != nil {
+	cfg := store.AuthProfile{
+		TenantID: tenantID,
+		Name:     "default",
+		Issuer:   ptr("http://dex:5556/dex"),
+		ClientID: ptr("cid"),
+		JwksURI:  ptr("http://dex:5556/dex/jwks"),
+		Config:   jsonBytes(map[string]any{"oidc_client_secret": "s3cr3t", "session_secret": "sess"}),
+	}
+	if err := d.DB.Create(&cfg).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -134,7 +136,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 	// introspect active (matching tenant header)
 	rec = httptest.NewRecorder()
 	ireq := httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(t, map[string]string{"token": issued.Token})))
+		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token})))
 	ireq.Header.Set("X-Tenant-Id", tenantID)
 	h.ServeHTTP(rec, ireq)
 	var resp introspectResponse
@@ -146,7 +148,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 	// wrong tenant header → inactive
 	rec = httptest.NewRecorder()
 	ireq = httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(t, map[string]string{"token": issued.Token})))
+		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token})))
 	ireq.Header.Set("X-Tenant-Id", "00000000-0000-0000-0000-000000000000")
 	h.ServeHTTP(rec, ireq)
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -157,7 +159,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 	// tampered token → inactive
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(t, map[string]string{"token": issued.Token[:len(issued.Token)-1] + "X"}))))
+		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token[:len(issued.Token)-1] + "X"}))))
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp.Active {
 		t.Error("tampered token must be inactive")
@@ -171,7 +173,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(t, map[string]string{"token": issued.Token}))))
+		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token}))))
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp.Active {
 		t.Error("revoked token must be inactive")
@@ -185,7 +187,7 @@ func TestIntrospectExpired(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/users/"+userID+"/tokens",
-		bytes.NewReader(jsonBytes(t, map[string]string{"ttl": "1ns"}))))
+		bytes.NewReader(jsonBytes(map[string]string{"ttl": "1ns"}))))
 	var issued struct {
 		Token string `json:"token"`
 	}
@@ -194,7 +196,7 @@ func TestIntrospectExpired(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/token/introspect",
-		bytes.NewReader(jsonBytes(t, map[string]string{"token": issued.Token}))))
+		bytes.NewReader(jsonBytes(map[string]string{"token": issued.Token}))))
 	var resp introspectResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp.Active {
@@ -202,11 +204,4 @@ func TestIntrospectExpired(t *testing.T) {
 	}
 }
 
-func jsonBytes(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
+func ptr(s string) *string { return &s }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,23 +43,22 @@ func testDeps(t *testing.T) Deps {
 // userFixture creates a tenant + user (+role) and returns principal headers.
 func userFixture(t *testing.T, d Deps, role string) map[string]string {
 	t.Helper()
-	var tenantID, userID string
-	err := d.DB.Raw(`
-		WITH t AS (
-			INSERT INTO tbl_tenants (name, slug) VALUES ('Ns', 'ns-' || gen_random_uuid()::text)
-			RETURNING id
-		), u AS (
-			INSERT INTO tbl_users (tenant_id, email, display_name)
-			SELECT t.id, 'ns-' || gen_random_uuid()::text || '@x.co', 'Ns' FROM t
-			RETURNING id, tenant_id
-		), r AS (
-			INSERT INTO tbl_user_roles (user_id, role) SELECT id, ? FROM u
-		)
-		SELECT u.tenant_id::text, u.id::text FROM u`, role).
-		Row().Scan(&tenantID, &userID)
-	if err != nil {
-		t.Fatalf("userFixture: %v", err)
+	suffix := store.Tenant{Slug: "ns-" + fmt.Sprintf("%x", time.Now().UnixNano())}
+	tenant := store.Tenant{Name: "Ns", Slug: suffix.Slug, Status: "ACTIVE"}
+	if err := d.DB.Create(&tenant).Error; err != nil {
+		t.Fatalf("userFixture tenant: %v", err)
 	}
+	user := store.User{TenantID: tenant.ID, Email: "ns-" + tenant.ID + "@x.co", DisplayName: "Ns"}
+	if err := d.DB.Create(&user).Error; err != nil {
+		t.Fatalf("userFixture user: %v", err)
+	}
+	if role != "" {
+		if err := d.DB.Create(&store.UserRole{UserID: user.ID, Role: role}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	tenantID, userID := tenant.ID, user.ID
+	_ = suffix
 	return map[string]string{"X-Tenant-Id": tenantID, "X-User-Id": userID, "X-User-Role": role}
 }
 
@@ -66,7 +66,7 @@ func do(t *testing.T, d Deps, method, path string, headers map[string]string, bo
 	t.Helper()
 	var rdr *bytes.Reader
 	if body != nil {
-		rdr = bytes.NewReader(marshalJSON(body))
+		rdr = bytes.NewReader(jsonBytes(body))
 	} else {
 		rdr = bytes.NewReader(nil)
 	}
@@ -94,7 +94,7 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: status = %d: %s", rec.Code, rec.Body.String())
 	}
-	var ns namespaceRow
+	var ns store.Namespace
 	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
 	if ns.Status != "DRAFT" || ns.Version != 1 {
 		t.Errorf("created = %+v", ns)
@@ -129,7 +129,7 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("patch: status = %d: %s", rec.Code, rec.Body.String())
 	}
-	var patched namespaceRow
+	var patched store.Namespace
 	_ = json.Unmarshal(rec.Body.Bytes(), &patched)
 	if patched.Description != "updated" || patched.Version != 2 {
 		t.Errorf("patched = %+v", patched)
@@ -142,7 +142,7 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 		t.Errorf("replay: rec1=%d rec2=%d replayed=%q",
 			rec1.Code, rec2.Code, rec2.Header().Get("Idempotency-Replayed"))
 	}
-	var ns2a, ns2b namespaceRow
+	var ns2a, ns2b store.Namespace
 	_ = json.Unmarshal(rec1.Body.Bytes(), &ns2a)
 	_ = json.Unmarshal(rec2.Body.Bytes(), &ns2b)
 	if ns2a.ID != ns2b.ID {
@@ -166,7 +166,7 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	if rec.Code != 200 {
 		t.Errorf("get after delete: status = %d, want 200", rec.Code)
 	}
-	var deleted namespaceRow
+	var deleted store.Namespace
 	_ = json.Unmarshal(rec.Body.Bytes(), &deleted)
 	if deleted.Status != "DELETING" {
 		t.Errorf("status after delete = %q, want DELETING", deleted.Status)
@@ -178,9 +178,10 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 		t.Errorf("events after delete = (%d, %s)", rec.Code, rec.Body.String())
 	}
 	// delete transition recorded in events table (DRAFT -> DELETING)
-	var eventCount int
-	if err := d.DB.Raw(`SELECT count(*) FROM tbl_namespace_events WHERE object_id = ?::uuid AND to_status = 'DELETING'`,
-		ns.ID).Row().Scan(&eventCount); err != nil || eventCount != 1 {
+	var eventCount int64
+	if err := d.DB.Model(&store.NamespaceEvent{}).
+		Where("object_id = ? AND to_status = ?", ns.ID, "DELETING").
+		Count(&eventCount).Error; err != nil || eventCount != 1 {
 		t.Errorf("delete event count = %d, err = %v", eventCount, err)
 	}
 }
@@ -195,7 +196,7 @@ func TestOwnerIsolationAndAdminOverride(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
-	var ns namespaceRow
+	var ns store.Namespace
 	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
 
 	// other user cannot see it (404 — no existence leak)
@@ -236,18 +237,20 @@ func staleIfMatch(h map[string]string, etag string) map[string]string {
 	return out
 }
 
+func tokenSuffix() string {
+	return fmt.Sprintf("%x", time.Now().UnixNano())
+}
+
 func sameTenantAdmin(t *testing.T, d Deps, tenantID string) map[string]string {
 	t.Helper()
-	var userID string
-	if err := d.DB.Raw(`
-		WITH u AS (
-			INSERT INTO tbl_users (tenant_id, email, display_name)
-			VALUES (?::uuid, 'adm-' || gen_random_uuid()::text || '@x.co', 'A')
-			RETURNING id
-		), r AS (INSERT INTO tbl_user_roles (user_id, role) SELECT id, 'admin' FROM u)
-		SELECT id::text FROM u`, tenantID).Row().Scan(&userID); err != nil {
+	user := store.User{TenantID: tenantID, Email: "adm-" + tokenSuffix() + "@x.co", DisplayName: "A"}
+	if err := d.DB.Create(&user).Error; err != nil {
 		return nil
 	}
+	if err := d.DB.Create(&store.UserRole{UserID: user.ID, Role: "admin"}).Error; err != nil {
+		return nil
+	}
+	userID := user.ID
 	return map[string]string{
 		"X-Tenant-Id": tenantID, "X-User-Id": userID, "X-User-Role": "admin",
 	}

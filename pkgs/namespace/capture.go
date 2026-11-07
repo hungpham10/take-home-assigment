@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // captureWriter records status + body so idempotency can store the response.
@@ -29,18 +30,14 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 
 func (c *captureWriter) bodyString() string { return c.buf.String() }
 
-func readBody(r *http.Request) ([]byte, error) {
-	if r.Body == nil {
-		return nil, nil
-	}
-	return io.ReadAll(r.Body)
-}
+func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
 
-func readCloser(b []byte) io.ReadCloser {
-	return io.NopCloser(bytes.NewReader(b))
-}
+func strPtr(s string) *string { return &s }
 
-func marshalJSON(v any) []byte {
+func jsonBytes(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+// trimEtagNormal normalizes "W/\"3\"" to "\"3\"".
+func trimEtagNormal(s string) string { return strings.TrimPrefix(s, "W/") }
