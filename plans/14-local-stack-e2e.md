@@ -7,7 +7,8 @@ Chạy được toàn bộ MVP trên máy: docker compose, seed data, smoke test
 - Plan 08–13 (đầy đủ controller).
 
 ## Deliverables
-- `docker-compose.yml`: postgres, nginx (dùng `conf/nginx` có sẵn), controller (build Dockerfile), k6 (nếu cần cho local runner).
+- `docker-compose.yml`: postgres, nginx (dùng `conf/nginx` có sẵn), controller (build image qua Earthfile), k6 (nếu cần cho local runner).
+- **`Earthfile`** — build container image theo pattern `sources/opsense-rs/Earthfile` (multi-stage: deps → build → runtime image tối giản; target `+controller-image`, `+mocking-image` khi có mock-service; dùng cho compose `build:` và CI integration images).
 - Seed script (tenant demo + user admin + token `abt_`).
 - E2E smoke (script hoặc Go test): login qua nginx → tạo namespace → add service + OpenAPI → validate → apply → READY → upload script → validate → tạo loadtest (local runner) → RUNNING → COMPLETED → events/metrics đọc được → stop/reuse flows.
 - `tests/perf/` k6: benchmark theo bảng ước lượng dưới đây — kết quả là quality gate trước merge (AGENTS.md).

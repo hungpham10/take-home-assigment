@@ -17,6 +17,6 @@ Thứ tự thực thi từ đơn giản → phức tạp. Mỗi plan = 1 PR/feat
 | 11 | [openapi-validation-readiness](11-openapi-validation-readiness.md) | Validate 422, targets[], /validate /apply | 10 |
 | 12 | [scripts-api](12-scripts-api.md) | Script upload/validation async | 10 |
 | 13 | [loadtest-runner](13-loadtest-runner.md) | Runner interface (K8s/local) + lifecycle | 11, 12 |
-| 14 | [local-stack-e2e](14-local-stack-e2e.md) | docker-compose, e2e smoke, k6 perf gate (bảng QPS target per API) | 08–13 |
+| 14 | [local-stack-e2e](14-local-stack-e2e.md) | docker-compose, Earthfile (pattern opsense-rs), e2e smoke, k6 perf gate (bảng QPS target per API) | 08–13 |
 
 Sau 14: mock-service (phase sau), CodeGraph review, bump version, release.
