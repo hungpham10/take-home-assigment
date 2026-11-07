@@ -86,7 +86,7 @@ type authProfileRow struct {
 	Issuer   *string
 	ClientID *string        `gorm:"column:client_id"`
 	JwksURI  *string        `gorm:"column:jwks_uri"`
-	Config   map[string]any `gorm:"column:config"`
+	Config   json.RawMessage `gorm:"column:config"`
 }
 
 func (d Deps) authConfig(w http.ResponseWriter, r *http.Request) {
@@ -298,8 +298,15 @@ func actorJSON(userID string) string {
 	return string(b)
 }
 
-func str(m map[string]any, key, def string) string {
-	if v, ok := m[key].(string); ok && v != "" {
+func str(m json.RawMessage, key, def string) string {
+	if len(m) == 0 {
+		return def
+	}
+	var kv map[string]any
+	if err := json.Unmarshal(m, &kv); err != nil {
+		return def
+	}
+	if v, ok := kv[key].(string); ok && v != "" {
 		return v
 	}
 	return def
