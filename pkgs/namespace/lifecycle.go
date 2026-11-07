@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -75,60 +76,32 @@ func detailIf(cond bool, msg string) string {
 	return ""
 }
 
-// validateNamespace: DRAFT/INVALID → VALIDATING → INVALID|APPLYING (422 on bad specs).
-func (d Deps) validateNamespace(w http.ResponseWriter, r *http.Request) {
-	p := authz.PrincipalOf(r)
-	ns, ok := d.loadOwned(w, r, p)
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
-
-	// DRAFT/INVALID → VALIDATING
+// runValidation is the status-machine core of POST /{id}/validate, callable
+// without HTTP objects: DRAFT/INVALID → VALIDATING → gates → INVALID|APPLYING.
+// On gate failure it transitions to INVALID and returns the failing checks.
+func (d Deps) runValidation(ctx context.Context, ns store.Namespace, actor string) ([]readinessCheck, error) {
 	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "VALIDATING", actor, "validate requested"); err != nil {
-		httpx.WriteCodeError(w, "INVALID_TRANSITION",
-			"namespace cannot be validated from status "+ns.Status)
-		return
+		return nil, err
 	}
-
 	// Gates run outside the transition transaction so failure can mark INVALID
 	// (transition map: VALIDATING → INVALID) instead of silently rolling back.
 	checks, allOK := d.readinessGates(ctx, ns.ID)
 	if !allOK {
 		_ = store.Transition(ctx, d.DB, "namespace", ns.ID, "INVALID", actor, "readiness gates failed")
-		d.audit(ctx, r, p, "namespace.validate.failed", ns.ID)
-		httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]any{
-			"error":  httpx.Error{Code: "VALIDATION_FAILED", Message: "readiness gates failed"},
-			"checks": checks,
-		})
-		return
+		return checks, errValidationFailed
 	}
-
 	// VALIDATING → APPLYING
 	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "APPLYING", actor, "validation passed"); err != nil {
-		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "post-validation transition failed")
-		return
+		return nil, err
 	}
-	d.audit(ctx, r, p, "namespace.validate", ns.ID)
-	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": ns.ID, "status": "APPLYING"})
+	return checks, nil
 }
 
-// applyNamespace: APPLYING → DATA_LOADING → READY (+ ready_for_loadtest=true).
+// runApply is the status-machine core of POST /{id}/apply, callable without
+// HTTP objects: APPLYING → DATA_LOADING → READY (+ ready_for_loadtest=true).
 // Also resolves dependencies → network policy spec.
-func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
-	p := authz.PrincipalOf(r)
-	ns, ok := d.loadOwned(w, r, p)
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
-
-	err := d.DB.Transaction(func(tx *gorm.DB) error {
+func (d Deps) runApply(ctx context.Context, ns store.Namespace, actor string) error {
+	return d.DB.Transaction(func(tx *gorm.DB) error {
 		if err := store.Transition(ctx, tx, "namespace", ns.ID, "DATA_LOADING", actor, "apply requested"); err != nil {
 			return err
 		}
@@ -163,7 +136,52 @@ func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
 			Where("id = ?", ns.ID).
 			Update("ready_for_loadtest", true).Error
 	})
+}
+
+// errValidationFailed marks readiness-gate failure inside runValidation.
+var errValidationFailed = errors.New("readiness gates failed")
+
+// validateNamespace: DRAFT/INVALID → VALIDATING → INVALID|APPLYING (422 on bad specs).
+func (d Deps) validateNamespace(w http.ResponseWriter, r *http.Request) {
+	p := authz.PrincipalOf(r)
+	ns, ok := d.loadOwned(w, r, p)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
+
+	checks, err := d.runValidation(ctx, ns, actor)
+	if errors.Is(err, errValidationFailed) {
+		d.audit(ctx, r, p, "namespace.validate.failed", ns.ID)
+		httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  httpx.Error{Code: "VALIDATION_FAILED", Message: "readiness gates failed"},
+			"checks": checks,
+		})
+		return
+	}
 	if err != nil {
+		httpx.WriteCodeError(w, "INVALID_TRANSITION",
+			"namespace cannot be validated from status "+ns.Status)
+		return
+	}
+	d.audit(ctx, r, p, "namespace.validate", ns.ID)
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": ns.ID, "status": "APPLYING"})
+}
+
+// applyNamespace: APPLYING → DATA_LOADING → READY (+ ready_for_loadtest=true).
+func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
+	p := authz.PrincipalOf(r)
+	ns, ok := d.loadOwned(w, r, p)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
+
+	if err := d.runApply(ctx, ns, actor); err != nil {
 		httpx.WriteCodeError(w, "INVALID_TRANSITION",
 			"namespace cannot be applied from status "+ns.Status+" (run /validate first)")
 		return
