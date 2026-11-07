@@ -1,23 +1,26 @@
 // Package server wires the loadtest-controller HTTP server: health, ready,
-// metrics and the versioned API routers (mounted in later plans).
+// metrics and the versioned API routers.
 package server
 
 import (
-	"context"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"gorm.io/gorm"
 
+	"github.com/hungpham/loadtest-platform/pkgs/adminapi"
+	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
 // Deps carries everything the server routes need.
 type Deps struct {
-	Pool *pgxpool.Pool
+	DB  *gorm.DB
+	Now func() time.Time // injectable clock (tests)
 }
 
 // NewRouter builds the full HTTP handler.
@@ -31,10 +34,8 @@ func NewRouter(d Deps) http.Handler {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	r.Get("/ready", func(w http.ResponseWriter, _ *http.Request) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if d.Pool == nil || d.Pool.Ping(ctx) != nil {
+	r.Get("/ready", func(w http.ResponseWriter, req *http.Request) {
+		if d.DB == nil || store.Ping(req.Context(), d.DB) != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "NOT_READY", "database unavailable")
 			return
 		}
@@ -43,6 +44,13 @@ func NewRouter(d Deps) http.Handler {
 
 	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
-	// /api/admin/v1 and /api/loadtest/v1 mount in plans 09-13.
+	// /api/admin/v1 — nginx integration + account management (plan 09).
+	// Trust boundary: mounted for the nginx→backend channel; middleware
+	// FailClosed applies to /api/loadtest/v1 (plan 10), not here (nginx
+	// internal calls carry no user identity).
+	r.Mount("/api/admin/v1", adminapi.Router(adminapi.Deps{DB: d.DB, Now: d.Now}))
+
+	// /api/loadtest/v1 mounts in plans 10-13 behind authz.RequirePrincipal.
+	_ = authz.RequirePrincipal
 	return r
 }
