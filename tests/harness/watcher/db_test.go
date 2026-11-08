@@ -21,8 +21,8 @@ func openHarnessDB(t *testing.T, dsn string) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open harness db: %v", err)
 	}
-	sqlDB, _ := db.DB()
-	t.Cleanup(func() { _ = sqlDB.Close() })
+	// No per-test cleanup: the handle is shared across the harness run
+	// (TestWATCH00Setup opens it once); closing it would break later tests.
 	return db
 }
 

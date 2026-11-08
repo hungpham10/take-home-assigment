@@ -68,10 +68,21 @@ type Client interface {
 	Watch(ctx context.Context, gvk schema.GroupVersionKind, ns string) (watch.Interface, error)
 }
 
-// GVRFor maps a GroupVersionKind to the resource plural name via a RESTMapper.
-// Kept package-level so Fake-free callers (and tests) share one mapping table.
+// GVRFor maps a GroupVersionKind to its plural resource via the RESTMapper
+// (falls back to UnsafeGuessKindToResource for irregular plurals —
+// NetworkPolicy→networkpolicies, Ingress→ingresses — that discovery-derived
+// mappers can miss before CRDs are fully listed).
 func GVRFor(mapper meta.RESTMapper, gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
-	return mapper.ResourceFor(gvk.GroupVersion().WithResource(gvk.Kind + "s"))
+	gvr, err := mapper.ResourceFor(gvk.GroupVersion().WithResource(gvk.Kind))
+	if err == nil {
+		return gvr, nil
+	}
+	plural, singular := meta.UnsafeGuessKindToResource(gvk)
+	if plural.Resource != "" {
+		return gvk.GroupVersion().WithResource(plural.Resource), nil
+	}
+	_ = singular
+	return schema.GroupVersionResource{}, fmt.Errorf("k8s: map %s: %w", gvk, err)
 }
 
 // DynamicClient is the real Client backed by discovery + dynamic client-go.
