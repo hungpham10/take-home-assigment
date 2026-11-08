@@ -282,15 +282,23 @@ func (d Deps) runValidation(ctx context.Context, ns store.Namespace, actor strin
 }
 
 // runApply is the status-machine core of POST /{id}/apply, callable without
-// HTTP objects: APPLYING → DATA_LOADING → READY (+ ready_for_loadtest=true).
-// Also resolves dependencies → network policy spec.
+// HTTP objects.
+//   - K8S mode (cluster wired): gates → resolve dependencies → network policy
+//     spec → bump desired_generation. The status stays APPLYING; the Env
+//     Reconciler renders/applies the manifests and the Status Watcher closes
+//     the loop APPLYING→DATA_LOADING→READY (plans/21, generation fencing).
+//   - MVP mode (no cluster): legacy synchronous APPLYING → DATA_LOADING →
+//     READY (+ ready_for_loadtest=true) so the standalone stack still works.
 func (d Deps) runApply(ctx context.Context, ns store.Namespace, actor string) error {
-	// Mock-capacity gate BEFORE transitioning to DATA_LOADING: mock-enabled
-	// specs must not reach READY without a mock runtime (plans/17, docs §mocks).
+	// Mock-capacity gate BEFORE transitioning: mock-enabled specs must not
+	// reach READY without a mock runtime (plans/17, docs §mocks).
 	// Restore-source gate: dataset engine/engine_version mismatches (and
 	// unavailable/missing restore datasets) block apply with VALIDATION_FAILED.
 	report := d.readinessGates(ctx, ns)
-	if report.MocksBlocking {
+	// With the cluster path the mock runtime exists (shared mock-service +
+	// binding ConfigMaps); the watcher's mock evaluator decides readiness.
+	// Legacy mode has no runtime → fail closed (plans/17).
+	if report.MocksBlocking && !d.K8S {
 		return errMockCapacity
 	}
 	var restoreReasons []string
@@ -299,15 +307,65 @@ func (d Deps) runApply(ctx context.Context, ns store.Namespace, actor string) er
 	if len(restoreReasons) > 0 {
 		return applyValidationErr{reasons: restoreReasons}
 	}
+	if d.K8S {
+		return d.applyDesired(ctx, ns, actor)
+	}
+	return d.applyLegacy(ctx, ns, actor)
+}
+
+// applyDesired resolves the desired state in PG and hands off to the two
+// control loops. It writes NO readiness and NO terminal status — the watcher
+// owns APPLYING→READY (one writer per direction, namespace-status-watcher.md §1).
+func (d Deps) applyDesired(_ context.Context, ns store.Namespace, _ string) error {
+	return d.DB.Transaction(func(tx *gorm.DB) error {
+		// Resolve dependencies → egress policy spec (allow-list).
+		var deps []store.Dependency
+		if err := tx.Where("namespace_id = ?", ns.ID).Find(&deps).Error; err != nil {
+			return err
+		}
+		spec := map[string]any{"egress": []map[string]any{}}
+		for _, dep := range deps {
+			spec["egress"] = append(spec["egress"].([]map[string]any), map[string]any{
+				"type": dep.Type, "ref_id": dep.RefID,
+			})
+		}
+		// ObservedGeneration stays 0 until the watcher confirms the applied
+		// generation — the constant 1 here was the MVP shortcut, removed.
+		policy := store.NetworkPolicy{
+			NamespaceID: ns.ID, ResolvedFromDeps: true, Spec: store.JSONBytes(spec),
+		}
+		var existing store.NetworkPolicy
+		if err := tx.Where("namespace_id = ?", ns.ID).First(&existing).Error; err == nil {
+			policy.ID = existing.ID
+			if err := tx.Save(&policy).Error; err != nil {
+				return err
+			}
+		} else if err := tx.Create(&policy).Error; err != nil {
+			return err
+		}
+		// Bump desired_generation in the SAME tx as the policy spec so the
+		// watcher can never see a new spec under an old generation.
+		return tx.Model(&store.Namespace{}).
+			Where("id = ?", ns.ID).
+			Updates(map[string]any{
+				"desired_generation": gorm.Expr("desired_generation + 1"),
+				"ready_for_loadtest": false,
+				"blocking_reasons":   store.JSONBytes(map[string]any{}),
+			}).Error
+	})
+}
+
+// applyLegacy is the pre-plan-21 synchronous path (kept for the MVP stack
+// without a cluster): APPLYING → DATA_LOADING → READY in one tx.
+func (d Deps) applyLegacy(ctx context.Context, ns store.Namespace, actor string) error {
 	return d.DB.Transaction(func(tx *gorm.DB) error {
 		if err := store.Transition(ctx, tx, "namespace", ns.ID, "DATA_LOADING", actor, "apply requested"); err != nil {
 			return err
 		}
-		// MVP restore stub: after DATA_LOADING the actual pg_restore runs here
-		// in a later plan (K8s pg_restore Job — plans/18 §6). For now the
-		// dataset existence / AVAILABLE status / engine compatibility were
-		// verified by the readiness gates above, and apply transitions
-		// straight to READY.
+		// MVP restore stub: after DATA_LOADING the actual pg_restore runs in a
+		// later plan (K8s pg_restore Job — plans/18 §6). The dataset
+		// existence / AVAILABLE status / engine compatibility were verified by
+		// the readiness gates, and apply transitions straight to READY.
 		// Resolve dependencies → egress policy spec (MVP: direct allow-list).
 		var deps []store.Dependency
 		if err := tx.Where("namespace_id = ?", ns.ID).Find(&deps).Error; err != nil {
@@ -401,6 +459,14 @@ func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.audit(ctx, r, p, "namespace.apply", ns.ID)
+	if d.K8S {
+		// Async hand-off: the Env Reconciler + Status Watcher finish the job;
+		// the response reflects the current status (APPLYING), not READY.
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
+			"id": ns.ID, "status": "APPLYING", "desired_generation": ns.DesiredGeneration + 1,
+		})
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"id": ns.ID, "status": "READY", "ready_for_loadtest": "true"})
 }
 

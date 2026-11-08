@@ -1,160 +1,175 @@
 # Architecture — Self-Service Ephemeral Load Testing Platform (MVP BFF)
 
-This document defines the **clear MVP architecture** for the platform. The model is **namespace-first**: an **Environment** (platform object; API path segment `/namespaces`) is the top-level definition that contains all components required for load testing; load tests are defined only against a **READY** Environment.
+This document defines the **MVP architecture**. The model is **namespace-first**: an **Environment** (API path segment `/namespaces`) is the top-level definition containing every component needed for load testing; load tests are defined only against a **READY** Environment.
 
 **Primary design & contracts**
-- [`docs/namespace-management-api.md`](namespace-management-api.md) — namespace-first model and namespace/component CRUD/readiness API (primary contract).
-- [`docs/bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md) — BFF REST contract (`/api/loadtest/v1`).
-- [`docs/loadtest-manager-api.md`](loadtest-manager-api.md) — load-test run lifecycle (gated by namespace readiness).
-- [`docs/k6-operator-go-client.md`](k6-operator-go-client.md) — execute load via k6-operator `TestRun` using **Go Kubernetes API (no `kubectl`)**.
-- [`docs/nginx-oidc-auth.md`](nginx-oidc-auth.md), [`docs/admin-oidc-integration-api.md`](admin-oidc-integration-api.md) — edge OIDC/JWT/tenant auth and `/api/admin/v1` integration; backend enforces owner/admin RBAC.
-- Component detail/reference: [`docs/service-management-api.md`](service-management-api.md), [`docs/database-management-api.md`](database-management-api.md) (to be fully aligned to namespace-scoped model).
+- [`namespace-management-api.md`](namespace-management-api.md) — namespace-first model, component CRUD, readiness API.
+- [`bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md) — BFF REST contract (`/api/loadtest/v1`).
+- [`loadtest-manager-api.md`](loadtest-manager-api.md) — load-test run lifecycle (gated by readiness).
+- [`k8s-orchestration.md`](k8s-orchestration.md) — **desired → K8s** loop (Env Reconciler): render/SSA, component→resource mapping, ownership/prune, RBAC.
+- [`namespace-status-watcher.md`](namespace-status-watcher.md) — **observed K8s → PG** loop (Status Watcher): component status projection, namespace aggregation, generation fencing, fail-closed staleness gate.
+- [`k6-operator-go-client.md`](k6-operator-go-client.md) — run load via k6-operator `TestRun` using the Go K8s API (no `kubectl`).
+- [`mock-service-api.md`](mock-service-api.md) — separate mock data plane.
+- [`nginx-oidc-auth.md`](nginx-oidc-auth.md), [`admin-oidc-integration-api.md`](admin-oidc-integration-api.md), [`secrets-management.md`](secrets-management.md) — edge auth, `/api/admin/v1`, SOPS/field-level secrets.
+- [`database-schema.md`](database-schema.md) — schema source of truth notes (`sql/` migrations are authoritative).
+- [`harness-testing.md`](harness-testing.md) — ACID / fault-injection harness (release gate). [`mvp-status.md`](mvp-status.md) — what is implemented today.
+- Component detail: [`service-management-api.md`](service-management-api.md), [`database-management-api.md`](database-management-api.md).
 
-**MVP stack (`AGENTS.MD`):** Go + go-chi, Swagger/OpenAPI, PostgreSQL catalog/state (`sql/` migrations when implemented), nginx (`conf/nginx`) for routing/auth policy, Docker Compose, k6 performance testing. `sources/` is reference-only.
+**MVP stack (`AGENTS.MD`):** Go + go-chi, Swagger/OpenAPI, PostgreSQL (`sql/` migrations), nginx (`conf/nginx`) for routing/auth, Docker Compose, k6 perf testing. `sources/` is reference-only.
 
 ## 1. Goals
 
-- Provide a **self-service BFF API** to define ephemeral test environments and run load tests safely.
-- Make the environment model explicit: **the Environment defines everything** (services, databases, ingress, dependencies/network policy).
-- Make API impact explicit: **each service has its own OpenAPI/Swagger**; a load test declares **which API operation(s)** it targets.
-- Make execution explicit: a load test provides the **JS file (k6 script)** that defines the load.
-- Ensure safety/readiness: namespace is **applied and READY** before load tests can be defined/run.
-- Enforce security: user-scoped access, **tenant isolation always**, owner-only by default, **admin** cross-owner within tenant; dependency-derived **NetworkPolicy**; TTL/cleanup for ephemeral runs.
+- Self-service BFF API to define ephemeral test environments and run load tests safely.
+- **The Environment defines everything** (services, databases, ingress, dependencies/NetworkPolicy, mocks, datasets).
+- **Each service has its own OpenAPI**; a load test declares which operations it targets.
+- A load test provides the **k6 JS script**.
+- Safety: Environment is applied and **READY** (observed, not assumed) before any run.
+- Security: tenant isolation always; owner-only by default; `admin` cross-owner within tenant; dependency-derived NetworkPolicy; network-enforced runner egress; TTL/cleanup.
 
-## 2. Domain model (clear)
+## 2. Domain model
 
 ```text
-Environment (platform, top-level definition) — called "namespace" in API paths for now; distinct from a Kubernetes `Namespace` runtime resource
+Environment (API: /namespaces; 1:1 with K8s Namespace lt-env-<namespace_id>)
 ├── spec / desired definition
-│   ├── services[]          (component CRUD)
-│   │   ├── deploy/runtime config
-│   │   ├── openapi         (REQUIRED: OpenAPI/Swagger contract for this service)
-│   │   ├── database_bindings[] -> database_id
-│   │   └── dependencies[]      -> service_id (drives NetworkPolicy)
-│   ├── databases[]         (component CRUD, each has database_id)
-│   ├── ingress[]           (component CRUD, routes to service_id/port)
+│   ├── services[]   deploy config, openapi (REQUIRED), database_bindings[], dependencies[], mock?
+│   ├── databases[]  engine/operator, data_source (dataset restore), mock?
+│   ├── ingress[]    host/path -> service_id/port
 │   └── dependency/network policy intent
-├── status / readiness
-│   ├── DRAFT|VALIDATING|INVALID|APPLYING|READY|DEGRADED|DELETING|DELETED
-│   └── ready_for_loadtest (gate)
-└── load tests[] (runs, allowed only when ready_for_loadtest=true)
-    ├── targets[]           (REQUIRED: service_id + API operation(s) from OpenAPI)
-    ├── script              (REQUIRED: JS/k6 file/definition)
-    └── load_config, status, metrics, TTL/cleanup
+├── status (projection written by the Status Watcher)
+│   ├── DRAFT | VALIDATING | INVALID | APPLYING | DATA_LOADING | READY | DEGRADED | DELETING | DELETED
+│   ├── ready_for_loadtest (gate), blocking_reasons, status_observed_at (watcher heartbeat)
+│   ├── desired_generation (bumped by spec change/apply)
+│   └── tbl_component_status: 1 row per component (phase, observed_generation, reason)
+└── load tests[] (only when ready_for_loadtest=true and status is fresh)
+    ├── targets[]  service_id + operation (from OpenAPI)
+    ├── script     JS/k6 (inline or approved ref, VALIDATED)
+    └── load_config, status, TTL/cleanup
 ```
 
 ### Key rules
-1. **Environment-first (API: `/namespaces`):** define/manage namespace, then (or as part of it) CRUD services/databases/ingress.
-2. **Service OpenAPI required:** each service carries its own OpenAPI/Swagger; platform validates/parses it and exposes operations for load-test targeting. Service/mock metadata over OpenAPI can define dependency behavior (latency profiles/variants) executed by the separate Mock Service (`docs/mock-service-api.md`).
-3. **Dependencies -> NetworkPolicy:** service dependencies are validated and used to configure **NetworkPolicy per service** (least privilege; allow declared deps + required platform paths + load-test runner access as needed). Dependent services must be linkable/communicable under the namespace model (1 Environment = 1 K8s Namespace, MVP).
-4. **Readiness gate:** namespace must be applied and `ready_for_loadtest=true` before load tests can be defined/triggered.
-5. **Load test clarity:** every load test specifies **namespace + target API(s) + JS script + load config**.
+1. **Environment-first:** define the Environment, then CRUD components.
+2. **Service OpenAPI required:** validated, indexed for `targets[]`; mock metadata is a behavior view over it.
+3. **Dependencies → NetworkPolicy** per service (least privilege, default deny).
+4. **Readiness is observed, not declared:** `ready_for_loadtest` is computed by the Status Watcher from live K8s state with generation fencing; the gate also fails closed when the watcher heartbeat is stale (`STATUS_STALE`).
+5. **Load test clarity:** every run = ready namespace + targets + JS script + load config.
+6. **One writer per direction:** the Env Reconciler writes **K8s only**; the Status Watcher writes **PG only**. They communicate only through the DB (`desired_generation` / `observed_generation`, `spec_hash`).
 
-## 2.1 Deployment units (MVP design, locked split)
-
-The platform is split into **two services** (separate build/deploy units, same repo):
+## 2.1 Deployment units (locked split)
 
 | | `loadtest-controller` (control plane) | `mock-service` (data plane) |
 |---|---|---|
-| Suggested source | `cmds/loadtest-controller/` + `pkgs/*` | `cmds/mock-service/` + `pkgs/*` |
-| Role | BFF APIs, namespace/component CRUD, dataset/script/loadtest lifecycle, OpenAPI validation, NetworkPolicy/restore/script/TestRun orchestration, reconciler/reaper, RBAC | Run mock HTTP/DB-profile behavior: routing by OpenAPI operation/profile, variants, latency injection, pool concurrency enforcement, metrics |
-| Load profile | Low/bursty (user/control operations) | High during load tests; latency-sensitive; scales by pool class |
-| Source of truth | PostgreSQL (catalog, desired state, outbox, idempotency, ledger, projections, audit) | **No DB writes on hot path**; in-memory snapshot by `generation`/`schema_version` |
-| Scale | Few replicas; leader election for reconcilers/reapers | Horizontal by pool class; `perf-isolated` may use dedicated node pool/taints/tolerations |
-| Ingress | nginx → controller with trusted headers (POC locked, ADR-003) | **No public ingress**; cluster-internal endpoints/DNS only, exposed by dependency-derived NetworkPolicy |
-| Auth | Principal middleware, tenant isolation, owner/admin RBAC | No user auth; cluster-internal trust (ServiceAccount/mTLS as implementation detail) |
-| Failure isolation | Controller down: existing mock snapshots keep serving; control/apply slows | Mock-service degraded/down: namespace/mock status becomes `DEGRADED`; new runs blocked (`409 NAMESPACE_NOT_READY`); do not silently distort results |
+| Source | `cmds/loadtest-controller/` + `pkgs/*` | `cmds/mock-service/` + `pkgs/*` |
+| Role | BFF APIs, CRUD, dataset/script/loadtest lifecycle, OpenAPI validation, **Env Reconciler**, **Status Watcher**, run reconciler/reaper, RBAC | Mock HTTP/DB-profile behavior: routing, variants, latency injection, pool concurrency, metrics |
+| Load profile | Low/bursty | High during load tests; latency-sensitive |
+| Source of truth | PostgreSQL | **No DB writes on hot path**; in-memory snapshot by `generation`/`schema_version` |
+| Scale | Few replicas; **leader election**: Reconciler/reaper run on the leader; Watcher replicas all keep informer caches, only the leader (or a shard by `namespace_id` hash) writes PG | Horizontal by pool class |
+| Ingress | nginx → controller with trusted headers | **No public ingress**; cluster-internal only |
+| Failure isolation | Controller down: existing mock snapshots keep serving; status goes stale → gate fails closed | Down/degraded: namespace becomes `DEGRADED`; new runs blocked |
 
-**Interaction boundary (desired-state, not request-path coupling):**
-- Controller stores canonical **mock metadata** in namespace components (`service.mock`/`database.mock`) and materializes runtime intent/binding state (DB projection/outbox). Controller/mock operator publishes **versioned snapshot/binding config** (e.g., CRD/ConfigMap/internal contract) with `schema_version`, `namespace_id`, `generation`, resolved bindings.
-- `mock-service` watches/loads snapshots, swaps atomically, serves mock traffic, and reports `observed_generation`, health, and overhead metrics. It **must not** write PostgreSQL or make tenant/owner authorization decisions.
-- Admin/control APIs for pools/status remain on controller; mock-service runtime endpoints are data-plane only.
+**Interaction boundary:** controller stores canonical mock metadata in components and publishes versioned snapshot/binding config (`schema_version`, `namespace_id`, `generation`). `mock-service` swaps atomically and reports `observed_generation`/health, which the Watcher consumes as the `mock` component status. It never writes PostgreSQL nor makes authz decisions.
 
-**Repository layout (proposed, before implementation):**
+**Repository layout** (✅ exists today per `mvp-status.md`, 🔜 planned):
 ```text
 cmds/
-  loadtest-controller/   # control-plane entrypoint (go-chi BFF, reconcilers, reaper wiring)
-  mock-service/          # data-plane entrypoint (cluster-internal mock runtime)
+  loadtest-controller/   ✅ go-chi BFF; wires reconcilers
+  mock-service/          ✅ data plane (mockruntime snapshot serving, plans/21 PR D)
 pkgs/
-  api/                   # HTTP handlers, middleware, request/response DTOs (controller)
-  authz/                 # principal middleware, tenant/owner/admin RBAC (controller)
-  namespace/             # environment/component validation/apply/readiness
-  serviceopenapi/        # OpenAPI parse/index/target resolution
-  database/              # database component + dataset/restore bindings
-  script/                # script register/validate/staging metadata
-  loadtest/              # load-test run lifecycle, targets/script gates
-  mockcontrol/           # controller-side mock metadata materialization, snapshot publish, pool/ledger projections
-  mockruntime/           # shared mock snapshot schema/types/runtime helpers (used carefully; mock-service stays independent of controller HTTP/DB)
-  k8s/                   # Kubernetes client/adapters (TestRun, Jobs, NetworkPolicy, watchers) — no kubectl
-  store/                 # PostgreSQL access/projections/outbox/idempotency/ledger interfaces
-docs/                    # architecture/contracts/decisions (update before plan/code)
-plans/                   # implementation plans/design notes (write before code)
-sql/                     # migrations only (after plan/docs, before/during implementation as needed)
-tests/                   # unit/integration/perf tests
+  authz/                 ✅ trusted headers -> Principal, RBAC, fail-closed
+  adminapi/              ✅ tenant-id, auth-config, introspect, abt_ tokens
+  namespace/             ✅ CRUD, idempotency, ETag, validate/apply/readiness
+  serviceopenapi/        ✅ OpenAPI validate + targets index
+  script/                ✅ upload + async validation workers
+  loadtest/              ✅ gates + lifecycle + run reconciler
+  runner/                ✅ Runner interface: Local (k6) | K8s 🔜
+  secrets/               ✅ SOPS env resolver + AES-GCM
+  store/                 ✅ GORM models + migrations + Transition (only Raw SQL point)
+  testutil/              ✅ NewServer (real composition)
+  k8s/                   ✅ Client interface (dynamic client + Fake + fault injection) — plans/21 PR A
+  envreconciler/         ✅ desired -> K8s (SSA render/apply in locked order, prune) — plans/21 PR B
+  statuswatcher/         ✅ evaluators, projection (tbl_component_status), aggregator, hysteresis — plans/21 PR C
+  mockcontrol/, mockruntime/ ✅ binding ConfigMaps + ExternalName wiring; snapshot runtime — plans/21 PR D
+docs/  plans/  sql/  tests/
 ```
-Layout is finalized in `plans/` before writing code; `mockruntime` shared code must not introduce controller DB/authz coupling into `mock-service`.
 
-## 3. Architecture diagrams (review set)
+## 3. Diagrams
 
-**Legend:** 🔒 locked, ⚠️ open/risk to close before implementation, ✅ normal flow. Reflects locked MVP decisions and namespace-first contracts.
-
-**Locked decisions:** (1) **1 Environment = 1 K8s Namespace** (`lt-env-<namespace_id>`, deterministic labels); (2) **runner egress is network-enforced** (run-scoped NetworkPolicy, default deny; `targets[]` validated metadata, not advisory); (3) **POC uses OIDC/nginx auth** — nginx reflects identity/permissions into trusted headers, Go go-chi middleware builds canonical principal and enforces RBAC/tenant isolation/fail-closed; `tenant_id` boundary, `abt_` service-account/CLI token; (4) **mock execution is a separate `mock-service` data plane**, controlled by `loadtest-controller` via desired-state snapshots/bindings (no request-path coupling).
+**Legend:** 🔒 locked, ⚠️ open/risk, ✅ normal flow.
+**Locked decisions:** (1) 1 Environment = 1 K8s Namespace; (2) runner egress is network-enforced (default deny); (3) OIDC/nginx auth + Go middleware RBAC; (4) mock is a separate data plane; (5) **two separated loops** — Reconciler (desired→K8s) and Watcher (observed→PG); (6) manifests rendered in Go + SSA, no Helm for SUT (ADR-004).
 
 ### 3.1 Context & trust boundary
 
 ```mermaid
 flowchart LR
-  CLI["CLI / CI-CD<br/>abt_ service-account token"] -->|HTTPS| N
+  CLI["CLI / CI-CD<br/>abt_ token"] -->|HTTPS| N
   WEB["Browser / UI<br/>OIDC session"] -->|HTTPS| N
-  N["🔒 nginx + OpenResty<br/>authn: OIDC/JWT/abt_<br/>strip client headers<br/>inject trusted headers"] <-->|OIDC/JWKS/discovery| IDP["OIDC Provider"]
-  N -->|"/api/loadtest/v1<br/>trusted headers"| BFF["🔒 Go BFF<br/>go-chi middleware<br/>canonical principal + RBAC<br/>fail closed"]
-  N -->|"/api/admin/v1<br/>internal/guarded"| ADM["Admin API"]
-  BFF --> PG[("PostgreSQL<br/>catalog/projections/outbox/ledger/audit")]
-  ADM --> PG
-  BFF -->|"Go K8s API<br/>no kubectl"| KAPI["Kubernetes API Server"]
-  NCONF["⚠️ conf/nginx role propagation<br/>align JWT/OIDC session/abt_ paths"] -.-> N
+  N["🔒 nginx + OpenResty<br/>authn: OIDC/JWT/abt_<br/>strip client headers<br/>inject trusted headers"] <-->|OIDC/JWKS| IDP["OIDC Provider"]
+  N -->|"/api/loadtest/v1<br/>trusted headers"| BFF["🔒 loadtest-controller<br/>go-chi middleware<br/>principal + RBAC, fail closed"]
+  N -->|"/api/admin/v1<br/>internal/guarded"| BFF
+  N -.->|"auth-config / introspect<br/>internal calls"| BFF
+  BFF --> PG[("PostgreSQL<br/>desired state, projections,<br/>outbox, ledger, audit")]
+  BFF -->|"Go K8s API, no kubectl<br/>write: Reconciler<br/>read/watch: Watcher"| KAPI["Kubernetes API"]
+  BFF -.->|"versioned snapshots"| MOCK["mock-service<br/>cluster-internal"]
+  NC["⚠️ conf/nginx role propagation<br/>align JWT / OIDC session / abt_"] -.-> N
 
   classDef locked fill:#dafbe1,stroke:#1a7f37,color:#1a7f37;
   classDef open fill:#fff8c5,stroke:#9a6700,color:#9a6700;
   class N,BFF locked;
-  class NCONF open;
+  class NC open;
 ```
 
-**Review:** trusted boundary is enforced only if nginx strips client `X-Tenant-Id/X-User-*` and backend rejects missing headers; admin normalization must be consistent across auth paths.
-
-### 3.2 Control plane (Go components)
+### 3.2 Control plane components (incl. the two loops)
 
 ```mermaid
 flowchart TB
-  MW["🔒 Principal middleware<br/>trusted headers -> canonical principal<br/>tenant isolation, owner/admin RBAC, fail closed"] --> BFF["BFF API (/api/loadtest/v1)"]
+  MW["🔒 Principal middleware"] --> API["BFF API /api/loadtest/v1"]
 
-  BFF --> ENV["Environment Manager<br/>validate/apply/readiness"]
-  BFF --> SVC["Service/OpenAPI Manager<br/>OpenAPI required<br/>index ops, service.mock metadata"]
-  BFF --> DBM["Database Manager<br/>bindings/refs, database.mock metadata"]
-  BFF --> INGM["Ingress Manager"]
-  BFF --> SCR["Script Manager<br/>inline/approved ref, checksum, validation"]
-  BFF --> LTM["Load-test Manager<br/>readiness gate, targets, script gate"]
-  BFF --> MOCKC["Mock Control/Operator (controller)<br/>metadata materialization intent,<br/>admission/ledger, snapshot publish"]
-
+  API --> ENV["Environment Manager<br/>validate / apply intent / readiness read"]
+  API --> SVC["Service/OpenAPI Manager"]
+  API --> DBM["Database + Dataset Manager"]
+  API --> SCR["Script Manager"]
+  API --> LTM["Load-test Manager<br/>gates: ready + fresh + script VALIDATED"]
   ENV --> DEP["Dependency/NetworkPolicy Resolver"]
-  ENV --> SVC & DBM & INGM
-  LTM -->|"ready_for_loadtest?"| ENV
-  LTM -->|"resolve targets[]"| SVC
-  LTM -->|"script VALIDATED?"| SCR
-  ENV --> MOCKC
-  MOCKSVC["🔒 mock-service (separate data plane)<br/>cluster-internal only<br/>latency/variants/DB-profile runtime<br/>reports observed_generation/metrics"]
-  MOCKC -->|"versioned snapshot/binding<br/>schema_version,generation"| MOCKSVC
-  MOCKSVC -.->|"observed status/metrics"| MOCKC
+  LTM -->|"ready_for_loadtest AND<br/>now - status_observed_at < threshold"| PG
 
-  STATE[("PostgreSQL<br/>desired state + projections<br/>outbox + idempotency<br/>mock ledger + audit")]
-  ENV & LTM & SCR & MOCKC & SVC & DBM & INGM --> STATE
-  OPS["⚠️ Open: quotas/limits, mock MVP scope,<br/>dataset restore/PITR scope, S3 creds/PVC staging,<br/>legacy endpoint cleanup, OpenAPI/script forms"] -.-> BFF
+  ENV -->|"tx: spec + desired_generation++<br/>+ outbox/apply intent"| PG[("PostgreSQL")]
 
-  classDef locked fill:#dafbe1,stroke:#1a7f37,color:#1a7f37;
-  classDef open fill:#fff8c5,stroke:#9a6700,color:#9a6700;
-  class MW locked;
-  class OPS open;
+  subgraph LOOP1["Loop 1 - Env Reconciler: desired to K8s, writes K8s only"]
+    REC["Env Reconciler<br/>leader-elected<br/>ordered SSA apply, prune by label"]
+  end
+  PG -->|"outbox / spec_hash"| REC
+  REC -->|"SSA apply / delete<br/>fieldManager loadtest-controller"| K["Kubernetes API<br/>Deployment, CNPG Cluster, Job, Ingress,<br/>NetworkPolicy, TestRun, Namespace"]
+
+  subgraph LOOP2["Loop 2 - Status Watcher: observed K8s to PG, writes PG only"]
+    direction TB
+    INF["Shared informers per GVR<br/>selector loadtest.io/managed-by"]
+    HND["Event handlers<br/>read label namespace-id"]
+    WQ[("Workqueue<br/>key = namespace_id<br/>dedup + rate limit")]
+    RSY["Resync 5m + startup relist"]
+    WRK["Worker reconcileStatus<br/>reads informer cache, never event payload"]
+    EVL["Evaluators per component type<br/>service, database, data_load,<br/>ingress, network_policy, mock"]
+    AGG["Aggregator<br/>generation fencing + hysteresis"]
+    INF --> HND --> WQ
+    RSY --> WQ
+    WQ --> WRK --> EVL --> AGG
+  end
+  K ==>|"watch events"| INF
+  MOCKSVC["mock-service<br/>observed_generation"] -->|"poll / push"| WQ
+
+  EVL -->|"upsert phase + reason"| CS[("tbl_component_status")]
+  AGG -->|"fn_namespace_transition<br/>status, ready_for_loadtest, blocking_reasons,<br/>status_observed_at - one tx + event"| PG
+  WRK -->|"TestRun stage -> fn_loadtest_transition<br/>validation Job -> script status"| PG
+  CS --- PG
+
+  MOCKC["Mock Control<br/>snapshot publish, ledger"] --> PG
+  MOCKC -->|"ConfigMap mock-binding-*"| K
+
+  classDef loop fill:#ddf4ff,stroke:#0969da,color:#0969da;
+  class REC,INF,HND,WQ,RSY,WRK,EVL,AGG loop;
 ```
+
+Step-by-step detail of Loop 2: §3.4.
+
+**Review:** the Watcher never writes K8s and the Reconciler never writes readiness to PG. A dead Watcher can only make status stale (gate fails closed); it cannot damage the cluster.
 
 ### 3.3 Environment lifecycle (create → READY)
 
@@ -163,33 +178,106 @@ sequenceDiagram
   autonumber
   participant C as Client
   participant B as BFF + AuthZ
-  participant E as Environment Manager
   participant PG as PostgreSQL
-  participant R as Env Reconciler (level-triggered)
+  participant R as Env Reconciler
   participant K as Kubernetes API
+  participant W as Status Watcher
 
-  C->>B: POST /namespaces (spec, apply=true)
-  B->>E: validate schema, OpenAPI required, bindings, ingress, deps, mock metadata
+  C->>B: POST /namespaces (spec, apply=true), Idempotency-Key
+  B->>B: validate schema, OpenAPI, bindings, ingress, deps, mock metadata
   alt invalid
-    E-->>C: 422 validation errors
+    B-->>C: 422 details
   else accepted
-    E->>PG: ACID tx: desired spec + idempotency + outbox/apply intent
-    E-->>C: 202 + status_url (or 201 if no apply)
+    B->>PG: tx: spec + desired_generation++ + idempotency + outbox
+    B-->>C: 202 + status_url
   end
 
+  Note over PG: status DRAFT/VALIDATING -> APPLYING via fn_namespace_transition
   R->>PG: read desired state / outbox
-  R->>K: 🔒 ensure K8s Namespace lt-env-<namespace_id> (1:1)
-  R->>K: apply SUT/DB/ingress/mock runtime resources
-  R->>K: apply dependency-derived NetworkPolicy per service
-  R->>K: run restore/import Jobs when data_source configured (DATA_LOADING)
-  R->>K: observe component/runtime/data-load status
-  R->>PG: APPLYING/DATA_LOADING -> READY, ready_for_loadtest=true
+  R->>K: 1 Namespace lt-env-id + quota
+  R->>K: 2 NetworkPolicy default-deny + per-service
+  R->>K: 3 CNPG Cluster CRs
+  R->>K: 4 restore Job if data_source
+  R->>K: 5 mock bindings and Services
+  R->>K: 6 Deployments + Services
+  R->>K: 7 Ingress
+  Note over R,K: Reconciler stops here: it does NOT write readiness
 
-  Note over R,PG: failures -> INVALID/DEGRADED with blocking_reasons
-  Note over E,R: ⚠️ open: readiness criteria details, behavior with active runs, env TTL, dataset PII scan/retention/owner handoff
+  K-->>W: informer events (Deployment, Cluster, Job, Ingress, NetworkPolicy, ...)
+  W->>W: enqueue key namespace_id, read cache, evaluate components
+  W->>PG: upsert tbl_component_status
+  W->>PG: APPLYING -> DATA_LOADING -> READY, ready_for_loadtest=true (one tx)
+  Note over W,PG: failure -> INVALID / DEGRADED + blocking_reasons
+  C->>B: GET /readiness (projection-backed)
+  B-->>C: components + blocking_reasons
 ```
 
-### 3.4 Script validation & staging (S3/approved ref)
+### 3.4 Status Watcher: how K8s cluster events become namespace status
+
+```mermaid
+flowchart LR
+  subgraph K8S["Kubernetes API"]
+    D["Deployment"] ~~~ C["CNPG Cluster"] ~~~ J["Job restore / validation"]
+    I["Ingress"] ~~~ NP["NetworkPolicy"] ~~~ TR["TestRun"] ~~~ NS["Namespace"]
+  end
+  K8S -->|"shared informers<br/>selector loadtest.io/managed-by=loadtest-controller"| H["Event handlers<br/>read label namespace-id"]
+  H -->|"enqueue key = namespace_id<br/>dedup + rate limit"| Q[("Workqueue")]
+  RS["Resync 5m<br/>+ startup relist"] --> Q
+  MS["mock-service<br/>observed_generation"] --> Q
+  Q --> W["Worker reconcileStatus(ns_id)<br/>level-triggered"]
+  W -->|"1 read informer cache<br/>never trust event payload"| EV["Evaluators per component type<br/>service, database, data_load,<br/>ingress, network_policy, mock"]
+  EV -->|"2 upsert phase + reason"| CS[("tbl_component_status")]
+  EV --> AG["Aggregator<br/>fence: observed_generation == desired_generation<br/>hysteresis: grace 60s / stable 60s"]
+  AG -->|"3 fn_namespace_transition<br/>status, version, ready_for_loadtest,<br/>blocking_reasons, status_observed_at<br/>one tx + event"| NSP[("tbl_namespaces + events")]
+  NSP --> GATE["POST /loadtests gate<br/>409 NAMESPACE_NOT_READY<br/>reason STATUS_STALE if heartbeat > 15m"]
+```
+
+**Flow, step by step**
+1. **Subscribe.** Shared informers (one per GVR) filter by `loadtest.io/managed-by=loadtest-controller`. Every replica holds the cache; only the leader writes PG (or shard by `namespace_id` hash).
+2. **Enqueue, don't interpret.** A handler only reads the `loadtest.io/namespace-id` label and enqueues that key (deduplicated, rate-limited). Resync (5m) and startup relist are the safety net, so dropped, duplicated or reordered events still converge (`WATCH-01/02`).
+3. **Recompute from cache.** The worker re-evaluates all components of the namespace from the informer cache. Readiness per component type:
+
+   | Component | READY when |
+   |---|---|
+   | service | `observedGeneration == generation`, `Available=True`, `availableReplicas >= replicas`, `spec_hash` matches |
+   | database | CNPG `Ready=True`, app secret exists (name only) |
+   | data_load | restore Job `Complete=True` and verify passed |
+   | ingress | exists and `spec_hash` matches |
+   | network_policy | full expected set exists with matching `spec_hash` (K8s has no status) |
+   | mock | `observed_generation == snapshot generation` |
+
+4. **Generation fencing.** A component counts READY only if its observed generation equals the namespace `desired_generation`; otherwise it is at most `PROGRESSING` (`WATCH-03`).
+5. **Aggregate and write atomically.** Component rows are upserted, then `fn_namespace_transition` writes status, version, `ready_for_loadtest`, `blocking_reasons` and the event in one transaction. Illegal transitions raise; the watcher logs and recomputes on the next pass (`WATCH-04`).
+6. **Hysteresis.** READY→DEGRADED only after a required component is not READY for the grace window (60s); DEGRADED→READY only after a stable window (60s) (`WATCH-06`).
+7. **Heartbeat / fail-closed.** `status_observed_at` is updated on every reconcile/resync. If it is older than the staleness threshold (15m = 3× resync), `POST /loadtests` returns `409 NAMESPACE_NOT_READY` / `STATUS_STALE` (`WATCH-05`).
+8. **One watcher, many consumers.** The same informers feed `fn_loadtest_transition` (TestRun `status.stage`) and script validation Job status — no second watcher.
+
+**DEGRADED during a RUNNING load test:** the run continues and is flagged `namespace_degraded_at` (result unreliable); the gate still applies at run-creation time only.
+
+### 3.5 Namespace status machine (owner of each transition)
+
+```mermaid
+stateDiagram-v2
+  [*] --> DRAFT
+  DRAFT --> VALIDATING: API validate/apply
+  VALIDATING --> INVALID: API
+  VALIDATING --> APPLYING: API
+  APPLYING --> DATA_LOADING: Watcher
+  APPLYING --> READY: Watcher, no data_source
+  APPLYING --> DEGRADED: Watcher, permanent failure or deadline
+  APPLYING --> INVALID: Watcher
+  DATA_LOADING --> READY: Watcher
+  DATA_LOADING --> INVALID: Watcher, hard restore failure
+  READY --> DEGRADED: Watcher, grace window exceeded
+  DEGRADED --> READY: Watcher, stable window
+  DEGRADED --> VALIDATING: API, spec edited
+  READY --> DELETING: API
+  DELETING --> DELETED: Watcher, K8s Namespace gone
+```
+
+The four transitions missing from the current seed (`APPLYING→READY`, `APPLYING→DEGRADED`, `DATA_LOADING→INVALID`, `DEGRADED→READY`) are added in the plan-21 migration (see `namespace-status-watcher.md` §2).
+
+### 3.6 Script validation & staging
 
 ```mermaid
 sequenceDiagram
@@ -198,154 +286,142 @@ sequenceDiagram
   participant S as Script Manager
   participant PG as PostgreSQL
   participant K as Kubernetes API
-  participant W as Validation Watcher/Informer
+  participant W as Status Watcher
   participant L as Load-test Manager
 
-  C->>S: POST /scripts (approved_ref, checksum) / upload
-  S->>PG: store metadata + PENDING_VALIDATION
-
-  C->>S: POST /scripts/{id}/validate (Idempotency-Key)
-  S->>K: create isolated validation K8s Job
-  Note over S,K: 🔒 least privilege, no platform creds, time/resource limits<br/>⚠️ open: exact egress allowlist (approved artifact/DNS only),<br/>scoped/presigned creds, no arbitrary URL fetch
+  C->>S: POST /scripts (inline or approved_ref + checksum)
+  S->>PG: metadata + PENDING_VALIDATION
+  C->>S: POST /scripts/{id}/validate
+  S->>K: isolated validation Job (least privilege, limits, minimal egress)
   S->>PG: VALIDATING
-  S-->>C: 202 validation_id/status_url
+  S-->>C: 202
+  K-->>W: Job status events (same informers as 3.4)
+  W->>PG: VALIDATED or INVALID / VALIDATION_FAILED + diagnostics
 
-  W->>K: watch/inform Job status (level-triggered)
-  W->>PG: VALIDATED or INVALID/VALIDATION_FAILED + diagnostics
-
-  C->>L: POST /loadtests (namespace_id, targets[], script_ref)
-  L->>PG: require namespace READY + targets valid + script VALIDATED
-  alt not validated (policy)
-    L-->>C: 409 SCRIPT_NOT_VALIDATED / 422
-  else validated
-    L->>K: stage script for TestRun.spec.script
-    Note over L,K: small <=1 MiB => ConfigMap<br/>⚠️ large/S3 => volumeClaim/PVC staging<br/>(open: PVC ownership/lifecycle, CSI/object staging, credentials)
-    L->>K: create k6 TestRun (run-scoped labels, owner refs)
+  C->>L: POST /loadtests (namespace_id, targets, script)
+  L->>PG: ready AND fresh AND targets valid AND script VALIDATED
+  alt gate fails
+    L-->>C: 409 NAMESPACE_NOT_READY / SCRIPT_NOT_VALIDATED, 422 targets
+  else ok
+    L->>K: stage script (ConfigMap <= 1 MiB, else PVC) + TestRun, run-scoped names/labels
     L-->>C: 202 + status_url
   end
 ```
 
-### 3.5 Load-test execution & runner egress (security review focus)
+Large/S3 scripts: PVC ownership/lifecycle and scoped credentials remain open (⚠️).
+
+### 3.7 Load-test execution & runner egress (security focus)
 
 ```mermaid
 flowchart LR
-  subgraph ENVNS["🔒 K8s Namespace lt-env-<namespace_id> (ADR-001, 1:1)"]
+  subgraph ENVNS["🔒 K8s Namespace lt-env-id"]
     direction TB
     subgraph RUN["Run-scoped resources"]
-      TR["k6 TestRun CRD"] --> RUNNER["🔒 runner pods<br/>untrusted JS<br/>no K8s/platform creds<br/>least-privilege SA"]
-      STG["staged script<br/>ConfigMap or PVC"] --> TR
-      NPR["🔒 NetworkPolicy egress<br/>run-scoped selector<br/>DEFAULT DENY<br/>allow: resolved targets + approved deps/mocks + DNS"] -.->|enforces| RUNNER
+      TR["k6 TestRun"] --> RUNNER["🔒 runner pods<br/>untrusted JS, no K8s creds"]
+      STG["staged script"] --> TR
+      NPR["🔒 NetworkPolicy egress<br/>DEFAULT DENY<br/>allow: resolved targets, deps/mocks, DNS"] -.->|enforces| RUNNER
     end
     subgraph SUTS["Environment components"]
-      SUT["SUT workloads"]
-      MOCK["mock-service runtime/endpoints<br/>materialized from service.mock/database.mock metadata"]
-      DB["DB (real or mock, unambiguous)"]
-      NPS["NetworkPolicy per service<br/>dependency-derived"] -.-> SUT
-      SUT --> DB
-      SUT --> MOCK
+      SUT["SUT workloads"] --> DB["DB real or mock"]
+      SUT --> MOCK["mock endpoints<br/>ExternalName / Ingress"]
     end
-    PAR["⚠️ open: parallel run quota/limits,<br/>label isolation in shared namespace,<br/>per-run namespace later if needed"] -.-> RUN
   end
-
-  RUNNER ==>|allowed: resolved targets[]| SUT
-  RUNNER -.->|allowed: approved deps/mocks| MOCK
-  RUNNER -.->|allowed: DNS| DNS["cluster DNS"]
-  RUNNER -. "blocked" .-x EXT["other namespaces / internet / metadata / K6/K8s API"]
+  RUNNER ==>|allowed| SUT
+  RUNNER -.->|allowed| MOCK
+  RUNNER -. blocked .-x EXT["other namespaces, internet,<br/>metadata, K8s API, S3"]
+  TR -->|"status.stage events"| WAT["Status Watcher -> fn_loadtest_transition"]
 
   classDef locked fill:#dafbe1,stroke:#1a7f37,color:#1a7f37;
   classDef risk fill:#ffebe9,stroke:#cf222e,color:#cf222e;
-  classDef open fill:#fff8c5,stroke:#9a6700,color:#9a6700;
   class NPR,RUNNER locked;
   class EXT risk;
-  class PAR open;
 ```
 
-### 3.6 Review checklist
+Status sources: today the `LocalRunner` is reconciled by polling (2s). With the K8s runner, `TestRun.status.stage` arrives through the Watcher.
+
+### 3.8 Review checklist
+
 | Area | Review question | Status |
 |---|---|---|
-| Trust boundary | nginx strips client identity headers; backend fails closed on protected routes? | 🔒 design / ⚠️ `conf/nginx` impl alignment |
-| AuthN/AuthZ | OIDC/nginx reflects permissions; Go middleware canonical principal + RBAC? | 🔒 ADR-003 |
-| Role propagation | `X-User-Role`/admin signals consistent across JWT bearer, OIDC session, `abt_` introspection? | ⚠️ |
-| Env mapping | 1 Environment = 1 K8s Namespace, deterministic labels, scoped cleanup? | 🔒 ADR-001 |
-| Runner egress | run-scoped NetworkPolicy default deny, resolved targets+deps+mocks+DNS only? | 🔒 ADR-002 / ⚠️ CNI resolution details |
-| Script validation | approved refs only, checksum, isolated Job, watcher projection, gate before run? | ✅ flow / ⚠️ allowlist+creds details |
-| Large scripts | >1 MiB/S3: `volumeClaim` staging, PVC ownership/lifecycle, presigned/scoped creds? | ⚠️ |
-| Parallel runs | quota/limits, label isolation, owner refs/reaper in shared Env namespace? | ⚠️ |
-| Mock model | metadata in `service.mock`/`database.mock`; mock runtime is separate `mock-service`; real-vs-mock unambiguous? | ✅ model / ⚠️ snapshot contract + MVP scope |
-| Snapshot contract | `schema_version`, generation/observed_generation, compatibility and rollback behavior defined? | ⚠️ |
-| Mock benchmark | `rps_per_core`/overhead measured before final mock-service language/runtime choices? | ⚠️ |
+| Trust boundary | nginx strips client identity headers; backend fails closed? | 🔒 design / ⚠️ `conf/nginx` alignment |
+| AuthN/AuthZ | Go middleware canonical principal + RBAC, role verified from DB | ✅ implemented |
+| Role propagation | `X-User-Role` consistent across JWT / OIDC session / `abt_` | ⚠️ |
+| Env mapping | 1 Environment = 1 K8s Namespace, deterministic labels | 🔒 |
+| Loop separation | Reconciler writes K8s only; Watcher writes PG only | 🔒 (plan 20/21) |
+| Readiness source | projection-backed, generation fencing, hysteresis | 🔒 design / 🔜 impl (plan 21) |
+| Fail-closed | stale heartbeat → `STATUS_STALE` | 🔒 design / 🔜 impl |
+| Runner egress | default deny, resolved targets + deps + DNS | 🔒 / ⚠️ CNI details |
+| Script validation | approved refs, checksum, isolated Job, watcher projection | ✅ flow / ⚠️ allowlist + creds |
+| Large scripts | PVC staging, ownership, presigned creds | ⚠️ |
+| Parallel runs | quota, label isolation, owner refs in shared namespace | ⚠️ |
+| Mock | snapshot contract, `observed_generation` feeds Watcher | ✅ model / ⚠️ contract + scope |
+| Mock benchmark | `rps_per_core` / overhead before runtime choice | ⚠️ |
 
-**Trust boundary:** nginx authenticates and resolves tenant/identity; BFF trusts injected headers only at the trusted boundary and enforces authorization (owner/admin, tenant isolation).
+## 4. Component responsibilities
 
-## 4. BFF component responsibilities
-
-| Component (`cmds/`/`pkgs/`) | Responsibility |
+| Component | Responsibility |
 |---|---|
-| HTTP API (go-chi + Swagger) | Namespace/component CRUD, readiness, load-test create/manage, consistent errors, OpenAPI docs. |
-| Auth middleware | Extract `X-Tenant-Id`, `X-User-Id`, role/admin signals; build principal; fail closed. |
-| Authz policy | Tenant isolation; owner-only; admin cross-owner within tenant; consistent 401/403/404 policy. |
-| Environment manager | Store/validate/apply namespace definitions; compute readiness from component statuses; expose `ready_for_loadtest`. |
-| Service/OpenAPI manager | Validate/store service definitions; **require/parse OpenAPI/Swagger**; index operations for target selection; validate/service store `service.mock` metadata. |
-| Database manager | CRUD, validation, bindings/secret refs, `database.mock` metadata validation/storage, managed dataset refs/restore policy validation, data-load status. |
-| Dataset manager | Register/validate managed non-prod datasets (S3 approved refs, checksum, owner/tenant RBAC), expose metadata/status for restore; no prod-source policy. |
-| Ingress manager | CRUD, validation, host/path/TLS/rule resolution to services/ports, status. |
-| Dependency/NetworkPolicy resolver | Validate dependency graph; render/apply NetworkPolicy per service from dependencies; expose effective policy/status. |
-| Load-test manager | Enforce readiness gate; validate `targets[]` against namespace OpenAPI; validate/accept required **JS script** (inline or approved ref such as S3/object ref); enforce validation gate for remote refs; apply guardrails; persist and orchestrate runs. |
-| K8s orchestrator/adapter | Apply/reconcile namespace components and run resources via **Go Kubernetes API** (no kubectl): namespace/policies/ingress/db/app resources as applicable, script validation **K8s Jobs** + watcher/informer reconciliation, script staging (ConfigMap for small / volumeClaim for large S3/object-ref scripts), **k6-operator `TestRun`** (`docs/k6-operator-go-client.md`), TTL cleanup. |
-| Mock operator (controller) | Materializes `service.mock`/`database.mock` metadata into versioned snapshots/bindings, admission/ledger integration, reconcile/`observed_generation`, pool/admin projections; integrates with namespace deps/NetworkPolicy (`docs/mock-service-api.md`). |
-| `mock-service` runtime (separate deployable) | Loads snapshots, serves cluster-internal mock endpoints (OpenAPI/DB profiles), applies latency/variants, enforces pool concurrency, exports overhead/health/observed status. No public ingress, no user RBAC, no PostgreSQL hot-path writes. |
-| Telemetry adapter | Authz-scoped logs/metrics/events/artifacts; redact secrets. |
+| HTTP API (go-chi + Swagger) | CRUD, readiness read, load-test create/manage, consistent errors. |
+| Auth middleware / policy | Principal from trusted headers; tenant isolation; owner/admin RBAC; 401/403/404 policy. |
+| Environment manager | Store/validate desired spec, bump `desired_generation`, write apply intent (outbox). **Reads** readiness from projection; does not compute it. |
+| Service/OpenAPI manager | Validate/store services, index operations, validate `service.mock`. |
+| Database / Dataset manager | CRUD, bindings, `database.mock`, dataset refs and restore policy. |
+| Dependency/NetworkPolicy resolver | Validate graph; produce policy intent for the Reconciler; expose effective policy. |
+| **Env Reconciler** | Level-triggered desired → K8s: ordered SSA apply, prune by label, leader-elected. Never writes readiness. See `k8s-orchestration.md`. |
+| **Status Watcher** | Informers on managed resources + resync; evaluators per component; generation-fenced aggregation; atomic `fn_namespace_transition`; heartbeat; also drives `fn_loadtest_transition` and script validation status. See `namespace-status-watcher.md`. |
+| Load-test manager | Gates (ready, **fresh**, targets, script), guardrails, persist run, runner start, reaper. |
+| Runner | `Local` (k6 binary) today; `K8s` (TestRun via dynamic client) planned. |
+| Mock operator (controller) | Materialize mock metadata → versioned snapshots; ledger; consume `observed_generation`. |
+| `mock-service` (separate) | Serve mocks; no PG writes, no user RBAC, no public ingress. |
+| Telemetry adapter | Authz-scoped logs/metrics/events; redact secrets. |
 
 ## 5. Core flows
 
-### 5.1 Define namespace (everything in one place)
-1. Client creates namespace (`POST /namespaces (Environment)`) with full `spec` (services+OpenAPI, databases, ingress, dependency policy) and/or adds components via CRUD.
-2. BFF validates: schema, service OpenAPI (required), DB bindings, ingress targets, dependency references/graph, NetworkPolicy renderability. Apply target is the Environment’s mapped K8s Namespace (1:1).
-3. BFF applies/reconciles desired state asynchronously (`APPLYING`).
-4. BFF tracks component readiness and sets `READY` + `ready_for_loadtest=true` only when required checks pass. Errors -> `INVALID`/`DEGRADED` with reasons.
+### 5.1 Define Environment
+1. Client creates the Environment (full `spec` and/or component CRUD).
+2. BFF validates schema, OpenAPI, bindings, ingress, deps, NetworkPolicy renderability.
+3. On apply: one tx stores spec, bumps `desired_generation`, writes idempotency + outbox; status → `APPLYING`.
+4. **Env Reconciler** applies resources in order (§3.3). **Status Watcher** observes K8s and moves the namespace to `DATA_LOADING` / `READY` / `DEGRADED` / `INVALID` with `blocking_reasons`.
+5. `GET /readiness` serves the projection.
 
-### 5.2 Define/trigger load test (only when namespace READY)
-1. Client submits `POST /loadtests` with `namespace_id`, **`targets[]`** (API operations), **`script` (JS)**, and `load_config`.
-2. BFF checks authz and **namespace readiness gate** (`ready_for_loadtest=true`) — reject if not ready (**`409 Conflict`**, code `NAMESPACE_NOT_READY`, with readiness details).
-3. BFF resolves `targets[]` against namespace services’ parsed OpenAPI; rejects unknown/invalid targets.
-4. BFF validates JS script and guardrails. If `script_ref` (e.g., S3/approved artifact) is used, require `VALIDATED` status from async validation (isolated **K8s Job**, reconciled by **K8s watcher/informer**) before execution; stage validated content to `configMap` (<=1 MiB) or `volumeClaim` for `TestRun.spec.script`.
-5. BFF persists run, provisions/executes asynchronously (ensure runner/network access, create script source, create k6 `TestRun` via Go K8s API), returns `202` + `status_url`.
-6. BFF reconciles status to terminal state (`COMPLETED/FAILED/STOPPED/TIMEOUT_CLEANED/CLEANUP_FAILED`) and performs TTL/stop cleanup.
+### 5.2 Define/trigger load test
+1. `POST /loadtests` with `namespace_id`, `targets[]`, `script`, `load_config`.
+2. Authz, then **gate**: `ready_for_loadtest=true` **and** `now - status_observed_at <= staleness_threshold`; else `409 NAMESPACE_NOT_READY` (reason may be `STATUS_STALE`).
+3. Resolve `targets[]` against OpenAPI; validate script (+ `VALIDATED` for refs); guardrails/quota.
+4. Persist run, transition in tx, `Runner.Start`; return `202`.
+5. Reconcile to terminal state (`COMPLETED/FAILED/STOPPED/TIMEOUT_CLEANED/CLEANUP_FAILED`); reaper cleans up.
 
 ## 6. API surface (summary)
 
-Base: `/api/loadtest/v1` (details in `docs/bff-loadtest-api-spec.md`).
-
-- **Namespaces:** create/replace/list/get/readiness/validate/apply/delete — `/namespaces...`
-- **Namespace components (CRUD):** `/namespaces/{namespace_id}/services` (service includes **OpenAPI**; exposes `/openapi`, `/apis`), `/databases`, `/ingress`; `/dependencies`, `/network-policies`.
-- **Load tests:** `/loadtests` create requires ready Environment + `targets[]` + JS `script`; list/get/stop/logs (+ inferred events/metrics/rerun/delete). Remote/S3 scripts use approved refs, async **K8s Job validation + watcher** notification/status, and staging to `configMap`/`volumeClaim` (k6-operator has no native S3 source).
-- **Mock service (separate runtime):** materializes `service.mock`/`database.mock` metadata from namespace components (pools, reservations, latency/variants/profiles), ACID async writes, reservation ledger, pooled runtime, operator reconcile — see `docs/mock-service-api.md`.
-- **Supporting:** `/me`, `/guardrails`, health/metrics.
-- **Control plane:** `/api/admin/v1` for OIDC/tenant/auth-config/introspection/account/role integration.
+Base `/api/loadtest/v1` (details in `bff-loadtest-api-spec.md`): namespaces (+ readiness/validate/apply/events), components (`services`, `databases`, `ingress`, `dependencies`, `network-policies`), scripts, loadtests, datasets, mock status/pools, `/me`, `/guardrails`. Control plane: `/api/admin/v1`.
 
 ## 7. Security & operations
 
-**Integrity/fault harness (release gate):** see [`docs/harness-testing.md`](harness-testing.md) for ACID/invariant proofs, crash/exception/network-fault scenarios, idempotency/retry/runner safety, and CI placement. These complement unit/E2E/k6 perf tests.
+- Integrity/fault harness is a release gate: [`harness-testing.md`](harness-testing.md) (includes `WATCH-01..06`).
+- Trust only nginx-injected identity at the boundary; fail closed; never trust client owner/tenant.
+- OpenAPI, scripts, refs are untrusted and size-limited; runner egress is network-enforced; no platform credentials in runners.
+- Secrets via SOPS env / references; never in DB (`secrets-management.md`).
+- Async + idempotent mutations (`Idempotency-Key`), optimistic concurrency (ETag/`If-Match`), TTL/force-stop cleanup, audit for admin actions.
+- **Operational signals for the Watcher:** heartbeat age per namespace, workqueue depth, resync duration, illegal-transition count, time-in-`APPLYING`.
 
-- Trust only nginx-injected identity at the boundary; fail closed; never trust client owner/tenant. **Enforce trust boundary:** backend reachable only via trusted nginx path (unix socket/private upstream) and/or nginx strips client-supplied `X-Tenant-Id`/`X-User-*` and sets them; backend rejects requests missing required headers on protected routes.
-- Tenant isolation always; owner/admin RBAC in BFF.
-- Service OpenAPI, JS scripts, and target refs are validated and size/guardrail-limited. **JS scripts are untrusted:** `targets[]` metadata is validated, but script behavior must be constrained by **runner NetworkPolicy/egress allowlists** (only resolved targets/declared deps + required platform endpoints), no platform/K8s credentials in runner, resource/time/size quotas (ConfigMap 1 MiB, script size, vusers/duration), and SSRF-safe target resolution.
-- NetworkPolicy is dependency-derived (least privilege); review baseline CNI/platform allowances.
-- Secrets via refs/secret stores (never commit raw secrets).
-- Async/idempotent operations (define `Idempotency-Key` on create/trigger/apply/stop endpoints), readiness checks, TTL/force-stop cleanup, **Environment TTL** (ephemeral definitions need TTL or explicit retention to avoid leaks), audit for admin actions, optimistic concurrency/version/ETag for conflicting updates/applies.
+## 8. MVP decisions and open items
 
-## 8. MVP decisions (locked for design/docs) and remaining open items
+### Locked
+1. 1 Environment = 1 K8s Namespace (`lt-env-<namespace_id>`, deterministic labels).
+2. Runner egress network-enforced (not advisory).
+3. OIDC/nginx auth + Go middleware RBAC; `abt_` service-account token; `tenant_id` boundary.
+4. Mock = separate `mock-service` data plane driven by desired-state snapshots.
+5. Two separated loops (Reconciler → K8s, Watcher → PG), shared only via DB; level-triggered with generation fencing and fail-closed staleness gate.
+6. Manifests rendered in Go + SSA (ADR-004); no Helm in MVP.
+7. A RUNNING load test continues when the namespace goes DEGRADED; its result is flagged unreliable.
 
-### Locked (MVP design)
-1. **Environment ↔ Kubernetes Namespace mapping = 1:1 (critical).** One platform Environment (`/api/loadtest/v1/namespaces`, `namespace_id`) maps to **one Kubernetes Namespace** (deterministic name, e.g. `lt-env-<namespace_id>` normalized; labels `tenant_id`, `namespace_id`, `managed-by`). Environment components (services, databases, ingress, dependency-derived NetworkPolicy, mock runtime components as applicable) are reconciled in that K8s Namespace. Load-test execution resources run in the same Environment K8s Namespace unless a future decision isolates per-run namespaces; in all cases cleanup/TTL is Environment-scoped and runner isolation/egress rules still apply.
-2. **Runner egress is network-enforced (not advisory).** `targets[]` is validated against namespace OpenAPI for audit/UX, but **k6 JS is untrusted**. For each run, resolve allowed destinations from `targets[]` + approved namespace deps/mocks + required platform allowances (DNS). Apply **NetworkPolicy egress for runner pods** (run-scoped selector/labels): default deny egress, allow only resolved service/mock endpoints/ports and required DNS; no K8s API/platform credentials, least-privilege SA. Hostname/external-target policy (if ever allowed) must be explicit and SSRF-safe.
-3. **AuthN/AuthZ integration (locked direction).** `tenant_id` scopes the multi-domain loadtest service (org/tenant boundary) and is always applied. `abt_` is a platform-issued service-account/base token (CLI/automation). **POC uses OIDC/nginx auth** (`conf/nginx`, OpenResty/Lua pattern): nginx authenticates (OIDC/JWT/`abt_` as applicable) and **reflects permissions/identity from OIDC/claims/introspection into trusted headers**. The Go BFF (go-chi) **still has a middleware layer** to extract trusted headers, build canonical principal (`tenant_id`, `user_id`/principal, `is_admin`, roles), enforce RBAC/tenant isolation, and fail closed. **Admin normalization is canonical** (one rule) and never derived from untrusted client input. Target/prod keeps the same trust-boundary contract (nginx edge + Go RBAC enforcement).
-
-### Remaining open items
-1. Readiness criteria for `ready_for_loadtest` and degraded behavior; behavior when mutating Environment with active runs.
-2. Dependency/NetworkPolicy baseline merge with cluster DNS/metrics/system rules (CNI specifics).
-3. Concrete quota/limits (OpenAPI/script max, ConfigMap 1 MiB vs `volumeClaim` staging, vusers/duration/TTL, env TTL, validation Job limits).
-4. OpenAPI/script forms and operation identifier format (`operationId` vs `method+path`) finalized in contracts.
-5. Dataset/restore (MVP dump-file default): approved non-prod S3 refs, credential model (IRSA/scoped short-lived/presigned), verify/checksum/schema checks, PII pattern scan on import, retention/owner handoff, restore Job egress allowlist; `snapshot_per_run`/non-prod PITR roadmap.
-6. Mock Service MVP scope (separate `mock-service` deployable, metadata materialization now; snapshot/binding contract; capacity ledger/benchmark depth phased) and mock endpoint DNS/NetworkPolicy templates.
-7. Compatibility strategy for legacy/global endpoints in older docs.
+### Open
+1. Active-run behavior when mutating an Environment (block vs generation snapshot).
+2. NetworkPolicy baseline merge with cluster DNS/metrics rules (CNI specifics).
+3. Concrete quotas/limits (OpenAPI/script size, vusers/duration/TTL, env TTL, validation Job limits).
+4. Operation identifier format (`operationId` vs `method+path`).
+5. Dataset/restore details (credential model, PII scan, retention/owner handoff, restore Job egress).
+6. Mock MVP scope, snapshot contract, endpoint DNS/NetworkPolicy templates.
+7. Watcher sharding vs single leader; `component_id` type in `tbl_component_status` (text vs UUID).
+8. Legacy/global endpoint compatibility.
+9. Environment TTL (reaper currently covers runs only).

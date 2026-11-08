@@ -51,6 +51,7 @@ Append-only. `actor JSONB` chứa principal từ trusted headers. Index `(tenant
 Append-only; index `(object_id, id)`; wrapper `fn_namespace_transition(...)`.
 
 ### Components (FK CASCADE về namespace, không state machine — dùng audit)
+Per-component runtime status lives in the **`tbl_component_status` projection** (migration `0011_component_status.sql`, plans/21; namespace-level `desired_generation` / `blocking_reasons` / `status_observed_at` in the same migration). Components themselves stay stateless — the watcher writes observed phases there, and `GET /readiness` reads that projection.
 - `tbl_services`: `openapi_spec JSONB` (NULL → chặn readiness, 422), `spec_hash` (đổi spec → revalidate), `parsed_summary JSONB` (operations index → `targets[]`), unique `(namespace_id, name)`.
 - `tbl_databases`: engine + `profile JSONB`.
 - `tbl_ingress`: host + `paths JSONB`.

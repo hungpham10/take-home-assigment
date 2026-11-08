@@ -179,3 +179,36 @@ func TestLoadTestGatesAndLifecycle(t *testing.T) {
 		t.Errorf("events = (%d, %s)", rec.Code, rec.Body.String())
 	}
 }
+
+// testServerK8S — server composition with the cluster wired (plans/21 gates).
+func testServerK8S(t *testing.T, staleAfter time.Duration) (http.Handler, *gorm.DB) {
+	t.Helper()
+	dbr := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: dbr, Runner: &fakeRunner{}, Now: time.Now, K8S: true, StaleAfter: staleAfter})
+	return h, dbr
+}
+
+// TestCreateStatusStaleGate — plans/21 WATCH-05: with the cluster wired, a
+// READY namespace whose watcher heartbeat is missing/old returns 409
+// NAMESPACE_NOT_READY reason STATUS_STALE (fail-closed).
+func TestCreateStatusStaleGate(t *testing.T) {
+	h, db := testServerK8S(t, 15*time.Minute)
+	headers, nsID := readyFixture(t, db)
+
+	rec := doLT(t, h, testutil.WithKey(headers, "k-stale"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt-stale", "script_id": headers["X-Script-Id"]})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "STATUS_STALE") {
+		t.Fatalf("stale heartbeat: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Fresh heartbeat passes the gate.
+	if err := db.Model(&store.Namespace{}).Where("id = ?", nsID).
+		Update("status_observed_at", time.Now().UTC()).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec = doLT(t, h, testutil.WithKey(headers, "k-fresh"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt-fresh", "script_id": headers["X-Script-Id"]})
+	if rec.Code == http.StatusConflict && strings.Contains(rec.Body.String(), "STATUS_STALE") {
+		t.Fatalf("fresh heartbeat blocked: %d %s", rec.Code, rec.Body.String())
+	}
+}

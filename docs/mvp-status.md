@@ -48,7 +48,7 @@ nginx (conf/nginx — có sẵn, chưa đụng)
 | POST | `/namespaces/{id}/services` | OpenAPI validate → 422 + reason; spec change → ready reset |
 | PUT | `/namespaces/{id}/services/{svc}/spec` | same-content → unchanged |
 | POST | `/namespaces/{id}/validate` | →VALIDATING→(INVALID+422 checklist \| APPLYING) |
-| POST | `/namespaces/{id}/apply` | Idempotency-Key; →DATA_LOADING→READY; resolve deps → network_policies |
+| POST | `/namespaces/{id}/apply` | Idempotency-Key; resolve deps → network_policies. **K8S_ENABLED=true:** chỉ bump `desired_generation`, trả 202 APPLYING — Env Reconciler apply K8s, Status Watcher projection đóng vòng APPLYING→READY (plans/21). **Không có cluster (legacy):** giữ nhánh sync `→DATA_LOADING→READY` cho stack MVP |
 | GET | `/namespaces/{id}/readiness` | checklist gates (services, policies, mock_capacity hook) |
 | POST | `/namespaces/{id}/scripts` | ≤1MiB; async validate → VALIDATED/INVALID |
 | POST | `/namespaces/{id}/scripts/{sid}/validate` | revalidate |

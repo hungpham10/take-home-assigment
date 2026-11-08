@@ -56,6 +56,8 @@ type ServerDeps struct {
 	ScriptsDir string           // staging dir for k6 scripts
 	ScriptQ    *script.Queue    // nil → sync validation (tests)
 	Runner     runner.Runner    // load-test execution backend
+	K8S        bool             // cluster wired → async apply (plans/21)
+	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
 }
 
 // NewServer builds the REAL server composition (health/ready/metrics +
@@ -71,6 +73,8 @@ func NewServer(t *testing.T, d ServerDeps) http.Handler {
 		ScriptsDir: d.ScriptsDir,
 		ScriptQ:    d.ScriptQ,
 		Runner:     d.Runner,
+		K8S:        d.K8S,
+		StaleAfter: d.StaleAfter,
 	})
 }
 

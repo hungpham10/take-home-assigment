@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 	"github.com/hungpham/loadtest-platform/pkgs/testutil"
@@ -127,5 +128,64 @@ func TestValidateFailsOnBadSpec(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &ns2)
 	if ns2.Status != "INVALID" {
 		t.Errorf("status after failed validate = %q, want INVALID", ns2.Status)
+	}
+}
+
+// TestApplyK8SAsyncHandoff — plans/21 PR B: with the cluster wired (K8S=true)
+// POST /apply must NOT reach READY synchronously. It bumps desired_generation
+// and leaves the status at APPLYING for the Env Reconciler + Status Watcher.
+func TestApplyK8SAsyncHandoff(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now, K8S: true})
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"), map[string]string{"name": "envk8s"})
+	if rec.Code != 201 {
+		t.Fatalf("create ns: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/services", principal, map[string]any{
+		"name": "widgets", "spec": json.RawMessage(widgetSpec),
+	})
+	if rec.Code != 201 {
+		t.Fatalf("create service: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/validate", principal, nil)
+	if rec.Code != 200 {
+		t.Fatalf("validate: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/apply", testutil.WithKey(principal, "ka1"), nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status            string `json:"status"`
+		DesiredGeneration int64  `json:"desired_generation"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "APPLYING" || resp.DesiredGeneration != 1 {
+		t.Fatalf("hand-off response %+v", resp)
+	}
+
+	// DB: desired_generation bumped, still APPLYING, not ready, no fake
+	// observed_generation on the policy (watcher owns that now).
+	var row store.Namespace
+	if err := db.Where("id = ?", ns.ID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != "APPLYING" || row.DesiredGeneration != 1 || row.ReadyForLoadtest {
+		t.Fatalf("ns row: status=%s desired=%d ready=%v", row.Status, row.DesiredGeneration, row.ReadyForLoadtest)
+	}
+	var policy store.NetworkPolicy
+	if err := db.Where("namespace_id = ?", ns.ID).First(&policy).Error; err != nil {
+		t.Fatal(err)
+	}
+	if policy.ObservedGeneration != 0 {
+		t.Fatalf("policy observed_generation %d, want 0 (watcher owns it)", policy.ObservedGeneration)
 	}
 }

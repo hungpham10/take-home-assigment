@@ -23,6 +23,19 @@ type Config struct {
 
 	// ScriptsDir stages k6 script content (content_ref in tbl_scripts)
 	ScriptsDir string
+
+	// K8S enables the cluster path (plans/21): Env Reconciler + Status
+	// Watcher run in-process and POST /apply becomes async. Requires an
+	// API server URL (K8S_API_URL, default in-cluster service env).
+	K8SEnabled bool
+	K8SAPIURL  string
+
+	// Status Watcher timing (docs/namespace-status-watcher.md §8; seconds).
+	WatcherResyncSeconds      int
+	WatcherGraceSeconds       int
+	WatcherStableSeconds      int
+	WatcherApplyDeadlineMin   int
+	WatcherStalenessThreshold int
 }
 
 // FromEnv builds Config from environment variables with sane dev defaults.
@@ -33,6 +46,24 @@ func FromEnv() (Config, error) {
 		RunnerMode:  envOr("RUNNER_MODE", "local"),
 		LogLevel:    envOr("LOG_LEVEL", "info"),
 		ScriptsDir:  envOr("SCRIPTS_DIR", "/tmp/ltp-scripts"),
+		K8SEnabled:  envOr("K8S_ENABLED", "false") == "true",
+		K8SAPIURL:   envOr("K8S_API_URL", "https://kubernetes.default.svc"),
+	}
+	var err error
+	if c.WatcherResyncSeconds, err = envInt("WATCHER_RESYNC_PERIOD", 300); err != nil {
+		return Config{}, err
+	}
+	if c.WatcherGraceSeconds, err = envInt("WATCHER_GRACE_WINDOW", 60); err != nil {
+		return Config{}, err
+	}
+	if c.WatcherStableSeconds, err = envInt("WATCHER_STABLE_WINDOW", 60); err != nil {
+		return Config{}, err
+	}
+	if c.WatcherApplyDeadlineMin, err = envInt("WATCHER_APPLY_DEADLINE", 15); err != nil {
+		return Config{}, err
+	}
+	if c.WatcherStalenessThreshold, err = envInt("WATCHER_STALENESS_THRESHOLD", 900); err != nil {
+		return Config{}, err
 	}
 	switch c.RunnerMode {
 	case "local", "k8s":
@@ -50,4 +81,16 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envInt(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be a positive integer", key, v)
+	}
+	return n, nil
 }
