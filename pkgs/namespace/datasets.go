@@ -160,7 +160,13 @@ func (d Deps) runDatasetValidation(ctx context.Context, ds *store.Dataset) strin
 	}
 	if ds.Status != target {
 		actor := store.ActorJSON(ds.TenantID, deref(ds.OwnerUserID), "")
-		if err := store.Transition(ctx, d.DB, "dataset", ds.ID, target, actor, "metadata validation"); err == nil {
+		var err error
+		if target == "AVAILABLE" {
+			err = store.DSToAvailable(ctx, d.DB, ds.ID, actor, "metadata validation")
+		} else {
+			err = store.DSToInvalid(ctx, d.DB, ds.ID, actor, "metadata validation")
+		}
+		if err == nil {
 			ds.Status = target
 		}
 	}
@@ -287,13 +293,13 @@ func (d Deps) deleteDataset(w http.ResponseWriter, r *http.Request) {
 	}
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
 	if ds.Status != "DELETING" {
-		if err := store.Transition(ctx, d.DB, "dataset", ds.ID, "DELETING", actor, "delete requested"); err != nil {
+		if err := store.DSToDeleting(ctx, d.DB, ds.ID, actor, "delete requested"); err != nil {
 			httpx.WriteCodeError(w, "INVALID_TRANSITION",
 				"dataset cannot be deleted from status "+ds.Status)
 			return
 		}
 	}
-	if err := store.Transition(ctx, d.DB, "dataset", ds.ID, "DELETED", actor, "deleted"); err != nil {
+	if err := store.DSToDeleted(ctx, d.DB, ds.ID, actor, "deleted"); err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "dataset delete failed")
 		return
 	}

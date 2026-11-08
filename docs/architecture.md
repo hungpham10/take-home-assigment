@@ -435,7 +435,7 @@ The codebase is organized by domain boundary, not strictly by the API → servic
     E    → F, httpx (error/response shaping only)
     F    → (no domain imports)
 
-Status changes happen only through store transitions. The Reconciler never writes readiness; the Watcher never writes K8s. Before cross-package refactors, update docs/plans, re-index CodeGraph, and inspect call chains for bypasses.
+Status changes happen only through store transitions — qua wrapper central trong `pkgs/store/*_lifecycle.go` (namespace/loadtest/script/dataset: status constants + bảng caller-owner trong comment đầu file; **enforced bởi `scripts/lint-transitions.sh`** trong CI lint — raw `store.Transition` ngoài `pkgs/store/` bị chặn). The Reconciler never writes readiness; the Watcher never writes K8s. Before cross-package refactors, update docs/plans, re-index CodeGraph, and inspect call chains for bypasses.
 
 ### 5.4 Known deviations and staged refactors (MVP-scoped)
 

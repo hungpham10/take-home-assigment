@@ -24,6 +24,9 @@ jobs:
         with:
           version: v2.15.0
           args: --timeout 5m
+      # plans/26: state transitions chỉ qua pkgs/store/*_lifecycle.go
+      - name: Transition lint
+        run: ./scripts/lint-transitions.sh
 
   test:
     runs-on: ubuntu-latest

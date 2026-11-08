@@ -61,18 +61,18 @@ func (rc Reconciler) reconcileOne(ctx context.Context, lt *store.LoadTest) {
 	// table): STOPPED-with-Missing is NOT a normal stop — fail the run so it
 	// doesn't poll a dead ref forever.
 	case st.Missing && (lt.Status == "PROVISIONING" || lt.Status == "RUNNING"):
-		_ = store.Transition(ctx, rc.DB, "loadtest", lt.ID, "FAILED",
+		_ = store.LTToFailed(ctx, rc.DB, lt.ID,
 			actor, "runner lost the run (controller restart?): "+st.Msg)
 	case lt.Status == "PROVISIONING" && st.State == "RUNNING":
 		// Transition FIRST (fn_*_transition updates status+version), then
 		// ancillary fields — never UPDATE status directly.
-		if err := store.Transition(ctx, rc.DB, "loadtest", lt.ID, "RUNNING", actor, "runner started"); err == nil {
+		if err := store.LTToRunning(ctx, rc.DB, lt.ID, actor, "runner started"); err == nil {
 			now := rc.now()
 			_ = rc.DB.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
 				Update("started_at", &now).Error
 		}
 	case lt.Status == "PROVISIONING" && (st.State == "FAILED" || st.State == "STOPPED"):
-		_ = store.Transition(ctx, rc.DB, "loadtest", lt.ID, "FAILED", actor, "runner failed at provision: "+st.Msg)
+		_ = store.LTToFailed(ctx, rc.DB, lt.ID, actor, "runner failed at provision: "+st.Msg)
 	case lt.Status == "RUNNING" && st.State == "COMPLETED":
 		rc.finish(ctx, lt, "COMPLETED", actor, "runner completed")
 	case lt.Status == "RUNNING" && st.State == "FAILED":
@@ -84,7 +84,7 @@ func (rc Reconciler) reconcileOne(ctx context.Context, lt *store.LoadTest) {
 
 func (rc Reconciler) finish(ctx context.Context, lt *store.LoadTest, to, actor, reason string) {
 	err := rc.DB.Transaction(func(tx *gorm.DB) error {
-		if err := store.Transition(ctx, tx, "loadtest", lt.ID, to, actor, reason); err != nil {
+		if err := store.LTFinish(ctx, tx, lt.ID, to, actor, reason); err != nil {
 			return err
 		}
 		now := rc.now()
@@ -110,10 +110,10 @@ func (rc Reconciler) reapTimeouts(ctx context.Context) {
 		if lt.RunnerRef != nil {
 			_ = rc.Runner.Stop(ctx, *lt.RunnerRef)
 		}
-		if err := store.Transition(ctx, rc.DB, "loadtest", lt.ID, "TIMED_OUT", actor, "timeout exceeded"); err != nil {
+		if err := store.LTToTimedOut(ctx, rc.DB, lt.ID, actor, "timeout exceeded"); err != nil {
 			continue
 		}
-		_ = store.Transition(ctx, rc.DB, "loadtest", lt.ID, "TIMEOUT_CLEANED", actor, "cleaned after timeout")
+		_ = store.LTToTimeoutCleaned(ctx, rc.DB, lt.ID, actor, "cleaned after timeout")
 	}
 }
 

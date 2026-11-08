@@ -3,6 +3,9 @@
 test:
 	go test ./... -race
 
+lint-transitions:
+	@./scripts/lint-transitions.sh
+
 lint:
 	golangci-lint run
 

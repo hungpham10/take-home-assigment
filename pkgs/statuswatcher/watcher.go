@@ -567,13 +567,34 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 		}
 	}
 	if next != "" && next != ns.Status {
-		// DEGRADED transitions carry namespace_degraded_at metadata (docs §6):
-		// running loadtests keep running, their results become unreliable.
-		meta := map[string]any{}
-		if next == "DEGRADED" {
-			meta["namespace_degraded_at"] = w.now()
+		if next == store.NamespaceStatusDegraded {
+			// DEGRADED kèm namespace_degraded_at (docs §6) qua wrapper central.
+			if err := store.NSToDegraded(ctx, w.db, ns.ID, store.ActorJSON("system", "statuswatcher", "system"), "watcher aggregation"); err != nil {
+				slog.Warn("statuswatcher: transition rejected", "namespace", ns.ID, "to", next, "err", err)
+				return nil // retry on the next pass; no crash loop
+			}
+			if err := w.db.WithContext(ctx).Model(&store.Namespace{}).
+				Where("id = ?", ns.ID).Update("ready_for_loadtest", false).Error; err != nil {
+				return err
+			}
+			delete(w.readySince, ns.ID)
+			delete(w.degradedSince, ns.ID)
+			return nil
 		}
-		if err := store.TransitionMeta(ctx, w.db, "namespace", ns.ID, next, store.ActorJSON("system", "statuswatcher", "system"), "watcher aggregation", store.JSONBytes(meta)); err != nil {
+		// next ∈ {READY, DATA_LOADING, INVALID} — wrapper central.
+		var nsTransition func(context.Context, *gorm.DB, string, string, string) error
+		switch next {
+		case store.NamespaceStatusReady:
+			nsTransition = store.NSToReady
+		case store.NamespaceStatusDataLoading:
+			nsTransition = store.NSToDataLoading
+		case store.NamespaceStatusInvalid:
+			nsTransition = store.NSToInvalid
+		default:
+			slog.Warn("statuswatcher: unknown aggregated transition", "to", next)
+			return nil
+		}
+		if err := nsTransition(ctx, w.db, ns.ID, store.ActorJSON("system", "statuswatcher", "system"), "watcher aggregation"); err != nil {
 			slog.Warn("statuswatcher: transition rejected", "namespace", ns.ID, "to", next, "err", err)
 			return nil // retry on the next pass; no crash loop
 		}

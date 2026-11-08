@@ -125,8 +125,17 @@ func recordTerminal(ctx context.Context, db *gorm.DB, scriptID, validator, to st
 		if err := tx.Create(&rec).Error; err != nil {
 			return err
 		}
-		return store.Transition(ctx, tx, "script", scriptID, to,
-			store.ActorJSON("", "system", ""), validator)
+		// Wrapper central (pkgs/store/script_lifecycle.go) — không raw Transition.
+		var terr error
+		switch to {
+		case store.ScriptStatusValidated:
+			terr = store.SCRToValidated(ctx, tx, scriptID, store.ActorJSON("", "system", ""), validator)
+		case store.ScriptStatusInvalid:
+			terr = store.SCRToInvalid(ctx, tx, scriptID, store.ActorJSON("", "system", ""), validator)
+		default:
+			terr = store.SCRToValidationFailed(ctx, tx, scriptID, store.ActorJSON("", "system", ""), validator)
+		}
+		return terr
 	})
 }
 

@@ -34,18 +34,18 @@ func (e applyValidationErr) Error() string { return strings.Join(e.reasons, "; "
 // On gate failure it transitions to INVALID and returns the failing checks.
 // The mock-capacity gate is NOT enforced here (it is an apply-time gate).
 func (d Deps) runValidation(ctx context.Context, ns store.Namespace, actor string) (readiness.Report, error) {
-	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "VALIDATING", actor, "validate requested"); err != nil {
+	if err := store.NSToValidating(ctx, d.DB, ns.ID, actor, "validate requested"); err != nil {
 		return readiness.Report{}, err
 	}
 	// Gates run outside the transition transaction so failure can mark INVALID
 	// (transition map: VALIDATING → INVALID) instead of silently rolling back.
 	report := readiness.Gates(ctx, d.DB, ns)
 	if !report.AllOK {
-		_ = store.Transition(ctx, d.DB, "namespace", ns.ID, "INVALID", actor, "readiness gates failed")
+		_ = store.NSToInvalid(ctx, d.DB, ns.ID, actor, "readiness gates failed")
 		return report, errValidationFailed
 	}
 	// VALIDATING → APPLYING
-	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "APPLYING", actor, "validation passed"); err != nil {
+	if err := store.NSToApplying(ctx, d.DB, ns.ID, actor, "validation passed"); err != nil {
 		return readiness.Report{}, err
 	}
 	return report, nil
@@ -138,7 +138,7 @@ func (d Deps) applyDesired(ctx context.Context, ns store.Namespace, _ string) er
 // without a cluster): APPLYING → DATA_LOADING → READY in one tx.
 func (d Deps) applyLegacy(ctx context.Context, ns store.Namespace, actor string) error {
 	return d.DB.Transaction(func(tx *gorm.DB) error {
-		if err := store.Transition(ctx, tx, "namespace", ns.ID, "DATA_LOADING", actor, "apply requested"); err != nil {
+		if err := store.NSToDataLoading(ctx, tx, ns.ID, actor, "apply requested"); err != nil {
 			return err
 		}
 		// MVP restore stub: after DATA_LOADING the actual pg_restore runs in a
@@ -169,7 +169,7 @@ func (d Deps) applyLegacy(ctx context.Context, ns store.Namespace, actor string)
 		} else if err := tx.Create(&policy).Error; err != nil {
 			return err
 		}
-		if err := store.Transition(ctx, tx, "namespace", ns.ID, "READY", actor, "policies resolved"); err != nil {
+		if err := store.NSToReady(ctx, tx, ns.ID, actor, "policies resolved"); err != nil {
 			return err
 		}
 		return tx.Model(&store.Namespace{}).

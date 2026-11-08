@@ -214,7 +214,7 @@ func (d Deps) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
-	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "DELETING", actor, "delete requested"); err != nil {
+	if err := store.NSToDeleting(ctx, d.DB, ns.ID, actor, "delete requested"); err != nil {
 		// INVALID_TRANSITION from the DB function (e.g. APPLYING/DATA_LOADING).
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "namespace cannot be deleted from its current status")
 		return
