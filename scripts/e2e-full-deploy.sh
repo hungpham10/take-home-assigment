@@ -122,7 +122,19 @@ for i in $(seq 1 150); do
   if [ "$STATUS" = "READY" ] && [ "$READYF" = "true" ]; then READY=true; break; fi
   sleep 2
 done
-[ "$READY" = "true" ] || { curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H; kubectl get pods -A | grep lt-env || true; fail "namespace did not reach READY"; }
+if [ "$READY" != "true" ]; then
+  curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H; echo
+  kubectl get pods -A | grep lt-env || true
+  echo "--- CNPG resource ---"
+  kubectl get cluster -n "$ENVNS" -o yaml | head -40 || true
+  echo "--- initdb pod logs ---"
+  for p in $(kubectl get pods -n "$ENVNS" -o name | grep initdb | head -2); do
+    kubectl -n "$ENVNS" logs "$p" 2>&1 | tail -15
+  done
+  echo "--- echo deploy describe ---"
+  kubectl -n "$ENVNS" describe deploy echo 2>&1 | tail -15
+  fail "namespace did not reach READY"
+fi
 echo "   namespace READY ✅"
 
 # --- 5. verify cluster thật -----------------------------------------------------
