@@ -115,6 +115,9 @@ jobs:
           sudo install /tmp/kubectl /usr/local/bin/kubectl
           colima version && limactl --version && kubectl version --client
 
+      - name: Install qemu (qemu-img required by lima on the runner)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-utils qemu-system-x86
+
       - name: Start colima with kubernetes
         uses: nick-fields/retry@v3
         with:
