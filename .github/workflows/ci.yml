@@ -93,6 +93,11 @@ jobs:
           --health-retries 10
     env:
       TEST_DATABASE_DSN: postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ltp
+      PGPASSWORD: ltp
+      PGDATABASE: ltp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
