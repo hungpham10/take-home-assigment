@@ -31,6 +31,11 @@ type Deps struct {
 	// local, no cluster) the legacy synchronous DATA_LOADING→READY path stays
 	// so the stack runs standalone.
 	K8S bool
+	// ApplyNow (plans/26 hierarchical apply): K8S mode gọi NGAY SAU khi
+	// desired-state commit — apply cây object ngoài→trong xuống K8s ngay
+	// trong request path (không đợi reconciler poll). Lỗi ở đây KHÔNG fail
+	// request (watcher + loop vẫn retry level-triggered); best-effort.
+	ApplyNow func(ctx context.Context, namespaceID string)
 }
 
 // Mount registers the namespace routes (namespace CRUD, services, lifecycle)
@@ -209,7 +214,7 @@ func (d Deps) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
-	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "DELETING", actor, "delete requested"); err != nil {
+	if err := store.NSToDeleting(ctx, d.DB, ns.ID, actor, "delete requested"); err != nil {
 		// INVALID_TRANSITION from the DB function (e.g. APPLYING/DATA_LOADING).
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "namespace cannot be deleted from its current status")
 		return

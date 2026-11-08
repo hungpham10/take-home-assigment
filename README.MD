@@ -22,7 +22,7 @@ Yêu cầu: Go 1.23+, golangci-lint, Docker (local stack qua `docker compose`).
 
 ```bash
 docker compose up -d --build          # postgres + controller (migrations tự chạy)
-./scripts/e2e-smoke.sh                # smoke: ns→service→validate→apply→script→loadtest
+./tests/e2e-smoke.sh                  # smoke: ns→service→validate→apply→script→loadtest→delete
 # k6 perf (merge gate):
 k6 run -e BASE=http://localhost:8080 -e TENANT=<uuid> -e USER=<uuid> tests/perf/control-plane.js
 ```

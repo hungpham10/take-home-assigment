@@ -92,7 +92,7 @@ Health: `/health`, `/ready` (fail-closed DB), `/metrics` (prometheus).
 | Unit | authz (6 case), ETag, idempotency middleware, secrets resolver/crypto, serviceopenapi | `go test ./...` — không cần DB |
 | Integration (GORM + Postgres 16) | adminapi, namespace, script, loadtest, reconciler, store migration runner | CI job `test` (postgres service); local skip khi không có DB, **hard-fail khi `CI=true`** |
 | SQL | transition pattern 4 bộ | CI job `sql-migrations` |
-| E2E | `scripts/e2e-smoke.sh` — seed → ns → service → validate → apply → script → loadtest → events (**PASS đã verify**) | local: `docker compose up -d` + chạy script |
+| E2E | `tests/e2e-smoke.sh` — seed → ns → service → validate → apply → script → loadtest → events → delete namespace (**PASS đã verify**) | local: `docker compose up -d` + chạy script |
 | Perf | `tests/perf/control-plane.js` (40rps reads p95<100ms), `admin.js` (80rps introspect) | k6 run — **chưa chạy gate lần nào** (k6 binary chưa cài) |
 
 Tổng: 17 test files, 12/12 packages pass với `-race`.
@@ -101,7 +101,7 @@ Tổng: 17 test files, 12/12 packages pass với `-race`.
 
 ```bash
 docker compose up -d --build          # postgres + controller
-./scripts/e2e-smoke.sh                # e2e pass/fail
+./tests/e2e-smoke.sh                  # e2e pass/fail
 earthly +controller-image             # build image (pattern opsense-rs)
 ```
 
@@ -148,3 +148,14 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 - §5.4 Stage 1 ✅: tách `pkgs/readiness` (Gates/ProjectionReport/BlockNameOf + dataset/ingress helpers) khỏi `pkgs/namespace` — handlers giờ gọi `readiness.*`; readiness là DESIRED-side logic, watcher giữ OBSERVED-side evaluators.
 - §5.3 amendment: `B → D(pure helpers only)` (mockcontrol.DecodeMockDef, envreconciler render) + `E → F, httpx` — khớp §5.2.1 "shared code is pure helpers only".
 - Stage 2/3 giữ baseline (trigger chưa bắn): split loadtest chờ K8s runner/quota; ~55 gorm refs in handlers ghi trong §5.4 để refactor khi có second query consumer.
+
+### plans/26 — Full deploy E2E + apply quản lý đầy đủ objects (2026-11-08)
+
+- **Apply orchestrate đầy đủ K8s objects** per component (Go-render, giữ ADR-004): service → ConfigMap (env lớn) + Secret (Opaque, env qua `valueFrom.secretKeyRef` — plaintext KHÔNG bao giờ vào manifest, fix vi phạm docs §7:84) + Deployment + Service + HPA (autoscaling/v2) + ServiceAccount; database → operator CR theo cột `operator` (`cloudnative-pg` | `elastic`/ECK — unknown fail closed trước khi apply). Prune mở rộng cho 4 kind mới.
+- **Full deploy E2E** (`tests/e2e-full-deploy.sh` + CI job `full-deploy-e2e`): create-with-spec 1 call (database CNPG demo-db + echo-server) → validate → apply 202 → READY trên kind → kubectl verify `cluster,hpa,cm,secret,deploy,svc` → port-forward curl echo trả JSON → DELETE namespace (202/DELETING) + verify K8s namespace `lt-env-*` bị xoá.
+- **Bỏ fakeWatcher** (plans/26): `pkgs/k8s` Fake giữ Apply/Get/List/Delete cho unit fault-injection; watch path test real trên kind (`TestWATCH08WatchEventsTriggerReconcile`). Fix 2 bug lộ ra: consumeWatch tight-spin khi channel đóng (starve reconcile), Tick stall khi 1 namespace lỗi chặn các ns khác (per-ns log-and-continue).
+- **202 + status_url** cho create-with-spec + `apply:true` ở K8S mode (docs namespace-management-api.md:93) — apply/reconcile BẮT ĐẦU chứ không hoàn thành; legacy giữ 201 READY.
+- Tests mới: INT-NS-02b (202+Location), INT-NS-34 (combined flow), render ConfigMap/Secret/HPA/SA/ECK + unknown-operator fail-closed.
+
+- **Hierarchical apply (plans/26 bổ sung)**: `Applier` interface (`Kind/Name/Apply/Children`) — apply cây ngoài→trong qua `ApplyTree`; `applyNamespace` (K8S) gọi `ApplyNow` ngay sau desired-state commit (best-effort, watcher + loop tự converge). Tick batch 100/ lần + ưu tiên `status_observed_at NULLS FIRST`; tests dọn namespace sau run (backlog 1133 ns cũ từng stall Tick). Tests: INT-ENV-08 (apply order), INT-ENV-09 (aggregation all-children-ready).
+- **Centralize state machines (plans/26, phản hồi review)**: `pkgs/store/{namespace,loadtest,script,dataset}_lifecycle.go` — status constants + typed wrappers + bảng caller-owner; mọi call-site migrated (loadtest 10, namespace 5, dataset 3, script 2); **lint-transitions guard** trong CI chặn raw `store.Transition` ngoài `pkgs/store/` — thêm/sửa trạng thái chỉ review 1 file.

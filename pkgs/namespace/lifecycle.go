@@ -34,18 +34,18 @@ func (e applyValidationErr) Error() string { return strings.Join(e.reasons, "; "
 // On gate failure it transitions to INVALID and returns the failing checks.
 // The mock-capacity gate is NOT enforced here (it is an apply-time gate).
 func (d Deps) runValidation(ctx context.Context, ns store.Namespace, actor string) (readiness.Report, error) {
-	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "VALIDATING", actor, "validate requested"); err != nil {
+	if err := store.NSToValidating(ctx, d.DB, ns.ID, actor, "validate requested"); err != nil {
 		return readiness.Report{}, err
 	}
 	// Gates run outside the transition transaction so failure can mark INVALID
 	// (transition map: VALIDATING → INVALID) instead of silently rolling back.
 	report := readiness.Gates(ctx, d.DB, ns)
 	if !report.AllOK {
-		_ = store.Transition(ctx, d.DB, "namespace", ns.ID, "INVALID", actor, "readiness gates failed")
+		_ = store.NSToInvalid(ctx, d.DB, ns.ID, actor, "readiness gates failed")
 		return report, errValidationFailed
 	}
 	// VALIDATING → APPLYING
-	if err := store.Transition(ctx, d.DB, "namespace", ns.ID, "APPLYING", actor, "validation passed"); err != nil {
+	if err := store.NSToApplying(ctx, d.DB, ns.ID, actor, "validation passed"); err != nil {
 		return readiness.Report{}, err
 	}
 	return report, nil
@@ -86,7 +86,7 @@ func (d Deps) runApply(ctx context.Context, ns store.Namespace, actor string) er
 // applyDesired resolves the desired state in PG and hands off to the two
 // control loops. It writes NO readiness and NO terminal status — the watcher
 // owns APPLYING→READY (one writer per direction, namespace-status-watcher.md §1).
-func (d Deps) applyDesired(_ context.Context, ns store.Namespace, _ string) error {
+func (d Deps) applyDesired(ctx context.Context, ns store.Namespace, _ string) error {
 	return d.DB.Transaction(func(tx *gorm.DB) error {
 		// Resolve dependencies → egress policy spec (allow-list).
 		var deps []store.Dependency
@@ -115,13 +115,22 @@ func (d Deps) applyDesired(_ context.Context, ns store.Namespace, _ string) erro
 		}
 		// Bump desired_generation in the SAME tx as the policy spec so the
 		// watcher can never see a new spec under an old generation.
-		return tx.Model(&store.Namespace{}).
+		if err := tx.Model(&store.Namespace{}).
 			Where("id = ?", ns.ID).
 			Updates(map[string]any{
 				"desired_generation": gorm.Expr("desired_generation + 1"),
 				"ready_for_loadtest": false,
 				"blocking_reasons":   store.JSONBytes(map[string]any{}),
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		// Hierarchical apply NGAY (ngoài→trong) — best-effort: lỗi không fail
+		// request (response vẫn 202 APPLYING); Env Reconciler loop + watcher
+		// tự converge level-triggered.
+		if d.ApplyNow != nil {
+			d.ApplyNow(ctx, ns.ID)
+		}
+		return nil
 	})
 }
 
@@ -129,7 +138,7 @@ func (d Deps) applyDesired(_ context.Context, ns store.Namespace, _ string) erro
 // without a cluster): APPLYING → DATA_LOADING → READY in one tx.
 func (d Deps) applyLegacy(ctx context.Context, ns store.Namespace, actor string) error {
 	return d.DB.Transaction(func(tx *gorm.DB) error {
-		if err := store.Transition(ctx, tx, "namespace", ns.ID, "DATA_LOADING", actor, "apply requested"); err != nil {
+		if err := store.NSToDataLoading(ctx, tx, ns.ID, actor, "apply requested"); err != nil {
 			return err
 		}
 		// MVP restore stub: after DATA_LOADING the actual pg_restore runs in a
@@ -160,7 +169,7 @@ func (d Deps) applyLegacy(ctx context.Context, ns store.Namespace, actor string)
 		} else if err := tx.Create(&policy).Error; err != nil {
 			return err
 		}
-		if err := store.Transition(ctx, tx, "namespace", ns.ID, "READY", actor, "policies resolved"); err != nil {
+		if err := store.NSToReady(ctx, tx, ns.ID, actor, "policies resolved"); err != nil {
 			return err
 		}
 		return tx.Model(&store.Namespace{}).

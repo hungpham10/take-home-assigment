@@ -1,5 +1,5 @@
 #!/bin/sh
-# E2E smoke — namespace→service→validate→apply→script→loadtest flow (POSIX sh).
+# E2E smoke — namespace→service→validate→apply→script→loadtest→delete (POSIX sh).
 # Yêu cầu: controller tại ${BASE:-http://localhost:8080}; psql trỏ DB (PG_DSN).
 set -e
 BASE=${BASE:-http://localhost:8080}
@@ -82,4 +82,22 @@ if [ -n "${LT:-}" ]; then
     -H "X-Tenant-Id: $TENANT" -H "X-User-Id: $USERID" >/dev/null || fail "events"
 fi
 
-echo "SMOKE PASS (namespace=$NS script=$SC loadtest=$LT)"
+say "delete namespace (cleanup sau khi sài xong)"
+DELCODE=$(curl -s -o /tmp/smoke-del.json -w "%{http_code}" -X DELETE "$BASE/api/loadtest/v1/namespaces/$NS" \
+  -H "X-Tenant-Id: $TENANT" -H "X-User-Id: $USERID" -H "X-User-Role: user")
+[ "$DELCODE" = "202" ] || fail "delete namespace: $DELCODE $(cat /tmp/smoke-del.json 2>/dev/null || true)"
+DELSTATUS=$(jqget "['status']" < /tmp/smoke-del.json 2>/dev/null || echo "?")
+[ "$DELSTATUS" = "DELETING" ] || fail "delete status = $DELSTATUS (want DELETING)"
+# loadOwned ẩn namespace DELETED (404) nhưng vẫn trả DELETING; reaper (nếu có) có thể hoàn tất → chấp nhận 404.
+GETCODE=$(curl -s -o /tmp/smoke-get.json -w "%{http_code}" "$BASE/api/loadtest/v1/namespaces/$NS" \
+  -H "X-Tenant-Id: $TENANT" -H "X-User-Id: $USERID")
+case "$GETCODE" in
+  200)
+    GSTATUS=$(jqget "['status']" < /tmp/smoke-get.json 2>/dev/null || echo "?")
+    [ "$GSTATUS" = "DELETING" ] || fail "namespace status after delete = $GSTATUS (want DELETING)"
+    ;;
+  404) ;; # reaper đã chuyển DELETED
+  *) fail "get after delete: $GETCODE" ;;
+esac
+
+echo "SMOKE PASS (namespace=$NS script=$SC loadtest=${LT:-none} deleted=$DELSTATUS)"

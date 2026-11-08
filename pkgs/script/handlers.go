@@ -238,7 +238,7 @@ func (d Deps) startValidation(ctx context.Context, w http.ResponseWriter, p auth
 		}
 	}
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
-	if err := store.Transition(ctx, d.DB, "script", scriptID, "VALIDATING", actor, reason); err != nil {
+	if err := store.SCRToValidating(ctx, d.DB, scriptID, actor, reason); err != nil {
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "transition rejected by state machine")
 		return false
 	}

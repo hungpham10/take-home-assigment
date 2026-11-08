@@ -141,7 +141,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	}
 	ref, err := d.Runner.Provision(ctx, spec)
 	if err != nil {
-		_ = store.Transition(ctx, d.DB, "loadtest", lt.ID, "FAILED",
+		_ = store.LTToFailed(ctx, d.DB, lt.ID,
 			store.ActorJSON(p.TenantID, p.UserID, p.Role), "provision failed: "+err.Error())
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "provision failed")
 		return
@@ -159,7 +159,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	// UPDATE status/version directly — the transition fn owns them.
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
 	if err := d.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := store.Transition(ctx, tx, "loadtest", lt.ID, "PROVISIONING", actor, "provisioned"); err != nil {
+		if err := store.LTToProvisioning(ctx, tx, lt.ID, actor, "provisioned"); err != nil {
 			return err
 		}
 		return tx.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
@@ -172,7 +172,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	// Launch the run only after the transaction committed. Start failure is
 	// terminal FAILED (otherwise the reconciler polls a dead ref forever).
 	if err := d.Runner.Start(ctx, ref, spec); err != nil {
-		_ = store.Transition(ctx, d.DB, "loadtest", lt.ID, "FAILED",
+		_ = store.LTToFailed(ctx, d.DB, lt.ID,
 			actor, "runner start failed: "+err.Error())
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "runner start failed")
 		return
@@ -258,7 +258,7 @@ func (d Deps) stop(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	if err := store.Transition(ctx, d.DB, "loadtest", lt.ID, "STOPPING",
+	if err := store.LTToStopping(ctx, d.DB, lt.ID,
 		store.ActorJSON(p.TenantID, p.UserID, p.Role), "stop requested"); err != nil {
 		httpx.WriteCodeError(w, "INVALID_TRANSITION", "stop rejected")
 		return

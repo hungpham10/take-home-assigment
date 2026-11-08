@@ -40,4 +40,4 @@ K8s k6 runner (RUNNER_MODE=k8s), outbox worker, quota gate 429, Helm mode, env T
 - PR A: migration applies on a fresh DB; transition seed test proves `APPLYING→READY` now legal.
 - PR B/C: unit tests with fake client (fault injection: apply fail, watch reconnect); kind integration — create namespace via API, controller applies `lt-env-*` resources, watcher populates `tbl_component_status`, `GET /readiness` projection-backed.
 - PR D: mock-service standalone run, `observed_generation` tracks binding version.
-- PR E: `go test -tags harness_k8s ./tests/harness/...` green on kind; `scripts/e2e-smoke.sh` regression green.
+- PR E: `go test -tags harness_k8s ./tests/harness/...` green on kind; `tests/e2e-smoke.sh` regression green.

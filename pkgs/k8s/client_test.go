@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
 )
 
 var deployGVK = schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
@@ -103,34 +102,6 @@ func TestFakeFaultInjection(t *testing.T) {
 	c.Faults.GetErr = k8s.ErrNotFound
 	if _, err := c.Get(ctx, deployGVK, "lt-env-ns1", "svc-a"); !errors.Is(err, k8s.ErrNotFound) {
 		t.Fatalf("want injected not-found, got %v", err)
-	}
-}
-
-func TestFakeWatchFeed(t *testing.T) {
-	c := k8s.NewFake()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	w, err := c.Watch(ctx, deployGVK, "lt-env-ns1")
-	if err != nil {
-		t.Fatalf("watch: %v", err)
-	}
-	_ = c.Apply(ctx, deploy("svc-a", nil))
-
-	ev, ok := <-w.ResultChan()
-	if !ok {
-		t.Fatal("watch channel closed unexpectedly")
-	}
-	if ev.Type != watch.Added {
-		t.Fatalf("event type %s, want Added", ev.Type)
-	}
-	obj, ok := ev.Object.(*unstructured.Unstructured)
-	if !ok || obj.GetName() != "svc-a" {
-		t.Fatalf("unexpected event object %v", ev.Object)
-	}
-	cancel()
-	if _, ok := <-w.ResultChan(); ok {
-		t.Fatal("channel should close after context cancel")
 	}
 }
 

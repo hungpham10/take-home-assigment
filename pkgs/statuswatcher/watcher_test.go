@@ -63,6 +63,11 @@ func seedNamespace(t *testing.T, db *gorm.DB, status string) string {
 		nsID).Error; err != nil {
 		t.Fatalf("seed service: %v", err)
 	}
+	// Dọn namespace sau test — shared DB tích lũy hàng nghìn ns cũ làm Tick
+	// backlog serialize vô hạn (root cause của flake trước plans/26).
+	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM tbl_namespaces WHERE id = ?`, nsID).Error
+	})
 	return nsID
 }
 
@@ -502,5 +507,30 @@ func TestWatcherMockSnapshotContract(t *testing.T) {
 	}
 	if row.Phase != "PROGRESSING" {
 		t.Fatalf("mock phase %s, want PROGRESSING", row.Phase)
+	}
+}
+
+// TestINT_ENV_09_AggregationAllChildrenReady (plans/26 — khóa behavior):
+// namespace CHỈ READY khi mọi required con READY; một con PROGRESSING/PENDING
+// → namespace không bao giờ READY/ready_for_loadtest. Positive side: đủ con
+// READY → READY (đã cover bởi TestWatcherAPPLYINGToREADY).
+func TestINT_ENV_09_AggregationAllChildrenReady(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	// Service row tồn tại nhưng KHÔNG có deployment trên cluster (reconciler
+	// chưa apply) → service PENDING required → namespace không được READY.
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status == "READY" || ns.ReadyForLoadtest {
+		t.Fatalf("namespace READY despite PENDING child: status=%s ready=%v", ns.Status, ns.ReadyForLoadtest)
+	}
+	var svcPhase string
+	w.db.Raw(`SELECT phase FROM tbl_component_status WHERE namespace_id = ? AND component_type = 'service'`, w.nsID).Scan(&svcPhase)
+	if svcPhase == "READY" {
+		t.Fatal("service READY although deployment missing (evaluator bug)")
 	}
 }

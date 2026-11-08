@@ -133,7 +133,11 @@ func (w *Watcher) consumeWatch(ctx context.Context, gvk schema.GroupVersionKind,
 				q.Enqueue(key)
 			}
 		}
-		// Channel closed — reconnect (startup relist replays via resync).
+		// Channel closed — backoff then reconnect (never a tight spin: a
+		// closed-channel hot loop starves reconcile on shared clients).
+		if !sleepCtx(ctx, backoff) {
+			return
+		}
 	}
 }
 

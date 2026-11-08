@@ -435,7 +435,7 @@ The codebase is organized by domain boundary, not strictly by the API → servic
     E    → F, httpx (error/response shaping only)
     F    → (no domain imports)
 
-Status changes happen only through store transitions. The Reconciler never writes readiness; the Watcher never writes K8s. Before cross-package refactors, update docs/plans, re-index CodeGraph, and inspect call chains for bypasses.
+Status changes happen only through store transitions — qua wrapper central trong `pkgs/store/*_lifecycle.go` (namespace/loadtest/script/dataset: status constants + bảng caller-owner trong comment đầu file; **enforced bởi `scripts/lint-transitions.sh`** trong CI lint — raw `store.Transition` ngoài `pkgs/store/` bị chặn). The Reconciler never writes readiness; the Watcher never writes K8s. Before cross-package refactors, update docs/plans, re-index CodeGraph, and inspect call chains for bypasses.
 
 ### 5.4 Known deviations and staged refactors (MVP-scoped)
 
@@ -518,7 +518,7 @@ Base `/api/loadtest/v1` (details in `bff-loadtest-api-spec.md`): namespaces (+ r
 2. Runner egress network-enforced (not advisory).
 3. OIDC/nginx auth + Go middleware RBAC; `abt_` service-account token; `tenant_id` boundary.
 4. Mock = separate `mock-service` data plane driven by desired-state snapshots.
-5. Two separated loops (Reconciler → K8s, Watcher → PG), shared only via DB; level-triggered with generation fencing and fail-closed staleness gate.
+5. Two separated loops (Reconciler → K8s, Watcher → PG), shared only via DB; level-triggered with generation fencing and fail-closed staleness gate. **Plans/26 bổ sung:** apply ban đầu do request path CHỦ ĐỘNG trigger theo thứ tự ngoài→trong (hierarchical `Applier` — namespace apply trước rồi gọi `Apply()` của con: NetworkPolicy → operator CR → ConfigMap/Secret/SA → Deployment/Service → HPA → Ingress; `ApplyNow` hook); Reconciler loop giữ vai trò retry/drift-convergence. Watcher chuyển trạng thái OBSERVED (component phase PENDING/PROGRESSING/READY/FAILED + namespace transition qua `fn_namespace_transition`) — object chỉ READY khi TẤT CẢ con required READY, ngược lại tiến về DEGRADED.
 6. Manifests rendered in Go + SSA (ADR-004); no Helm in MVP.
 7. A RUNNING load test continues when the namespace goes DEGRADED; its result is flagged unreliable.
 

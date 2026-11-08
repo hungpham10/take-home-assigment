@@ -62,8 +62,9 @@ func run() error {
 	go loadtest.Reconciler{DB: db, Runner: run, Every: 2 * time.Second}.Start(ctx)
 
 	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run, K8S: cfg.K8SEnabled, StaleAfter: time.Duration(cfg.WatcherStalenessThreshold) * time.Second}),
+		Addr: cfg.Addr,
+		Handler: server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run, K8S: cfg.K8SEnabled, StaleAfter: time.Duration(cfg.WatcherStalenessThreshold) * time.Second,
+			ApplyNow: applyNowFn(db, cfg.K8SAPIURL)}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

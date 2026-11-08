@@ -15,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -240,10 +242,9 @@ var _ Client = (*DynamicClient)(nil)
 // Apply is idempotent (merge-by-name, last writer wins for the fields it sets)
 // and emits Added/Modified events on every registered Watch.
 type Fake struct {
-	mu       sync.Mutex
-	objects  map[string]map[string]*unstructured.Unstructured // gvk-key -> ns/name -> obj
-	watchers []*fakeWatcher
-	Faults   Faults
+	mu      sync.Mutex
+	objects map[string]map[string]*unstructured.Unstructured // gvk-key -> ns/name -> obj
+	Faults  Faults
 }
 
 // Faults injects errors per operation; nil means "succeed".
@@ -302,7 +303,6 @@ func (f *Fake) Apply(ctx context.Context, obj *unstructured.Unstructured) error 
 		}
 		merged.UnstructuredContent()["spec"] = obj.UnstructuredContent()["spec"]
 		bucket[id] = merged
-		f.emitLocked(watch.Modified, merged)
 		return nil
 	}
 	stored := obj.DeepCopy()
@@ -310,7 +310,6 @@ func (f *Fake) Apply(ctx context.Context, obj *unstructured.Unstructured) error 
 		stored.SetGeneration(1)
 	}
 	bucket[id] = stored
-	f.emitLocked(watch.Added, stored)
 	return nil
 }
 
@@ -336,12 +335,10 @@ func (f *Fake) Delete(_ context.Context, gvk schema.GroupVersionKind, ns, name s
 	defer f.mu.Unlock()
 	bucket := f.objects[fakeKey(gvk)]
 	id := ns + "/" + name
-	obj, ok := bucket[id]
-	if !ok {
+	if _, ok := bucket[id]; !ok {
 		return ErrNotFound
 	}
 	delete(bucket, id)
-	f.emitLocked(watch.Deleted, obj)
 	return nil
 }
 
@@ -371,34 +368,21 @@ func (f *Fake) List(_ context.Context, gvk schema.GroupVersionKind, ns string, s
 
 // Watch registers a watcher and replays current state as Added events
 // (startup relist); the watcher stops when ctx is cancelled.
-func (f *Fake) Watch(ctx context.Context, gvk schema.GroupVersionKind, ns string) (watch.Interface, error) {
-	if f.Faults.WatchErr != nil {
-		return nil, f.Faults.WatchErr
-	}
-	f.mu.Lock()
-	fw := newFakeWatcher()
-	fw.adopt(ctx)
-	fw.key, fw.namespace = fakeKey(gvk), ns
-	f.watchers = append(f.watchers, fw)
-	// Startup relist: replay current state as Added events (namespace-status-watcher.md §3).
-	for id, obj := range f.objects[fakeKey(gvk)] {
-		if ns != "" && splitNS(id) != ns {
-			continue
-		}
-		fw.ch <- watch.Event{Type: watch.Added, Object: obj.DeepCopy()}
-	}
-	f.mu.Unlock()
-	return fw, nil
+// Watch satisfies the Client interface without event machinery: the fake
+// returns an already-closed channel (no events). The watch→workqueue path is
+// tested against a REAL cluster (kind) in tests/harness/watcher — plans/26
+// removed the fakeWatcher duplicate.
+func (f *Fake) Watch(_ context.Context, _ schema.GroupVersionKind, _ string) (watch.Interface, error) {
+	ch := make(chan watch.Event)
+	close(ch)
+	return closedWatcher(ch), nil
 }
 
-func splitNS(id string) string {
-	for i := 0; i < len(id); i++ {
-		if id[i] == '/' {
-			return id[:i]
-		}
-	}
-	return ""
-}
+// closedWatcher is a watch.Interface whose channel is already closed.
+type closedWatcher <-chan watch.Event
+
+func (w closedWatcher) ResultChan() <-chan watch.Event { return w }
+func (w closedWatcher) Stop()                          {}
 
 func mergeLabels(prev, next map[string]string) map[string]string {
 	if prev == nil && next == nil {
@@ -414,17 +398,43 @@ func mergeLabels(prev, next map[string]string) map[string]string {
 	return out
 }
 
-// emitLocked fans an event out to every matching watcher. Caller holds f.mu.
-func (f *Fake) emitLocked(t watch.EventType, obj *unstructured.Unstructured) {
-	for _, w := range f.watchers {
-		if w.key != fakeKey(obj.GroupVersionKind()) {
-			continue
+var _ Client = (*Fake)(nil)
+
+// ObjectsSnapshot returns a deep copy of everything the Fake currently
+// stores (debug helper for tests asserting reconciler convergence).
+func (f *Fake) ObjectsSnapshot() map[schema.GroupVersionKind][]*unstructured.Unstructured {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[schema.GroupVersionKind][]*unstructured.Unstructured{}
+	for key, bucket := range f.objects {
+		gvk := parseFakeKey(key)
+		for _, obj := range bucket {
+			out[gvk] = append(out[gvk], obj.DeepCopy())
 		}
-		if w.namespace != "" && w.namespace != obj.GetNamespace() {
-			continue
-		}
-		w.ch <- watch.Event{Type: t, Object: obj.DeepCopy()}
 	}
+	return out
 }
 
-var _ Client = (*Fake)(nil)
+// parseFakeKey reverses schema.GroupVersionKind.String() — "Group/Version, Kind".
+func parseFakeKey(key string) schema.GroupVersionKind {
+	group, rest1, _ := strings.Cut(key, "/")
+	version, kind, _ := strings.Cut(rest1, ", ")
+	kind = strings.TrimSpace(strings.TrimPrefix(kind, "Kind="))
+	return schema.GroupVersionKind{Group: group, Version: version, Kind: kind}
+}
+
+// NewClientFromEnv builds a Client from the runtime environment, in order:
+// 1) KUBECONFIG file (controller outside the cluster, e.g. kind/colima local
+// run) — carries the TLS certs a bare URL lacks; 2) in-cluster ServiceAccount
+// config when running as a pod; 3) bare K8S_API_URL (plain http test setups).
+func NewClientFromEnv(apiURL string) (Client, error) {
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		if c, err := NewClientFromKubeconfig(kc); err == nil {
+			return c, nil
+		}
+	}
+	if cfg, err := rest.InClusterConfig(); err == nil {
+		return newDynamicForConfig(cfg)
+	}
+	return NewDynamicClient(apiURL, FieldManager)
+}

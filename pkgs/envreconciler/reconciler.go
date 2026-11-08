@@ -3,6 +3,7 @@ package envreconciler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -62,11 +63,23 @@ func (r *Reconciler) Interval() time.Duration { return r.interval }
 // fencing (WATCH-03). Failure at any step surfaces immediately — the caller
 // records it; the next tick re-applies (level-triggered, at-least-once).
 func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
-	objs := r.render(env)
-	if r.BindingsFunc != nil {
-		objs = append(objs, r.BindingsFunc(env)...)
+	// Fail closed BEFORE applying anything when a database operator is
+	// unsupported (plans/26: cloudnative-pg | elastic only).
+	if err := ValidateDatabaseOperators(env); err != nil {
+		return err
 	}
-	for _, obj := range objs {
+	// Hierarchical apply (plans/26): ngoài→trong qua Applier tree — namespace
+	// tự áp trước rồi gọi Apply() của con. Flat Render list chỉ còn phục vụ
+	// prune.
+	if err := ApplyTree(ctx, r.client, env); err != nil {
+		return err
+	}
+	// Mockcontrol bindings (ConfigMap + ExternalName Service) — apply step 5.
+	var bound []*unstructured.Unstructured
+	if r.BindingsFunc != nil {
+		bound = r.BindingsFunc(env)
+	}
+	for _, obj := range bound {
 		if env.Generation > 0 {
 			ann := obj.GetAnnotations()
 			if ann == nil {
@@ -79,7 +92,9 @@ func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
 			return fmt.Errorf("envreconciler: apply %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
 	}
-	return r.prune(ctx, env, objs)
+	desired := r.render(env)
+	desired = append(desired, bound...)
+	return r.prune(ctx, env, desired)
 }
 
 // prune deletes managed objects in the env namespace whose kind+name are no
@@ -100,6 +115,11 @@ func (r *Reconciler) prune(ctx context.Context, env *Env, desired []*unstructure
 		{Group: networkingv1.GroupName, Version: "v1", Kind: "Ingress"},
 		{Group: networkingv1.GroupName, Version: "v1", Kind: "NetworkPolicy"},
 		{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"},
+		{Group: "elasticsearch.k8s.elastic.co", Version: "v1", Kind: "Elasticsearch"},
+		{Version: "v1", Kind: "ConfigMap"},
+		{Version: "v1", Kind: "Secret"},
+		{Version: "v1", Kind: "ServiceAccount"},
+		{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"},
 	}
 	for _, gvk := range kinds {
 		objs, err := r.client.List(ctx, gvk, envNS, labels.Set{k8s.LabelManagedBy: k8s.ManagedByValue})
@@ -167,8 +187,9 @@ func (r *Reconciler) Start(ctx context.Context, load EnvLoader) {
 	for {
 		if err := r.Tick(ctx, load); err != nil {
 			// Log-and-continue: level-triggered convergence means the next
-			// tick retries. A dead reconciler cannot damage the cluster.
-			_ = err
+			// tick retries. Không nuốt lỗi — apply lỗi phải thấy được trong
+			// log (bắt được bug tree apply dừng giữa chừng trên kind).
+			slog.Warn("envreconciler: tick", "err", err)
 		}
 		select {
 		case <-ctx.Done():

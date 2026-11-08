@@ -27,4 +27,4 @@ K8s k6 runner, outbox worker, quota gate 429, informer cache sharing across repl
 ## Verification
 - Unit: projection payload khớp tbl_component_status; Fake watch feed → reconcile chạy; dropped/duplicate events converge; deadline → DEGRADED; degraded flag trong events.
 - Harness: `go test -tags harness_k8s ./tests/harness/watcher/...` trên colima; CI kind job xanh.
-- `go test -race ./...` + `golangci-lint run` + `scripts/e2e-smoke.sh` regression.
+- `go test -race ./...` + `golangci-lint run` + `tests/e2e-smoke.sh` regression.

@@ -406,19 +406,32 @@ type createSpecResponse struct {
 	Status    string          `json:"status,omitempty"`
 }
 
-// applySpecAfterCreate runs validate→apply when apply=true; returns the final
-// namespace status ("READY" or "INVALID", falling back to stored status).
-func (d Deps) applySpecAfterCreate(ctx context.Context, ns store.Namespace, p authz.Principal) string {
+// applySpecAfterCreate runs validate→apply when apply=true.
+//   - Legacy mode (no cluster): synchronous — returns the final status
+//     ("READY" or "INVALID", falling back to stored status).
+//   - K8S mode (docs/namespace-management-api.md:93): apply/reconcile is
+//     STARTED, not finished — the caller gets 202 + status_url and the
+//     Status Watcher closes the loop.
+func (d Deps) applySpecAfterCreate(ctx context.Context, ns store.Namespace, p authz.Principal) (string, string) {
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
+	if d.K8S {
+		if _, err := d.runValidation(ctx, ns, actor); err != nil {
+			return "INVALID", ""
+		}
+		if err := d.applyDesired(ctx, ns, actor); err != nil {
+			return ns.Status, ""
+		}
+		return "APPLYING", "/api/loadtest/v1/namespaces/" + ns.ID + "/readiness"
+	}
 	checks, err := d.runValidation(ctx, ns, actor)
 	if err != nil {
 		_ = checks
-		return "INVALID"
+		return "INVALID", ""
 	}
 	if err := d.runApply(ctx, ns, actor); err != nil {
-		return ns.Status
+		return ns.Status, ""
 	}
-	return "READY"
+	return "READY", ""
 }
 
 // handleCreateSpecErrors maps create-with-spec failures to responses.
@@ -446,11 +459,18 @@ func (d Deps) runCreateSpec(ctx context.Context, w http.ResponseWriter, r *http.
 	d.audit(ctx, r, p, "namespace.create", ns.ID)
 	resp := createSpecResponse{Namespace: ns, Services: svcIDs, Databases: dbIDs, Ingress: ingIDs}
 	if req.Apply {
-		status := d.applySpecAfterCreate(ctx, ns, p)
+		status, statusURL := d.applySpecAfterCreate(ctx, ns, p)
 		resp.Status = status
 		var latest store.Namespace
 		if err := d.DB.WithContext(ctx).Where("id = ?", ns.ID).First(&latest).Error; err == nil {
 			resp.Namespace = latest
+		}
+		if statusURL != "" {
+			// K8S mode: apply/reconcile STARTED — 202 + status_url
+			// (docs/namespace-management-api.md:93); the watcher closes the loop.
+			w.Header().Set("Location", statusURL)
+			httpx.WriteJSON(w, http.StatusAccepted, resp)
+			return
 		}
 	}
 	httpx.WriteJSON(w, http.StatusCreated, resp)

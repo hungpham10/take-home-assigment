@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,7 +36,17 @@ type Env struct {
 	Policy     *PolicySpec
 }
 
+// HPASpec is the HorizontalPodAutoscaler intent for a service.
+type HPASpec struct {
+	MinReplicas      int32 `json:"min_replicas"`
+	MaxReplicas      int32 `json:"max_replicas"`
+	CPUTargetPercent int32 `json:"cpu_target_percent"`
+}
+
 // ServiceSpec mirrors tbl_services.deploy (+ spec identity for SSA/labels).
+// plans/26: a service MANAGES its full object set — ConfigMap (env lớn),
+// Secret (secretKeyRef, không bao giờ plaintext — docs/k8s-orchestration.md
+// §7), Deployment, Service, HPA, ServiceAccount.
 type ServiceSpec struct {
 	Name     string            `json:"name"`
 	Image    string            `json:"image"`
@@ -44,6 +55,15 @@ type ServiceSpec struct {
 	Env      map[string]string `json:"env"`
 	Health   *HealthProbe      `json:"health"`
 	SpecHash string            `json:"spec_hash"`
+	// ConfigMap data (env/aggregate config vượt giới hạn container env).
+	ConfigMap map[string]string `json:"config_map"`
+	// Secrets: key → value. Rendered as an Opaque Secret; container env uses
+	// valueFrom.secretKeyRef — plaintext NEVER reaches the Deployment.
+	Secrets map[string]string `json:"secrets"`
+	// HPA non-nil → render autoscaling/v2 HorizontalPodAutoscaler.
+	HPA *HPASpec `json:"hpa"`
+	// ServiceAccount: render a dedicated SA (no platform creds) and assign it.
+	ServiceAccount bool `json:"service_account"`
 	// Mock is the raw tbl_services.mock JSONB; mockcontrol (controller-side
 	// mock wiring) decodes it — envreconciler stays mock-runtime agnostic.
 	Mock json.RawMessage `json:"mock,omitempty"`
@@ -55,12 +75,18 @@ type HealthProbe struct {
 	Port int32  `json:"port"`
 }
 
-// DatabaseSpec mirrors tbl_databases (CNPG Cluster CR via dynamic client).
+// DatabaseSpec mirrors tbl_databases — the operator CR is chosen by the
+// `operator` column (plans/26: cloudnative-pg | elastic/ECK; unknown fails
+// closed).
 type DatabaseSpec struct {
 	Name      string `json:"name"`
+	Operator  string `json:"operator"`
 	Image     string `json:"image"`
 	StorageGB int64  `json:"storage_gb"`
 	SpecHash  string `json:"spec_hash"`
+	// ExtraConfig carries operator-specific fields (CNPG: imageName/storage;
+	// ECK: version/nodeCount/storage).
+	ExtraConfig map[string]any `json:"-"`
 }
 
 // IngressSpec mirrors tbl_ingress.
@@ -160,35 +186,52 @@ func Render(env *Env) []*unstructured.Unstructured {
 			"namespace": envNS,
 			"labels":    baseLabels(env),
 		},
-		"spec": map[string]any{
-			"podSelector": map[string]any{},
-			"policyTypes": []string{"Ingress", "Egress"},
-			// Empty rule object = allow in-namespace traffic only; the
-			// watcher's network_policy evaluator checks the full expected
-			// set + spec_hash.
-			"ingress": []any{map[string]any{}},
-			"egress":  renderEgress(env),
-		},
+		"spec": defaultDenySpec(env),
 	}, "networking.k8s.io", "v1", "NetworkPolicy")
 	annotate(np, HashSpec(env.Policy))
 	objs = append(objs, np)
 
-	// 3. CNPG Cluster per database (GVR postgresql.cnpg.io/v1 clusters —
-	// dynamic, no operator Go types).
+	// 3. Operator CR per database — chosen by the operator column
+	// (cloudnative-pg | elastic/ECK); unknown operator fails closed upstream
+	// (ValidateDatabaseOperators) and is skipped defensively here.
 	for _, db := range env.Databases {
-		u := toUnstructured(cnpgCluster(envNS, env, db), "postgresql.cnpg.io", "v1", "Cluster")
+		u, err := renderDatabaseCR(envNS, env, db)
+		if err != nil {
+			continue // ValidateDatabaseOperators already failed the apply
+		}
 		annotate(u, db.SpecHash)
 		objs = append(objs, u)
 	}
 
-	// 6. Deployment + Service per service spec.
+	// 6. Per service: ConfigMap → Secret → ServiceAccount → Deployment
+	// (mounts/envFrom/secretKeyRef) → Service → HPA.
 	for _, svc := range env.Services {
+		if len(svc.ConfigMap) > 0 {
+			cm := toUnstructured(configMap(envNS, env, svc), "", "v1", "ConfigMap")
+			annotate(cm, svc.SpecHash)
+			objs = append(objs, cm)
+		}
+		if len(svc.Secrets) > 0 {
+			sec := toUnstructured(secret(envNS, env, svc), "", "v1", "Secret")
+			annotate(sec, svc.SpecHash)
+			objs = append(objs, sec)
+		}
+		if svc.ServiceAccount {
+			sa := toUnstructured(serviceAccount(envNS, env, svc), "", "v1", "ServiceAccount")
+			annotate(sa, svc.SpecHash)
+			objs = append(objs, sa)
+		}
 		dep := toUnstructured(deployment(envNS, env, svc), "apps", "v1", "Deployment")
 		annotate(dep, svc.SpecHash)
 		objs = append(objs, dep)
 		sv := toUnstructured(service(envNS, env, svc), "", "v1", "Service")
 		annotate(sv, svc.SpecHash)
 		objs = append(objs, sv)
+		if svc.HPA != nil {
+			hpa := toUnstructured(hpa(envNS, env, svc), "autoscaling", "v2", "HorizontalPodAutoscaler")
+			annotate(hpa, svc.SpecHash)
+			objs = append(objs, hpa)
+		}
 	}
 
 	// 7. Ingress per ingress spec.
@@ -200,7 +243,61 @@ func Render(env *Env) []*unstructured.Unstructured {
 	return objs
 }
 
-// renderEgress builds the egress rule list; DNS resolution is always allowed
+// defaultDenyNP là manifest default-deny dùng chung bởi Render (prune) và
+// BuildApplyTree (hierarchical apply) — một nguồn duy nhất.
+func defaultDenyNP(envNS string, env *Env) map[string]any {
+	return map[string]any{
+		"apiVersion": "networking.k8s.io/v1",
+		"kind":       "NetworkPolicy",
+		"metadata": map[string]any{
+			"name":      "default-deny",
+			"namespace": envNS,
+			"labels":    baseLabels(env),
+		},
+		"spec": defaultDenySpec(env),
+	}
+}
+
+// defaultDenySpec: deny in/out, ingress cho phép in-namespace; egress baseline
+// phải mở DNS (kube-system:53) + kube-apiserver (:443) — nếu không, CNPG
+// initdb và mọi pod cần API server đều chết vì i/o timeout (docs open item
+// #2 "NetworkPolicy baseline merge"). Thêm egress allow-list từ dependencies.
+func defaultDenySpec(env *Env) map[string]any {
+	egress := []map[string]any{
+		{
+			// DNS: kube-dns/kube-system UDP+TCP 53
+			"to": []map[string]any{{
+				"namespaceSelector": map[string]any{
+					"matchLabels": map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+				},
+			}},
+			"ports": []map[string]any{
+				{"protocol": "UDP", "port": int64(53)},
+				{"protocol": "TCP", "port": int64(53)},
+			},
+		},
+		{
+			// kube-apiserver: pod→ClusterIP 10.96.0.1 bị kube-proxy DNAT sang
+			// node IP:6443 TRƯỚC khi netpol check — ipBlock trên service IP
+			// KHÔNG match (gotcha kinh điển, verified bằng probe trên kind).
+			// Allow node CIDR kind/colima (172.18.0.0/16), ports 443+6443.
+			"to":    []map[string]any{{"ipBlock": map[string]any{"cidr": "172.18.0.0/16"}}},
+			"ports": []map[string]any{
+				{"protocol": "TCP", "port": int64(443)},
+				{"protocol": "TCP", "port": int64(6443)},
+			},
+		},
+	}
+	egress = append(egress, renderEgress(env)...)
+	return map[string]any{
+		"podSelector": map[string]any{},
+		"policyTypes": []string{"Ingress", "Egress"},
+		"ingress":     []any{map[string]any{}},
+		"egress":      egress,
+	}
+}
+
+// renderEgress builds the egress allow-list; DNS resolution is always allowed
 // so ExternalName-style mock wiring resolves.
 func renderEgress(env *Env) []map[string]any {
 	if env.Policy == nil {
@@ -227,7 +324,7 @@ func cnpgCluster(envNS string, env *Env, db DatabaseSpec) map[string]any {
 		},
 	}
 	if db.Image != "" {
-		spec["imageName"] = db.Image
+		spec["imageName"] = cnpgImage(db.Image)
 	}
 	return map[string]any{
 		"apiVersion": "postgresql.cnpg.io/v1",
@@ -254,12 +351,31 @@ func deployment(envNS string, env *Env, svc ServiceSpec) map[string]any {
 		container["livenessProbe"] = probe
 		container["readinessProbe"] = probe
 	}
+	// env: plaintext cho env thường; Secrets CHỈ qua valueFrom.secretKeyRef —
+	// plaintext secret không bao giờ vào Deployment manifest (docs §7:84).
 	var envList []map[string]any
 	for k, v := range svc.Env {
 		envList = append(envList, map[string]any{"name": k, "value": v})
 	}
+	for k := range svc.Secrets {
+		envList = append(envList, map[string]any{
+			"name": k,
+			"valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{"name": svc.Name + "-secret", "key": k},
+			},
+		})
+	}
 	if envList != nil {
 		container["env"] = envList
+	}
+	if len(svc.ConfigMap) > 0 {
+		container["envFrom"] = []map[string]any{
+			{"configMapRef": map[string]any{"name": svc.Name + "-config"}},
+		}
+	}
+	podSpec := map[string]any{"containers": []any{container}}
+	if svc.ServiceAccount {
+		podSpec["serviceAccountName"] = svc.Name
 	}
 	return map[string]any{
 		"apiVersion": "apps/v1",
@@ -276,7 +392,7 @@ func deployment(envNS string, env *Env, svc ServiceSpec) map[string]any {
 			},
 			"template": map[string]any{
 				"metadata": map[string]any{"labels": withComponent(baseLabels(env), svc.Name)},
-				"spec":     map[string]any{"containers": []any{container}},
+				"spec":     podSpec,
 			},
 		},
 	}
@@ -369,4 +485,176 @@ func HashSpec(v any) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:8])
+}
+
+// --- plans/26: per-service auxiliary objects --------------------------------
+
+// configMap renders <name>-config (env/aggregate config vượt container env).
+func configMap(envNS string, env *Env, svc ServiceSpec) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]any{
+			"name":      svc.Name + "-config",
+			"namespace": envNS,
+			"labels":    withComponent(baseLabels(env), svc.Name),
+		},
+		"data": svc.ConfigMap,
+	}
+}
+
+// secret renders <name>-secret (Opaque). Values live ONLY here; the
+// Deployment references them via valueFrom.secretKeyRef (docs §7:84).
+func secret(envNS string, env *Env, svc ServiceSpec) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata": map[string]any{
+			"name":      svc.Name + "-secret",
+			"namespace": envNS,
+			"labels":    withComponent(baseLabels(env), svc.Name),
+		},
+		"type":       "Opaque",
+		"stringData": svc.Secrets,
+	}
+}
+
+// serviceAccount renders a dedicated SA (no platform credentials).
+func serviceAccount(envNS string, env *Env, svc ServiceSpec) map[string]any {
+	return map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ServiceAccount",
+		"metadata": map[string]any{
+			"name":      svc.Name,
+			"namespace": envNS,
+			"labels":    withComponent(baseLabels(env), svc.Name),
+		},
+	}
+}
+
+// hpa renders autoscaling/v2 HorizontalPodAutoscaler targeting the Deployment.
+func hpa(envNS string, env *Env, svc ServiceSpec) map[string]any {
+	minR := svc.HPA.MinReplicas
+	if minR <= 0 {
+		minR = 1
+	}
+	maxR := svc.HPA.MaxReplicas
+	if maxR < minR {
+		maxR = minR
+	}
+	cpu := svc.HPA.CPUTargetPercent
+	if cpu <= 0 {
+		cpu = 80
+	}
+	return map[string]any{
+		"apiVersion": "autoscaling/v2",
+		"kind":       "HorizontalPodAutoscaler",
+		"metadata": map[string]any{
+			"name":      svc.Name,
+			"namespace": envNS,
+			"labels":    withComponent(baseLabels(env), svc.Name),
+		},
+		"spec": map[string]any{
+			"scaleTargetRef": map[string]any{
+				"apiVersion": "apps/v1", "kind": "Deployment", "name": svc.Name,
+			},
+			"minReplicas": int64(minR),
+			"maxReplicas": int64(maxR),
+			"metrics": []map[string]any{{
+				"type": "Resource",
+				"resource": map[string]any{
+					"name": "cpu",
+					"target": map[string]any{
+						"type":               "Utilization",
+						"averageUtilization": int64(cpu),
+					},
+				},
+			}},
+		},
+	}
+}
+
+// --- operator registry (plans/26) -------------------------------------------
+
+// renderDatabaseCR renders the operator CR for a database by its `operator`
+// column: cloudnative-pg | elastic (ECK). Unknown → error (fail closed).
+func renderDatabaseCR(envNS string, env *Env, db DatabaseSpec) (*unstructured.Unstructured, error) {
+	switch db.Operator {
+	case "", "cloudnative-pg":
+		return toUnstructured(cnpgCluster(envNS, env, db), "postgresql.cnpg.io", "v1", "Cluster"), nil
+	case "elastic":
+		return toUnstructured(eckElasticsearch(envNS, env, db), "elasticsearch.k8s.elastic.co", "v1", "Elasticsearch"), nil
+	default:
+		return nil, fmt.Errorf("envreconciler: unsupported database operator %q (want cloudnative-pg|elastic)", db.Operator)
+	}
+}
+
+// ValidateDatabaseOperators fails closed BEFORE any object is applied when a
+// database uses an operator this controller cannot render.
+func ValidateDatabaseOperators(env *Env) error {
+	for _, db := range env.Databases {
+		if db.Operator != "" && db.Operator != "cloudnative-pg" && db.Operator != "elastic" {
+			return fmt.Errorf("envreconciler: unsupported database operator %q for db %q (want cloudnative-pg|elastic)", db.Operator, db.Name)
+		}
+	}
+	return nil
+}
+
+// eckElasticsearch renders an ECK Elasticsearch CR (elasticsearch.k8s.elastic.co/v1).
+func eckElasticsearch(envNS string, env *Env, db DatabaseSpec) map[string]any {
+	version := ""
+	nodeCount := int64(1)
+	if db.ExtraConfig != nil {
+		if v, ok := db.ExtraConfig["version"].(string); ok {
+			version = v
+		}
+		if n, ok := db.ExtraConfig["node_count"].(float64); ok && n >= 1 {
+			nodeCount = int64(n)
+		}
+	}
+	spec := map[string]any{
+		"nodeSets": []map[string]any{{
+			"name":   "default",
+			"count":  nodeCount,
+			"config": map[string]any{},
+			"podTemplate": map[string]any{
+				"spec": map[string]any{"containers": []any{map[string]any{
+					"name": "elasticsearch", "resources": map[string]any{},
+				}}},
+			},
+		}},
+		"volumeClaimDeletePolicy": "DeleteOnScaledownAndClusterDeletion",
+	}
+	if version != "" {
+		spec["version"] = version
+	} else if db.Image != "" {
+		// ECK derives the version from the image tag when spec.version unset.
+		if i := strings.LastIndex(db.Image, ":"); i >= 0 {
+			spec["version"] = db.Image[i+1:]
+		}
+	}
+	return map[string]any{
+		"apiVersion": "elasticsearch.k8s.elastic.co/v1",
+		"kind":       "Elasticsearch",
+		"metadata": map[string]any{
+			"name":      db.Name,
+			"namespace": envNS,
+			"labels":    baseLabels(env),
+		},
+		"spec": spec,
+	}
+}
+
+// cnpgImage maps vanilla postgres images to the CNPG-built image — CNPG
+// initdb yêu cầu user postgres UID 26 chỉ có trong image chính chủ
+// ("initdb: could not look up effective user ID 26" với vanilla postgres).
+func cnpgImage(image string) string {
+	switch {
+	case strings.Contains(image, "cloudnative-pg"):
+		return image
+	case strings.HasPrefix(image, "postgres:"):
+		return "ghcr.io/cloudnative-pg/postgresql:" + strings.TrimPrefix(image, "postgres:")
+	default:
+		return image
+	}
 }

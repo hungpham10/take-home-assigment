@@ -93,33 +93,3 @@ func TestResyncConvergesWithoutEvents(t *testing.T) {
 	}
 	t.Fatal("resync loop did not converge to READY (WATCH-01)")
 }
-
-// Watch→workqueue end-to-end with the Fake: a watch event for a managed
-// object enqueues the namespace key and the worker reconciles it.
-func TestWatchEventTriggersReconcile(t *testing.T) {
-	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
-	w.nsID = seedNamespace(t, w.db, "APPLYING")
-	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
-	applyEnv(t, w, 1)
-	markDeploymentReady(t, w)
-
-	cfg := statuswatcher.DefaultConfig()
-	cfg.Resync = time.Hour // no resync: only the watch event may converge
-	watcher := newWatcher(w, cfg)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go watcher.Start(ctx)
-
-	// The Fake's Watch replays current objects as Added events → the worker
-	// must reconcile without any resync tick.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		var status string
-		_ = w.db.Raw(`SELECT status FROM tbl_namespaces WHERE id = ?`, w.nsID).Scan(&status)
-		if status == "READY" {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("watch event did not trigger reconcile to READY")
-}

@@ -19,7 +19,7 @@ import (
 
 // startOrchestration boots the two loops; both stop when ctx is cancelled.
 func startOrchestration(ctx context.Context, db *gorm.DB, apiURL string, resync, grace, stable, applyDeadline, staleness time.Duration) error {
-	client, err := k8s.NewDynamicClient(apiURL, "loadtest-controller")
+	client, err := k8s.NewClientFromEnv(apiURL)
 	if err != nil {
 		return err
 	}
@@ -37,4 +37,31 @@ func startOrchestration(ctx context.Context, db *gorm.DB, apiURL string, resync,
 	go w.Start(ctx)
 	slog.Info("orchestration loops started", "api", apiURL, "resync", resync)
 	return nil
+}
+
+// applyNowFn builds the request-path hierarchical apply hook (plans/26): after
+// desired-state commit, POST /apply drives the Applier tree outside→in
+// immediately (best-effort; the loop + watcher converge level-triggered).
+func applyNowFn(db *gorm.DB, apiURL string) func(context.Context, string) {
+	client, err := k8s.NewClientFromEnv(apiURL)
+	if err != nil {
+		slog.Warn("apply-now disabled: cluster client unavailable", "err", err)
+		return nil
+	}
+	return func(ctx context.Context, namespaceID string) {
+		envs, err := envreconciler.LoadEnvs(db)(ctx)
+		if err != nil {
+			slog.Warn("apply-now: load envs", "err", err)
+			return
+		}
+		for _, env := range envs {
+			if env.NamespaceID != namespaceID {
+				continue
+			}
+			if err := envreconciler.ApplyTree(ctx, client, env); err != nil {
+				slog.Warn("apply-now: tree apply (watcher sẽ retry)", "namespace", namespaceID, "err", err)
+			}
+			return
+		}
+	}
 }

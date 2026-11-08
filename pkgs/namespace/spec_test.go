@@ -208,3 +208,109 @@ func TestINT_NS_02_CreateWithSpecBackwardCompat(t *testing.T) {
 		t.Errorf("legacy create created components: %d %d %d", svcCount, dbCount, ingCount)
 	}
 }
+
+// TestINT_NS_02b_CreateWithSpecApplyK8S — docs/namespace-management-api.md:93:
+// K8S mode create-with-spec + apply:true → 202 + Location status_url; apply
+// chỉ BẮT ĐẦU (desired_generation bump, APPLYING) — watcher đóng vòng.
+func TestINT_NS_02b_CreateWithSpecApplyK8S(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now, K8S: true})
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, "/api/loadtest/v1/namespaces",
+		testutil.WithKey(principal, "k-spec-k8s"),
+		map[string]any{
+			"name":  "env-spec-k8s",
+			"apply": true,
+			"spec": map[string]any{
+				"services": []map[string]any{{
+					"name":    "svc-a",
+					"openapi": map[string]any{"content": widgetSpec},
+					"deploy":  map[string]any{"image": "nginx:alpine", "replicas": 1, "port": 80},
+				}},
+				"databases": []map[string]any{{"name": "db-a"}},
+			},
+		})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create+apply K8S: %d %s, want 202", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "/readiness") {
+		t.Fatalf("Location header %q, want readiness status_url", loc)
+	}
+	var resp struct {
+		Status    string `json:"status"`
+		Namespace struct {
+			Status string `json:"status"`
+		} `json:"namespace"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "APPLYING" || resp.Namespace.Status != "APPLYING" {
+		t.Fatalf("status %+v, want APPLYING (async hand-off)", resp)
+	}
+	var nsRow store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &struct{ Namespace store.Namespace }{}) // noop guard
+	if err := db.Where("name = ?", "env-spec-k8s").First(&nsRow).Error; err != nil {
+		t.Fatal(err)
+	}
+	if nsRow.DesiredGeneration != 1 || nsRow.Status != "APPLYING" {
+		t.Fatalf("db row: status=%s desired=%d", nsRow.Status, nsRow.DesiredGeneration)
+	}
+	// Components đã persist trong 1 call: 1 service + 1 database.
+	var svcCount, dbCount int64
+	db.Model(&store.Service{}).Where("namespace_id = ?", nsRow.ID).Count(&svcCount)
+	db.Model(&store.Database{}).Where("namespace_id = ?", nsRow.ID).Count(&dbCount)
+	if svcCount != 1 || dbCount != 1 {
+		t.Fatalf("components svc=%d db=%d, want 1/1", svcCount, dbCount)
+	}
+}
+
+// TestINT_NS_34_CreateSpecThenValidateApply — combined flow: create-with-spec
+// (database + service trong 1 call) → POST /validate → POST /apply → READY.
+func TestINT_NS_34_CreateSpecThenValidateApply(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now})
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"),
+		map[string]any{
+			"name": "env-combined",
+			"spec": map[string]any{
+				"services": []map[string]any{
+					{"name": "svc-a", "openapi": map[string]any{"content": widgetSpec}},
+				},
+				"databases": []map[string]any{{"name": "db-a"}},
+			},
+		})
+	if rec.Code != 201 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Namespace struct {
+			ID string `json:"id"`
+		} `json:"namespace"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	nsID := resp.Namespace.ID
+
+	// Components tạo đủ trong 1 call (persist cùng tx với namespace).
+	var svcCount, dbCount int64
+	db.Model(&store.Service{}).Where("namespace_id = ?", nsID).Count(&svcCount)
+	db.Model(&store.Database{}).Where("namespace_id = ?", nsID).Count(&dbCount)
+	if svcCount != 1 || dbCount != 1 {
+		t.Fatalf("components after create: svc=%d db=%d, want 1/1", svcCount, dbCount)
+	}
+
+	// /validate → APPLYING; /apply → READY (legacy sync) + ready_for_loadtest.
+	if rec = testutil.Do(t, h, http.MethodPost, base+"/"+nsID+"/validate", principal, nil); rec.Code != 200 {
+		t.Fatalf("validate: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = testutil.Do(t, h, http.MethodPost, base+"/"+nsID+"/apply", testutil.WithKey(principal, "k2"), nil); rec.Code != 200 {
+		t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns store.Namespace
+	_ = db.Where("id = ?", nsID).First(&ns)
+	if ns.Status != "READY" || !ns.ReadyForLoadtest {
+		t.Fatalf("final: status=%s ready=%v", ns.Status, ns.ReadyForLoadtest)
+	}
+}
