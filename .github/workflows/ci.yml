@@ -99,14 +99,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install colima + kubectl (Homebrew on runner)
-        uses: nick-fields/retry@v3
-        with:
-          timeout_minutes: 15
-          max_attempts: 2
-          command: |
-            brew install colima kubectl
-            colima version
+      - name: Install colima + lima + kubectl (official binaries)
+        run: |
+          set -e
+          sudo mkdir -p /usr/local/bin
+          # lima (colima's VM backend) — release tarball
+          LIMA_VER=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          curl -fsSL "https://github.com/lima-vm/lima/releases/download/${LIMA_VER}/lima-${LIMA_VER#v}-Linux-x86_64.tar.gz" -o /tmp/lima.tgz
+          sudo tar -C /usr/local -xzf /tmp/lima.tgz
+          # colima — release binary
+          curl -fsSL https://github.com/abiosoft/colima/releases/latest/download/colima-Linux-x86_64.tar.gz -o /tmp/colima.tgz
+          sudo tar -C /usr/local/bin -xzf /tmp/colima.tgz
+          # kubectl
+          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o /tmp/kubectl
+          sudo install /tmp/kubectl /usr/local/bin/kubectl
+          colima version && limactl --version && kubectl version --client
 
       - name: Start colima with kubernetes
         uses: nick-fields/retry@v3

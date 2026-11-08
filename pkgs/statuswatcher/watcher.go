@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
@@ -76,6 +77,9 @@ type Watcher struct {
 	cfg    Config
 	now    func() time.Time
 	// hysteresis bookkeeping (in-memory; a restart simply resets the windows)
+	// hysteresis bookkeeping guarded by hyMutex — workers and the resync
+	// loop mutate concurrently (race caught by CI -race).
+	hyMutex       sync.Mutex
 	degradedSince map[string]time.Time
 	readySince    map[string]time.Time
 }
@@ -528,13 +532,13 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 				next = "DEGRADED"
 			}
 		} else {
-			delete(w.degradedSince, ns.ID)
+			w.clearHysteresis(ns.ID)
 		}
 	case "DEGRADED":
 		if allReady && !anyFailed && w.stableFor(ns.ID, w.cfg.Stable) {
 			next = "READY"
 		} else {
-			delete(w.readySince, ns.ID)
+			w.clearHysteresis(ns.ID)
 		}
 	}
 
@@ -565,8 +569,7 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 				Where("id = ?", ns.ID).Update("ready_for_loadtest", true).Error; err != nil {
 				return err
 			}
-			delete(w.readySince, ns.ID)
-			delete(w.degradedSince, ns.ID)
+			w.clearHysteresis(ns.ID)
 		}
 	}
 	return nil
@@ -593,6 +596,8 @@ func (w *Watcher) pastApplyDeadline(ctx context.Context, ns *store.Namespace) bo
 
 // degradedFor/track the grace window for READY→DEGRADED (WATCH-06 hysteresis).
 func (w *Watcher) degradedFor(nsID string, grace time.Duration) bool {
+	w.hyMutex.Lock()
+	defer w.hyMutex.Unlock()
 	since, ok := w.degradedSince[nsID]
 	if !ok {
 		w.degradedSince[nsID] = w.now()
@@ -603,12 +608,22 @@ func (w *Watcher) degradedFor(nsID string, grace time.Duration) bool {
 
 // stableFor tracks the stable window for DEGRADED→READY.
 func (w *Watcher) stableFor(nsID string, stable time.Duration) bool {
+	w.hyMutex.Lock()
+	defer w.hyMutex.Unlock()
 	since, ok := w.readySince[nsID]
 	if !ok {
 		w.readySince[nsID] = w.now()
 		return false
 	}
 	return w.now().Sub(since) >= stable
+}
+
+// clearHysteresis forgets both windows for a namespace.
+func (w *Watcher) clearHysteresis(nsID string) {
+	w.hyMutex.Lock()
+	defer w.hyMutex.Unlock()
+	delete(w.degradedSince, nsID)
+	delete(w.readySince, nsID)
 }
 
 func hasPhase(rows []store.ComponentStatus, compType, phase string) bool {
