@@ -35,42 +35,6 @@ var (
 	sharedNSID string
 )
 
-// TestWATCH00Setup runs FIRST (Go executes tests in file order): it applies
-// a minimal environment (namespace + service deployment) to the real cluster
-// via the Env Reconciler so the WATCH-01..06 cases observe genuine objects.
-// harnessClient builds a cluster client: KUBECONFIG (colima/kind carry TLS
-// certs there) takes precedence, bare K8S_API_URL as fallback.
-func harnessClient() (k8s.Client, error) {
-	if kc := os.Getenv("KUBECONFIG"); kc != "" {
-		return k8s.NewClientFromKubeconfig(kc)
-	}
-	return k8s.NewDynamicClient(os.Getenv("K8S_API_URL"), k8s.FieldManager)
-}
-
-func TestWATCH00Setup(t *testing.T) {
-	db := harnessDB(t)
-	client, err := harnessClient()
-	if err != nil {
-		t.Skipf("no cluster: %v", err)
-	}
-	sharedDB = db
-	sharedNSID = seedHarnessNamespace(t, db)
-	env := &envreconciler.Env{
-		NamespaceID: sharedNSID, TenantID: "harness", Status: "APPLYING", Generation: 1,
-		Services: []envreconciler.ServiceSpec{{
-			Name: "harness-svc", Image: "nginx:alpine", Replicas: 1, Port: 80,
-			Health: &envreconciler.HealthProbe{Path: "/", Port: 80}, SpecHash: "harness-1",
-		}},
-	}
-	rc := envreconciler.New(client, envreconciler.Options{})
-	if err := rc.ApplyEnv(context.Background(), env); err != nil {
-		t.Fatalf("apply env to cluster: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = rc.DeleteEnv(context.Background(), sharedNSID)
-	})
-}
-
 func newHarness(t *testing.T) *harnessEnv {
 	t.Helper()
 	if sharedDB == nil || sharedNSID == "" {
