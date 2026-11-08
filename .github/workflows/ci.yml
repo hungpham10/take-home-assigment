@@ -107,8 +107,9 @@ jobs:
 
       - name: Verify cluster + export KUBECONFIG
         run: |
+          kind export kubeconfig --name ltp-harness
           kubectl get nodes
-          echo "KUBECONFIG=$(kind get kubeconfig --name ltp-harness)" >> "$GITHUB_ENV"
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
 
       - name: Apply migrations
         run: |
