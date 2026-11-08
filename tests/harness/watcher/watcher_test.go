@@ -103,6 +103,12 @@ func harnessDB(t *testing.T) harnessDBType {
 // namespace still converges to the correct status.
 func TestWATCH01ResyncConvergesAfterDroppedEvents(t *testing.T) {
 	h := newHarness(t)
+	// Fast resync: the default 5m safety net would only tick once within the
+	// deadline — on a real cluster the image pull takes seconds and the next
+	// tick must catch the deployment becoming Available.
+	cfg := statuswatcher.DefaultConfig()
+	cfg.Resync = 5 * time.Second
+	h.w = statuswatcher.New(h.client, harnessDB(t), cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.w.Start(ctx)
