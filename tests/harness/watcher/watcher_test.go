@@ -156,8 +156,27 @@ func TestWATCH03GenerationFencing(t *testing.T) {
 	if err := h.w.ReconcileStatus(ctx, h.nsID); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if harnessStatus(h, t) == "READY" {
-		t.Fatal("READY despite desired_generation > applied generation (WATCH-03)")
+	// Fencing lives at the COMPONENT level: the service was applied for the
+	// OLD generation, so its projection must drop to at most PROGRESSING even
+	// though the namespace status itself lingers in READY until the grace
+	// window emits DEGRADED (docs/namespace-status-watcher.md §4).
+	var phase string
+	if err := harnessDB(t).Raw(
+		`SELECT phase FROM tbl_component_status
+		 WHERE namespace_id = ? AND component_type = 'service'`, h.nsID).Scan(&phase).Error; err != nil {
+		t.Fatalf("projection: %v", err)
+	}
+	if phase == "READY" {
+		t.Fatal("service component READY despite desired_generation > applied generation (WATCH-03)")
+	}
+	// And ready_for_loadtest must be false while fenced.
+	var ready bool
+	if err := harnessDB(t).Raw(
+		`SELECT ready_for_loadtest FROM tbl_namespaces WHERE id = ?`, h.nsID).Scan(&ready).Error; err != nil {
+		t.Fatalf("ready flag: %v", err)
+	}
+	if ready {
+		t.Fatal("ready_for_loadtest still true with fenced components (WATCH-03)")
 	}
 }
 
