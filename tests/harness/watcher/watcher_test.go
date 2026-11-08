@@ -224,8 +224,8 @@ func harnessHeartbeat(h *harnessEnv, t *testing.T) time.Time {
 
 func bumpGeneration(h *harnessEnv, t *testing.T) {
 	t.Helper()
-	if _, err := harnessDB(t).Exec(
-		`UPDATE tbl_namespaces SET desired_generation = desired_generation + 1 WHERE id = ?`, h.nsID).Rows(); err != nil {
+	if err := harnessDB(t).Exec(
+		`UPDATE tbl_namespaces SET desired_generation = desired_generation + 1 WHERE id = ?`, h.nsID).Error; err != nil {
 		t.Fatalf("bump generation: %v", err)
 	}
 }
