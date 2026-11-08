@@ -143,20 +143,25 @@ func (AuditLog) TableName() string { return "tbl_audit_log" }
 
 // Namespace is the current-state environment row (tbl_namespaces).
 type Namespace struct {
-	ID               string     `gorm:"column:id;primaryKey;type:uuid" json:"id"`
-	TenantID         string     `gorm:"column:tenant_id" json:"tenant_id"`
-	OwnerUserID      string     `gorm:"column:owner_user_id" json:"owner_user_id"`
-	Name             string     `gorm:"column:name" json:"name"`
-	Slug             *string    `gorm:"column:slug" json:"slug,omitempty"`
-	Visibility       *string    `gorm:"column:visibility;default:'tenant'" json:"visibility,omitempty"`
-	Description      string     `gorm:"column:description" json:"description"`
-	Status           string     `gorm:"column:status" json:"status"`
-	ReadyForLoadtest bool       `gorm:"column:ready_for_loadtest" json:"ready_for_loadtest"`
-	Version          int        `gorm:"column:version" json:"version"`
-	TTLExpiresAt     *time.Time `gorm:"column:ttl_expires_at" json:"ttl_expires_at"`
-	CleanupPolicy    []byte     `gorm:"column:cleanup_policy;type:jsonb" json:"cleanup_policy"`
-	CreatedAt        time.Time  `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt        time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	ID               string  `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	TenantID         string  `gorm:"column:tenant_id" json:"tenant_id"`
+	OwnerUserID      string  `gorm:"column:owner_user_id" json:"owner_user_id"`
+	Name             string  `gorm:"column:name" json:"name"`
+	Slug             *string `gorm:"column:slug" json:"slug,omitempty"`
+	Visibility       *string `gorm:"column:visibility;default:'tenant'" json:"visibility,omitempty"`
+	Description      string  `gorm:"column:description" json:"description"`
+	Status           string  `gorm:"column:status" json:"status"`
+	ReadyForLoadtest bool    `gorm:"column:ready_for_loadtest" json:"ready_for_loadtest"`
+	// DesiredGeneration is bumped by apply/spec changes; the Status Watcher
+	// compares it against observed_generation (generation fencing, WATCH-03).
+	DesiredGeneration int64      `gorm:"column:desired_generation" json:"-"`
+	BlockingReasons   []byte     `gorm:"column:blocking_reasons;type:jsonb" json:"-"`
+	StatusObservedAt  *time.Time `gorm:"column:status_observed_at" json:"-"`
+	Version           int        `gorm:"column:version" json:"version"`
+	TTLExpiresAt      *time.Time `gorm:"column:ttl_expires_at" json:"ttl_expires_at"`
+	CleanupPolicy     []byte     `gorm:"column:cleanup_policy;type:jsonb" json:"cleanup_policy"`
+	CreatedAt         time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps Namespace to its PostgreSQL table.
@@ -424,3 +429,24 @@ type TestEvent struct {
 
 // TableName maps TestEvent to its PostgreSQL table.
 func (TestEvent) TableName() string { return "tbl_test_events" }
+
+// ComponentStatus is one row of the Status Watcher projection
+// (tbl_component_status, migration 0011): the persisted per-component state
+// backing GET /readiness (docs/namespace-status-watcher.md §2).
+type ComponentStatus struct {
+	ID                 int64      `gorm:"column:id;primaryKey" json:"-"`
+	NamespaceID        string     `gorm:"column:namespace_id" json:"namespace_id"`
+	ComponentType      string     `gorm:"column:component_type" json:"component_type"`
+	ComponentID        string     `gorm:"column:component_id" json:"component_id"`
+	Required           bool       `gorm:"column:required" json:"required"`
+	DesiredGeneration  int64      `gorm:"column:desired_generation" json:"desired_generation"`
+	ObservedGeneration int64      `gorm:"column:observed_generation" json:"observed_generation"`
+	Phase              string     `gorm:"column:phase" json:"phase"`
+	Reason             *string    `gorm:"column:reason" json:"reason,omitempty"`
+	Message            *string    `gorm:"column:message" json:"message,omitempty"`
+	LastTransitionAt   *time.Time `gorm:"column:last_transition_at" json:"last_transition_at,omitempty"`
+	ObservedAt         time.Time  `gorm:"column:observed_at" json:"observed_at"`
+}
+
+// TableName maps ComponentStatus to its PostgreSQL table.
+func (ComponentStatus) TableName() string { return "tbl_component_status" }

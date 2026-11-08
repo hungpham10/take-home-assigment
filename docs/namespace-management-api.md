@@ -5,7 +5,7 @@ This document defines the **namespace-first model** and the **detailed API contr
 **Base path:** `/api/loadtest/v1`  
 **Terminology (MVP locked):** API path uses `namespaces` and `namespace_id`, representing a platform **Environment**. **Mapping is 1:1:** one Environment = one Kubernetes Namespace (deterministic name/labels; components reconciled in that K8s Namespace). The name “namespace” in the API is a platform term; isolation/enforcement is implemented via the mapped Kubernetes Namespace and policies.
 **Stack (MVP):** Go + go-chi, Swagger/OpenAPI, nginx edge auth (`conf/nginx`), Kubernetes orchestration via Go K8s API (no `kubectl`) where applicable.  
-**Related:** [`docs/architecture.md`](architecture.md), [`docs/bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md), [`docs/loadtest-manager-api.md`](loadtest-manager-api.md), [`docs/service-management-api.md`](service-management-api.md), [`docs/database-management-api.md`](database-management-api.md), [`docs/mock-service-api.md`](mock-service-api.md) (metadata in services/databases; separate Mock Service runtime with latency/capacity pools/ACID async reconcile), [`docs/admin-oidc-integration-api.md`](admin-oidc-integration-api.md).
+**Related:** [`docs/architecture.md`](architecture.md), [`docs/bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md), [`docs/loadtest-manager-api.md`](loadtest-manager-api.md), [`docs/service-management-api.md`](service-management-api.md), [`docs/database-management-api.md`](database-management-api.md), [`docs/mock-service-api.md`](mock-service-api.md) (metadata in services/databases; separate Mock Service runtime with latency/capacity pools/ACID async reconcile), [`docs/admin-oidc-integration-api.md`](admin-oidc-integration-api.md), [`docs/k8s-orchestration.md`](k8s-orchestration.md) (how the desired spec is rendered/applied to K8s resources and reconciled).
 
 ## 1. Model (core idea)
 
@@ -13,7 +13,7 @@ This document defines the **namespace-first model** and the **detailed API contr
 - A namespace contains manageable components: **services, databases, ingress** (and derived dependency/network policy).
 - Each component supports **CRUD** within the namespace.
 - **Each service definition includes its own OpenAPI/Swagger spec** (the contract of APIs that service exposes). This is required and used to target specific APIs in load tests.
-- The namespace/environment must be **validated, applied, and become `READY`** before load tests can be defined.
+- The namespace/environment must be **validated, applied, and become `READY`** before load tests can be defined. How `APPLYING` maps desired state to real K8s resources (render/SSA, component→resource mapping, reconciler order, ownership/prune) is defined in [`docs/k8s-orchestration.md`](k8s-orchestration.md).
 - A **load test** is defined only against a **ready namespace**, must specify **which API(s)** it targets, and must include the **JS file (k6 script)** that defines the load test (see `docs/loadtest-manager-api.md`).
 
 ### Resource hierarchy
@@ -57,7 +57,7 @@ Namespace (environment definition)
 | `DRAFT` | Stored, not applied. |
 | `VALIDATING` | Validation in progress (schema/OpenAPI/bindings/deps/dataset refs). |
 | `INVALID` | Validation failed (see errors). |
-| `APPLYING` | Reconciling/applying desired state (K8s resources, NetworkPolicy, mock runtime as applicable). |
+| `APPLYING` | Reconciling/applying desired state (K8s resources, NetworkPolicy, mock runtime as applicable). Render/apply order and readiness criteria per component: [`docs/k8s-orchestration.md`](k8s-orchestration.md) §3–§4, §7. |
 | `DATA_LOADING` | Required database/data restore or seed import is in progress (e.g., dump-based `pg_restore` Job, verified seed load). Namespace is not yet ready for load tests. |
 | `READY` | Applied and required checks passed, including data-load/verify when configured. |
 | `DEGRADED` | Was ready; component(s) unhealthy/unready or data integrity/check drift detected. |
@@ -94,7 +94,7 @@ Namespace (environment definition)
 | `PUT` | `/api/loadtest/v1/namespaces/{namespace_id}` | Replace full desired definition (declarative). |
 | `GET` | `/api/loadtest/v1/namespaces` | List namespaces. |
 | `GET` | `/api/loadtest/v1/namespaces/{namespace_id}` | Get detail. |
-| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/readiness` | Readiness gate details. |
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/readiness` | Readiness gate details. **Projection-backed:** served from `tbl_component_status` + `tbl_namespaces.blocking_reasons`, maintained by the Status Watcher (observed K8s state → PG): [`docs/namespace-status-watcher.md`](namespace-status-watcher.md). |
 | `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/validate` | Dry-run validate. |
 | `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/apply` | Async apply/reconcile (`202`). `Idempotency-Key`/version conflict policy required. |
 | `DELETE` | `/api/loadtest/v1/namespaces/{namespace_id}` | Delete/archive (guard active refs/runs). |

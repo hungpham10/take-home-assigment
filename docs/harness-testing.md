@@ -68,6 +68,18 @@ Uses **fake Kubernetes API client** / envtest-like harness where feasible, plus 
 | RUN-LEAK-01 | Cleanup fails after timeout/stop | `CLEANUP_FAILED` surfaced; reaper/operator retries cleanup idempotently; audit/ops signal emitted. |
 | RUN-ISO-01 | Parallel runs in same Env/K8s namespace | Run-scoped labels/selectors/owner refs prevent cross-run interference; quota/limits enforced. |
 
+### 2.3.1 Namespace status watcher harness (observed → PG loop)
+Design: `docs/namespace-status-watcher.md` (§3, §9). Uses fake informers/cache + fault-injected K8s client; implemented in plan 21.
+
+| ID | Fault / scenario | Expected behavior |
+|---|---|---|
+| WATCH-01 | Informer events dropped mid-flight | Periodic resync converges to the correct component/namespace status. |
+| WATCH-02 | Duplicate / reordered events | Result unchanged (worker recomputes from cache, never event payload). |
+| WATCH-03 | Spec edited after previous READY | Old generation's READY does not count (generation fencing); status stays PROGRESSING until `observed_generation == desired_generation`. |
+| WATCH-04 | Watcher crashes between component upsert and namespace transition | Restart recomputes and converges; no duplicate event / double transition. |
+| WATCH-05 | Watcher stopped (no heartbeat) | `POST /loadtests` returns `NAMESPACE_NOT_READY` reason `STATUS_STALE` after staleness threshold; fail-closed. |
+| WATCH-06 | Component flaps not-READY within grace window | No DEGRADED emitted (hysteresis); READY↔DEGRADED does not flap. |
+
 ### 2.4 External dependency / data-plane fault harness
 | ID | Fault / scenario | Expected behavior |
 |---|---|---|

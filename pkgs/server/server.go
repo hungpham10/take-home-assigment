@@ -31,6 +31,8 @@ type Deps struct {
 	ScriptsDir string           // staging dir for k6 scripts
 	ScriptQ    *script.Queue    // async validation queue (nil → sync in tests)
 	Runner     runner.Runner    // load-test execution backend (local/k8s)
+	K8S        bool             // cluster wired → async apply (plans/21); false = legacy sync
+	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
 }
 
 // NewRouter builds the full HTTP handler.
@@ -74,10 +76,10 @@ func NewRouter(d Deps) http.Handler {
 	// with server-side role resolution (X-User-Role is not authoritative).
 	r.Route("/api/loadtest/v1", func(r chi.Router) {
 		r.Use(authz.RequirePrincipalWithRole(d.DB))
-		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now})
-		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now})
+		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S})
+		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S})
 		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
-		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now})
+		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8S: d.K8S, StaleAfter: d.StaleAfter})
 	})
 	// Script content reader for the runner (staged files).
 	loadtest.ScriptContentOf = func(ref string) ([]byte, error) {

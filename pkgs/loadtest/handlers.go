@@ -26,6 +26,12 @@ type Deps struct {
 	DB     *gorm.DB
 	Runner runner.Runner
 	Now    func() time.Time
+	// K8S enables the fail-closed STATUS_STALE gate (plans/21, WATCH-05):
+	// with a cluster wired, POST /loadtests returns 409 NAMESPACE_NOT_READY
+	// when the watcher heartbeat (status_observed_at) is missing or older
+	// than StaleAfter. Legacy mode (K8S=false) skips the gate.
+	K8S        bool
+	StaleAfter time.Duration
 }
 
 // Mount registers the loadtest routes FLAT on the passed-in router (server
@@ -61,6 +67,22 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteCodeError(w, "NAMESPACE_NOT_READY",
 			"namespace is not READY (status "+ns.Status+")")
 		return
+	}
+	// Gate 1b (plans/21, fail-closed): stale watcher heartbeat blocks run
+	// creation — the readiness projection cannot be trusted (WATCH-05).
+	if d.K8S {
+		threshold := d.StaleAfter
+		if threshold <= 0 {
+			threshold = 15 * time.Minute
+		}
+		stale := ns.StatusObservedAt == nil || d.now().Sub(*ns.StatusObservedAt) > threshold
+		if stale {
+			httpx.WriteJSON(w, http.StatusConflict, map[string]any{
+				"error":  httpx.Error{Code: "NAMESPACE_NOT_READY", Message: "status heartbeat stale"},
+				"reason": "STATUS_STALE",
+			})
+			return
+		}
 	}
 	var req createRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" || req.ScriptID == "" {

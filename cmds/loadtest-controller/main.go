@@ -63,8 +63,15 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run}),
+		Handler:           server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run, K8S: cfg.K8SEnabled, StaleAfter: time.Duration(cfg.WatcherStalenessThreshold) * time.Second}),
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Two control loops when the cluster path is enabled (plans/21).
+	if cfg.K8SEnabled {
+		if err := startOrchestration(ctx, db, cfg.K8SAPIURL, time.Duration(cfg.WatcherResyncSeconds)*time.Second); err != nil {
+			slog.Warn("orchestration loops disabled", "err", err)
+		}
 	}
 
 	errCh := make(chan error, 1)

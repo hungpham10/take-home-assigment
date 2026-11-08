@@ -25,6 +25,12 @@ import (
 type Deps struct {
 	DB  *gorm.DB
 	Now func() time.Time
+	// K8S switches the apply flow: when true (cluster wired) POST /apply only
+	// resolves the desired state, bumps desired_generation and hands off to
+	// the Env Reconciler + Status Watcher (async, plans/21). When false (MVP
+	// local, no cluster) the legacy synchronous DATA_LOADING→READY path stays
+	// so the stack runs standalone.
+	K8S bool
 }
 
 // Mount registers the namespace routes (namespace CRUD, services, lifecycle)
@@ -32,7 +38,7 @@ type Deps struct {
 // authz.RequirePrincipal). All patterns carry the /namespaces prefix.
 func Mount(r chi.Router, d Deps) {
 	r.With(idempotency.RequireKey).
-		Post("/namespaces", idempotency.Replay("/api/loadtest/v1/namespaces", d.DB, d.create))
+		Post("/namespaces", idempotency.Replay("/api/loadtest/v1/namespaces", d.DB, d.createNamespace))
 	r.Get("/namespaces", d.listNamespaces)
 	r.Get("/namespaces/{id}", d.getNamespace)
 	r.Patch("/namespaces/{id}", d.updateNamespace)
@@ -71,7 +77,7 @@ type createRequest struct {
 	Spec        *namespaceSpec `json:"spec"`
 }
 
-func (d Deps) create(w http.ResponseWriter, r *http.Request) {
+func (d Deps) createNamespace(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
 	var req createRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
