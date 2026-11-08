@@ -62,6 +62,11 @@ func (r *Reconciler) Interval() time.Duration { return r.interval }
 // fencing (WATCH-03). Failure at any step surfaces immediately — the caller
 // records it; the next tick re-applies (level-triggered, at-least-once).
 func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
+	// Fail closed BEFORE applying anything when a database operator is
+	// unsupported (plans/26: cloudnative-pg | elastic only).
+	if err := ValidateDatabaseOperators(env); err != nil {
+		return err
+	}
 	objs := r.render(env)
 	if r.BindingsFunc != nil {
 		objs = append(objs, r.BindingsFunc(env)...)
@@ -100,6 +105,11 @@ func (r *Reconciler) prune(ctx context.Context, env *Env, desired []*unstructure
 		{Group: networkingv1.GroupName, Version: "v1", Kind: "Ingress"},
 		{Group: networkingv1.GroupName, Version: "v1", Kind: "NetworkPolicy"},
 		{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"},
+		{Group: "elasticsearch.k8s.elastic.co", Version: "v1", Kind: "Elasticsearch"},
+		{Version: "v1", Kind: "ConfigMap"},
+		{Version: "v1", Kind: "Secret"},
+		{Version: "v1", Kind: "ServiceAccount"},
+		{Group: "autoscaling", Version: "v2", Kind: "HorizontalPodAutoscaler"},
 	}
 	for _, gvk := range kinds {
 		objs, err := r.client.List(ctx, gvk, envNS, labels.Set{k8s.LabelManagedBy: k8s.ManagedByValue})

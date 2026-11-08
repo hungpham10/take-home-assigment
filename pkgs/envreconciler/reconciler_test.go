@@ -2,6 +2,7 @@ package envreconciler_test
 
 import (
 	"context"
+
 	"errors"
 	"testing"
 	"time"
@@ -224,5 +225,146 @@ func TestINT_ENV_07_TickDelegates(t *testing.T) {
 				t.Fatalf("%s/%s unmanaged: %v", o.GetKind(), o.GetName(), o.GetLabels())
 			}
 		}
+	}
+}
+
+// --- plans/26: service quản lý ĐẦY ĐỦ objects — ConfigMap (env lớn), Secret
+// (secretKeyRef, không bao giờ plaintext), HPA, ServiceAccount; database CR
+// theo operator (CNPG | ECK); unknown operator fail closed.
+func fullServiceEnv() *envreconciler.Env {
+	return &envreconciler.Env{
+		NamespaceID: "11111111-2222-3333-4444-555555555555", TenantID: "t-1", Status: "APPLYING",
+		Services: []envreconciler.ServiceSpec{{
+			Name: "echo", Image: "ealen/echo-server:latest", Replicas: 1, Port: 8080, SpecHash: "h-echo",
+			Env:            map[string]string{"LOG_LEVEL": "info"},
+			ConfigMap:      map[string]string{"app.yaml": "listen: 8080"},
+			Secrets:        map[string]string{"API_KEY": "supersecret"},
+			HPA:            &envreconciler.HPASpec{MinReplicas: 1, MaxReplicas: 5, CPUTargetPercent: 80},
+			ServiceAccount: true,
+		}},
+		Databases: []envreconciler.DatabaseSpec{{
+			Name: "demo-db", Operator: "cloudnative-pg", Image: "postgres:16", StorageGB: 1, SpecHash: "h-db",
+		}},
+	}
+}
+
+func find2(objs []*unstructured.Unstructured, kind, name string) *unstructured.Unstructured {
+	for _, o := range objs {
+		if o.GetKind() == kind && o.GetName() == name {
+			return o
+		}
+	}
+	return nil
+}
+
+func TestRenderConfigMapSecretHPASA(t *testing.T) {
+	objs := envreconciler.Render(fullServiceEnv())
+
+	// ConfigMap <name>-config
+	cm := find2(objs, "ConfigMap", "echo-config")
+	if cm == nil {
+		t.Fatal("ConfigMap echo-config missing")
+	}
+	data, _, _ := unstructured.NestedMap(cm.Object, "data")
+	if data["app.yaml"] != "listen: 8080" {
+		t.Fatalf("configmap data %v", data)
+	}
+
+	// Secret <name>-secret (Opaque) — value CHỈ nằm trong Secret, không trong Deployment
+	sec := find2(objs, "Secret", "echo-secret")
+	if sec == nil {
+		t.Fatal("Secret echo-secret missing")
+	}
+	if sec.Object["type"] != "Opaque" {
+		t.Fatalf("secret type %v", sec.Object["type"])
+	}
+	secData, _, _ := unstructured.NestedMap(sec.Object, "stringData")
+	if secData["API_KEY"] != "supersecret" {
+		t.Fatalf("secret data %v", secData)
+	}
+
+	// HPA autoscaling/v2 trỏ Deployment echo
+	hpa := find2(objs, "HorizontalPodAutoscaler", "echo")
+	if hpa == nil {
+		t.Fatal("HPA echo missing")
+	}
+	if hpa.GetAPIVersion() != "autoscaling/v2" {
+		t.Fatalf("hpa apiVersion %q", hpa.GetAPIVersion())
+	}
+	refName, _, _ := unstructured.NestedString(hpa.Object, "spec", "scaleTargetRef", "name")
+	if refName != "echo" {
+		t.Fatalf("hpa target %q", refName)
+	}
+	maxRepF, _, _ := unstructured.NestedNumberAsFloat64(hpa.Object, "spec", "maxReplicas")
+	maxRep := int64(maxRepF)
+	if maxRep != 5 {
+		t.Fatalf("hpa maxReplicas %v", maxRep)
+	}
+
+	// ServiceAccount echo + Deployment reference
+	if find2(objs, "ServiceAccount", "echo") == nil {
+		t.Fatal("ServiceAccount echo missing")
+	}
+	dep := find2(objs, "Deployment", "echo")
+	if dep == nil {
+		t.Fatal("Deployment echo missing")
+	}
+	saName, found, _ := unstructured.NestedString(dep.Object, "spec", "template", "spec", "serviceAccountName")
+	if !found || saName != "echo" {
+		t.Fatalf("deployment serviceAccountName %q found=%v", saName, found)
+	}
+
+	// envFrom ConfigMap + env secretKeyRef trong container
+	containers, _, _ := unstructured.NestedSlice(dep.Object, "spec", "template", "spec", "containers")
+	c0 := containers[0].(map[string]any)
+	envFrom, _, _ := unstructured.NestedSlice(c0, "envFrom")
+	if len(envFrom) == 0 {
+		t.Fatal("container envFrom (ConfigMap) missing")
+	}
+	foundSecretRef := false
+	for _, e := range c0["env"].([]any) {
+		m := e.(map[string]any)
+		if m["name"] == "API_KEY" {
+			if vr, ok := m["valueFrom"].(map[string]any); ok {
+				skr := vr["secretKeyRef"].(map[string]any)
+				if skr["name"] == "echo-secret" && skr["key"] == "API_KEY" {
+					foundSecretRef = true
+				}
+			}
+			if m["value"] == "supersecret" {
+				t.Fatal("plaintext secret rendered into Deployment (violation docs §7)")
+			}
+		}
+	}
+	if !foundSecretRef {
+		t.Fatal("secretKeyRef env missing")
+	}
+}
+
+func TestRenderECKCluster(t *testing.T) {
+	env := fullServiceEnv()
+	env.Databases = []envreconciler.DatabaseSpec{{
+		Name: "search-db", Operator: "elastic", Image: "docker.elastic.co/elasticsearch/elasticsearch:8.15.0",
+		StorageGB: 2, SpecHash: "h-eck",
+	}}
+	objs := envreconciler.Render(env)
+	es := find2(objs, "Elasticsearch", "search-db")
+	if es == nil {
+		t.Fatal("ECK Elasticsearch CR missing")
+	}
+	if es.GetAPIVersion() != "elasticsearch.k8s.elastic.co/v1" {
+		t.Fatalf("apiVersion %q", es.GetAPIVersion())
+	}
+	version, _, _ := unstructured.NestedString(es.Object, "spec", "version")
+	if version == "" {
+		t.Fatal("spec.version missing")
+	}
+}
+
+func TestRenderUnknownOperatorFailsClosed(t *testing.T) {
+	env := fullServiceEnv()
+	env.Databases = []envreconciler.DatabaseSpec{{Name: "weird", Operator: "mongodb-operator"}}
+	if err := envreconciler.ValidateDatabaseOperators(env); err == nil {
+		t.Fatal("unknown operator accepted — want fail closed")
 	}
 }

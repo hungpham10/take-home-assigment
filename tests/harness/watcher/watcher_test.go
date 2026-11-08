@@ -17,6 +17,9 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/statuswatcher"
@@ -218,4 +221,46 @@ func bumpGeneration(h *harnessEnv, t *testing.T) {
 		`UPDATE tbl_namespaces SET desired_generation = desired_generation + 1 WHERE id = ?`, h.nsID).Error; err != nil {
 		t.Fatalf("bump generation: %v", err)
 	}
+}
+
+// WATCH-08 (plans/26): watch→workqueue trên cluster thật — thay đổi deployment
+// NGOÀI (scale replicas) phải được watcher bắt qua watch event và phản ánh
+// vào projection mà KHÔNG đợi resync tick.
+func TestWATCH08WatchEventsTriggerReconcile(t *testing.T) {
+	h := newHarness(t)
+	client, err := harnessClient()
+	if err != nil {
+		t.Skipf("no cluster: %v", err)
+	}
+	cfg := statuswatcher.DefaultConfig()
+	cfg.Resync = time.Hour // KHÔNG có resync — chỉ watch event được phép chạy
+	w := statuswatcher.New(client, sharedDB, cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Start(ctx)
+
+	// Scale deployment ngoài vòng reconcile (trực tiếp qua client).
+	dGVK := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}
+	dep, err := client.Get(ctx, dGVK, h.envNS, "harness-svc")
+	if err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	_ = unstructured.SetNestedField(dep.Object, int64(2), "spec", "replicas")
+	if err := client.Apply(ctx, dep); err != nil {
+		t.Fatalf("scale deployment: %v", err)
+	}
+
+	// Watch event → enqueue → worker reconcile: phase service chuyển khỏi
+	// READY (1/2 replicas available) mà không cần resync.
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		var phase string
+		if err := sharedDB.Raw(
+			`SELECT phase FROM tbl_component_status WHERE namespace_id = ? AND component_type = 'service'`,
+			h.nsID).Scan(&phase).Error; err == nil && phase == "PROGRESSING" {
+			return // watch event đã kích hoạt reconcile (WATCH-08)
+		}
+		time.Sleep(time.Second)
+	}
+	t.Fatal("watch event did not trigger reconcile within deadline (WATCH-08)")
 }

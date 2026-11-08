@@ -132,6 +132,31 @@ jobs:
           kubectl get ns,deploy,svc,pods -A || true
           kubectl logs -l app --all-containers --tail=50 -A || true
 
+  # Plans/26: full deploy E2E — namespace với database (CNPG) + echo-server
+  # qua create-with-spec → validate → apply 202 → READY → curl echo thật.
+  full-deploy-e2e:
+    name: Full Deploy E2E (kind + CNPG)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ltp-full-deploy
+      - name: Run full deploy E2E
+        env:
+          SKIP_BOOTSTRAP: "0"
+        run: ./scripts/e2e-full-deploy.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods -A || true
+          kubectl get cluster -A || true
+
   # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
   # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
   # sources/opsense-rs/.github/workflows/ci.yml (service container + health

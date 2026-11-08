@@ -699,10 +699,14 @@ func (w *Watcher) Tick(ctx context.Context) error {
 		Pluck("id", &ids).Error; err != nil {
 		return fmt.Errorf("statuswatcher: list namespaces: %w", err)
 	}
+	// One broken namespace must not stall the others (level-triggered: the
+	// next resync retries it) — log and continue, surface only the last err.
+	var lastErr error
 	for _, id := range ids {
 		if err := w.ReconcileStatus(ctx, id); err != nil {
-			return err
+			slog.Warn("statuswatcher: reconcile", "namespace", id, "err", err)
+			lastErr = err
 		}
 	}
-	return nil
+	return lastErr
 }

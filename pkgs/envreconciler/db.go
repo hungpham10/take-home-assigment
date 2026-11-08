@@ -44,15 +44,21 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 			for _, svc := range services {
 				spec := ServiceSpec{Name: svc.Name, SpecHash: derefStr(svc.SpecHash), Mock: svc.Mock}
 				var d struct {
-					Image    string            `json:"image"`
-					Replicas int32             `json:"replicas"`
-					Port     int32             `json:"port"`
-					Env      map[string]string `json:"env"`
-					Health   *HealthProbe      `json:"health"`
+					Image          string            `json:"image"`
+					Replicas       int32             `json:"replicas"`
+					Port           int32             `json:"port"`
+					Env            map[string]string `json:"env"`
+					Health         *HealthProbe      `json:"health"`
+					ConfigMap      map[string]string `json:"config_map"`
+					Secrets        map[string]string `json:"secrets"`
+					HPA            *HPASpec          `json:"hpa"`
+					ServiceAccount bool              `json:"service_account"`
 				}
 				if json.Unmarshal(svc.Deploy, &d) == nil {
 					spec.Image, spec.Replicas, spec.Port, spec.Env, spec.Health =
 						d.Image, d.Replicas, d.Port, d.Env, d.Health
+					spec.ConfigMap, spec.Secrets, spec.HPA, spec.ServiceAccount =
+						d.ConfigMap, d.Secrets, d.HPA, d.ServiceAccount
 					if spec.Replicas <= 0 {
 						spec.Replicas = 1
 					}
@@ -67,16 +73,35 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 				return nil, err
 			}
 			for _, dbRow := range dbs {
-				spec := DatabaseSpec{Name: dbRow.Name}
+				spec := DatabaseSpec{Name: dbRow.Name, Operator: dbRow.Operator}
 				var cfg struct {
-					Image     string `json:"image"`
-					StorageGB int64  `json:"storage_gb"`
+					Image     string         `json:"image"`
+					StorageGB int64          `json:"storage_gb"`
+					Version   string         `json:"version"`
+					NodeCount int            `json:"node_count"`
+					Extra     map[string]any `json:"extra"`
 				}
 				if json.Unmarshal(dbRow.Config, &cfg) == nil {
 					spec.Image, spec.StorageGB = cfg.Image, cfg.StorageGB
+					if cfg.Extra != nil {
+						spec.ExtraConfig = cfg.Extra
+					} else {
+						// ECK fields live at the top level of config when no
+						// explicit extra map is provided.
+						spec.ExtraConfig = map[string]any{}
+						if cfg.Version != "" {
+							spec.ExtraConfig["version"] = cfg.Version
+						}
+						if cfg.NodeCount > 0 {
+							spec.ExtraConfig["node_count"] = float64(cfg.NodeCount)
+						}
+					}
 				}
 				if spec.StorageGB <= 0 {
 					spec.StorageGB = 5
+				}
+				if spec.Operator == "" {
+					spec.Operator = "cloudnative-pg" // default operator (0003/0010)
 				}
 				env.Databases = append(env.Databases, spec)
 			}

@@ -148,3 +148,11 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 - §5.4 Stage 1 ✅: tách `pkgs/readiness` (Gates/ProjectionReport/BlockNameOf + dataset/ingress helpers) khỏi `pkgs/namespace` — handlers giờ gọi `readiness.*`; readiness là DESIRED-side logic, watcher giữ OBSERVED-side evaluators.
 - §5.3 amendment: `B → D(pure helpers only)` (mockcontrol.DecodeMockDef, envreconciler render) + `E → F, httpx` — khớp §5.2.1 "shared code is pure helpers only".
 - Stage 2/3 giữ baseline (trigger chưa bắn): split loadtest chờ K8s runner/quota; ~55 gorm refs in handlers ghi trong §5.4 để refactor khi có second query consumer.
+
+### plans/26 — Full deploy E2E + apply quản lý đầy đủ objects (2026-11-08)
+
+- **Apply orchestrate đầy đủ K8s objects** per component (Go-render, giữ ADR-004): service → ConfigMap (env lớn) + Secret (Opaque, env qua `valueFrom.secretKeyRef` — plaintext KHÔNG bao giờ vào manifest, fix vi phạm docs §7:84) + Deployment + Service + HPA (autoscaling/v2) + ServiceAccount; database → operator CR theo cột `operator` (`cloudnative-pg` | `elastic`/ECK — unknown fail closed trước khi apply). Prune mở rộng cho 4 kind mới.
+- **Full deploy E2E** (`scripts/e2e-full-deploy.sh` + CI job `full-deploy-e2e`): create-with-spec 1 call (database CNPG demo-db + echo-server) → validate → apply 202 → READY trên kind → kubectl verify `cluster,hpa,cm,secret,deploy,svc` → port-forward curl echo trả JSON.
+- **Bỏ fakeWatcher** (plans/26): `pkgs/k8s` Fake giữ Apply/Get/List/Delete cho unit fault-injection; watch path test real trên kind (`TestWATCH08WatchEventsTriggerReconcile`). Fix 2 bug lộ ra: consumeWatch tight-spin khi channel đóng (starve reconcile), Tick stall khi 1 namespace lỗi chặn các ns khác (per-ns log-and-continue).
+- **202 + status_url** cho create-with-spec + `apply:true` ở K8S mode (docs namespace-management-api.md:93) — apply/reconcile BẮT ĐẦU chứ không hoàn thành; legacy giữ 201 READY.
+- Tests mới: INT-NS-02b (202+Location), INT-NS-34 (combined flow), render ConfigMap/Secret/HPA/SA/ECK + unknown-operator fail-closed.
