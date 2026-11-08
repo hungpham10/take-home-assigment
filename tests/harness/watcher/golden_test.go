@@ -59,9 +59,15 @@ func TestWATCH07GoldenPath(t *testing.T) {
 		t.Fatalf("create ns failed: %v", ns)
 	}
 
-	// Legacy shape: "spec" is the raw OpenAPI document (JSON string payload).
+	// Legacy shape: "spec" is the raw OpenAPI document (JSON string payload);
+	// deploy.image is required for the reconciler to render a runnable pod.
 	svc := call("POST", "/api/loadtest/v1/namespaces/"+nsID+"/services", principal, map[string]any{
-		"name": "golden-svc", "spec": json.RawMessage(goldenSpec),
+		"name": "golden-svc",
+		"spec": json.RawMessage(goldenSpec),
+		"deploy": map[string]any{
+			"image": "nginx:alpine", "replicas": 1, "port": 80,
+			"health": map[string]any{"path": "/", "port": 80},
+		},
 	})
 	if svc["id"] == nil && svc["service_id"] == nil {
 		t.Fatalf("create service failed: %v", svc)
@@ -102,7 +108,8 @@ func TestWATCH07GoldenPath(t *testing.T) {
 	}
 	var status string
 	_ = sharedDB.Raw(`SELECT status FROM tbl_namespaces WHERE id = ?`, nsID).Scan(&status)
-	t.Fatalf("golden path did not converge (ns status %s)", status)
+	t.Fatalf("golden path did not converge (ns status %s)\nprojection: %s",
+		status, harnessDumpProjection(&harnessEnv{nsID: nsID}, t))
 }
 
 const goldenSpec = `{"openapi":"3.0.0","info":{"title":"Golden","version":"1"},"paths":{"/x":{"get":{"responses":{"200":{"description":"ok"}}}}}}`
