@@ -142,3 +142,9 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 - `apply_deadline` enforce: namespace kẹt APPLYING/DATA_LOADING quá deadline → DEGRADED reason `apply_deadline_exceeded`; đủ 5 knobs `WATCHER_*` wired.
 - DEGRADED-with-running-run: event `namespace_degraded_at` metadata; GET loadtest + events trả `unreliable: true` khi namespace DEGRADED sau start của run (run không bị stop).
 - Harness WATCH-01..06: fake-client cases (CI `test` job) + `//go:build harness_k8s` trên kind (CI job `watcher-harness`) / colima local.
+
+### plans/25 — Codebase layering PH1 (2026-11-08)
+
+- §5.4 Stage 1 ✅: tách `pkgs/readiness` (Gates/ProjectionReport/BlockNameOf + dataset/ingress helpers) khỏi `pkgs/namespace` — handlers giờ gọi `readiness.*`; readiness là DESIRED-side logic, watcher giữ OBSERVED-side evaluators.
+- §5.3 amendment: `B → D(pure helpers only)` (mockcontrol.DecodeMockDef, envreconciler render) + `E → F, httpx` — khớp §5.2.1 "shared code is pure helpers only".
+- Stage 2/3 giữ baseline (trigger chưa bắn): split loadtest chờ K8s runner/quota; ~55 gorm refs in handlers ghi trong §5.4 để refactor khi có second query consumer.
