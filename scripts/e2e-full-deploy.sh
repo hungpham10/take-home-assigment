@@ -133,6 +133,8 @@ if [ "$READY" != "true" ]; then
   done
   echo "--- echo deploy describe ---"
   kubectl -n "$ENVNS" describe deploy echo 2>&1 | tail -15
+  echo "--- controller log (apply-now/loop warnings) ---"
+  tail -40 /tmp/ltp-full-deploy-controller.log >&2 || true
   fail "namespace did not reach READY"
 fi
 echo "   namespace READY ✅"
