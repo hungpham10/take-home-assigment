@@ -261,6 +261,13 @@ func (f *Fake) Apply(ctx context.Context, obj *unstructured.Unstructured) error 
 		merged := prev.DeepCopy()
 		merged.SetLabels(mergeLabels(prev.GetLabels(), obj.GetLabels()))
 		merged.SetAnnotations(mergeLabels(prev.GetAnnotations(), obj.GetAnnotations()))
+		// SSA field-manager ownership covers spec; the API server keeps
+		// subresource status from the previous write unless the apply sets it
+		// (client-go ApplyStatus) — mirror that: new status replaces, absent
+		// status keeps the old one.
+		if st, has := obj.UnstructuredContent()["status"]; has {
+			merged.UnstructuredContent()["status"] = st
+		}
 		merged.UnstructuredContent()["spec"] = obj.UnstructuredContent()["spec"]
 		bucket[id] = merged
 		f.emitLocked(watch.Modified, merged)

@@ -14,10 +14,19 @@ import (
 // This is the ONLY place raw SQL for transitions lives — GORM has no syntax
 // for function calls, and status changes must never bypass the DB functions.
 func Transition(ctx context.Context, db *gorm.DB, objectType, objectID, to, actorJSON, reason string) error {
+	return TransitionMeta(ctx, db, objectType, objectID, to, actorJSON, reason, nil)
+}
+
+// TransitionMeta is Transition with event metadata JSONB (e.g. the watcher's
+// namespace_degraded_at marker for DEGRADED transitions).
+func TransitionMeta(ctx context.Context, db *gorm.DB, objectType, objectID, to, actorJSON, reason string, meta []byte) error {
 	fn := "fn_" + objectType + "_transition"
+	if len(meta) == 0 {
+		meta = []byte("{}")
+	}
 	return db.WithContext(ctx).Exec(
-		`SELECT `+fn+`(?::uuid, ?, ?::jsonb, ?)`,
-		objectID, to, actorJSON, reason).Error
+		`SELECT `+fn+`(?::uuid, ?, ?::jsonb, ?, ?::jsonb)`,
+		objectID, to, actorJSON, reason, meta).Error
 }
 
 // ActorJSON builds the actor payload stored in events/audit.

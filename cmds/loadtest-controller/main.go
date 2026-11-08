@@ -69,7 +69,13 @@ func run() error {
 
 	// Two control loops when the cluster path is enabled (plans/21).
 	if cfg.K8SEnabled {
-		if err := startOrchestration(ctx, db, cfg.K8SAPIURL, time.Duration(cfg.WatcherResyncSeconds)*time.Second); err != nil {
+		if err := startOrchestration(ctx, db, cfg.K8SAPIURL,
+			time.Duration(cfg.WatcherResyncSeconds)*time.Second,
+			time.Duration(cfg.WatcherGraceSeconds)*time.Second,
+			time.Duration(cfg.WatcherStableSeconds)*time.Second,
+			time.Duration(cfg.WatcherApplyDeadlineMin)*time.Minute,
+			time.Duration(cfg.WatcherStalenessThreshold)*time.Second,
+		); err != nil {
 			slog.Warn("orchestration loops disabled", "err", err)
 		}
 	}

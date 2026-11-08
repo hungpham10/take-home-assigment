@@ -471,6 +471,10 @@ func (d Deps) applyNamespace(w http.ResponseWriter, r *http.Request) {
 }
 
 // readiness returns the component checklist without mutating anything.
+// K8S mode (plans/22): projection-backed — reads tbl_component_status +
+// tbl_namespaces.blocking_reasons, computed by the Status Watcher
+// (docs/namespace-management-api.md §3). Legacy mode keeps the on-the-fly
+// readinessGates computation.
 func (d Deps) readiness(w http.ResponseWriter, r *http.Request) {
 	p := authz.PrincipalOf(r)
 	ns, ok := d.loadOwned(w, r, p)
@@ -479,6 +483,23 @@ func (d Deps) readiness(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	if d.K8S {
+		report, ok := d.projectionReport(ctx, ns)
+		if ok {
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{
+				"namespace_id":       ns.ID,
+				"status":             ns.Status,
+				"ready_for_loadtest": ns.ReadyForLoadtest,
+				"checked_at":         d.nowUTC(),
+				"components":         report.Components,
+				"ready":              report.AllOK,
+				"blocking_reasons":   report.BlockingReasons,
+			})
+			return
+		}
+		// No projection yet (watcher has not written) → fall through to the
+		// spec-level gates so the payload is never empty.
+	}
 	report := d.readinessGates(ctx, ns)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"namespace_id":       ns.ID,
@@ -491,6 +512,60 @@ func (d Deps) readiness(w http.ResponseWriter, r *http.Request) {
 		"ready":            report.AllOK && !report.MocksBlocking,
 		"blocking_reasons": report.BlockingReasons,
 	})
+}
+
+// projectionReport builds the readiness payload from the Status Watcher's
+// tbl_component_status projection + tbl_namespaces.blocking_reasons.
+// ok=false when the projection is empty (watcher has not run yet).
+func (d Deps) projectionReport(ctx context.Context, ns store.Namespace) (readinessReport, bool) {
+	var rows []store.ComponentStatus
+	if err := d.DB.WithContext(ctx).
+		Where("namespace_id = ?", ns.ID).Find(&rows).Error; err != nil || len(rows) == 0 {
+		return readinessReport{}, false
+	}
+	report := readinessReport{Components: map[string]any{}}
+	for _, row := range rows {
+		block, _ := report.Components[blockNameOf(row.ComponentType)].(componentBlock)
+		if block.Blocking == nil {
+			block.Blocking = []string{}
+		}
+		if block.Ready == nil {
+			block.Ready, block.Total = intPtr(0), intPtr(0)
+		}
+		*block.Total++
+		switch {
+		case row.Phase == "READY":
+			*block.Ready++
+		case row.Reason != nil:
+			block.Blocking = append(block.Blocking,
+				row.ComponentType+"/"+row.ComponentID+": "+*row.Reason)
+		}
+		if row.Required {
+			block.Required = boolPtr(true)
+		}
+		report.Components[blockNameOf(row.ComponentType)] = block
+	}
+	report.BlockingReasons = []string{}
+	if len(ns.BlockingReasons) > 0 {
+		_ = json.Unmarshal(ns.BlockingReasons, &report.BlockingReasons)
+	}
+	report.AllOK = len(report.BlockingReasons) == 0
+	return report, true
+}
+
+// blockNameOf maps tbl_component_status.component_type (singular) to the
+// readiness payload block names (docs/namespace-management-api.md §3).
+func blockNameOf(componentType string) string {
+	switch componentType {
+	case "service":
+		return "services"
+	case "database":
+		return "databases"
+	case "mock":
+		return "mocks"
+	default:
+		return componentType // data_load, ingress, network_policy
+	}
 }
 
 // nowUTC returns the current time (injectable via Deps.Now when set).

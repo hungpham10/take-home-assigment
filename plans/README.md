@@ -25,6 +25,7 @@ Thứ tự thực thi từ đơn giản → phức tạp. Mỗi plan = 1 PR/feat
 | 19 | [k8s-orchestration](19-k8s-orchestration.md) | Docs-only: docs/k8s-orchestration.md (render/SSA, mapping, reconciler, RBAC, mock wiring); code = plan 21 | 17, 18 |
 | 20 | [namespace-status-watcher](20-namespace-status-watcher.md) | Docs-only: docs/namespace-status-watcher.md (observed→PG loop, tbl_component_status projection, generation fencing, WATCH-*); code = plan 21 | 17–19 |
 | 21 | [k8s-reconciler-watcher-mock](21-k8s-reconciler-watcher-mock.md) | Code: pkgs/k8s adapter, pkgs/envreconciler, pkgs/statuswatcher (readiness projection), cmds/mock-service + mockcontrol, migration 0011, WATCH-01..06 (PRs A–E) | 19, 20 |
+| 22 | [watcher-hardening-readiness-projection](22-watcher-hardening-readiness-projection.md) | Readiness projection-backed (K8S), Watch→workqueue event source, apply_deadline, DEGRADED-with-running-run, WATCH-01..06 (colima/kind CI) | 21 |
 
 Sau 14: mock-service (phase sau), CodeGraph review, bump version, release.
 | 16 | [harness-testing-integrity](16-harness-testing-integrity.md) | Harness tests: ACID/invariants, crash/exception/network faults, idempotency/retry, runner/egress safety | 03–13 |

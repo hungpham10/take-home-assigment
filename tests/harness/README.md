@@ -13,9 +13,27 @@ tests/
   harness/
     README.md
     k8s/               # //go:build harness_k8s — NetworkPolicy/egress/runner isolation (cluster)
+    watcher/           # //go:build harness_k8s — WATCH-01..06 (plans/22, real cluster)
   integration/         # Go integration harness (Postgres + fakes; phased)
   perf/                # k6 performance gates (separate from integrity harness)
 ```
+
+## Status Watcher harness (WATCH-01..06, plans/22)
+
+Run against a real cluster — colima locally, kind in CI (job `watcher-harness` in `.github/workflows/ci.yml`):
+
+```sh
+# local (colima)
+colima start --kubernetes
+export TEST_DATABASE_DSN=postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
+export K8S_API_URL=https://$(colima kubernetes config | grep server | cut -d" " -f6)  # hoặc từ ~/.colima/k8s/kubeconfig
+go test -tags harness_k8s -v ./tests/harness/watcher/...
+```
+
+`TestWATCH00Setup` seeds tenant/namespace/service rows vào Postgres và apply
+deployment thật lên cluster qua `pkgs/envreconciler`; các case WATCH-01..06
+chạy trên đó. Fake-client counterparts (không cần cluster) nằm ở
+`pkgs/statuswatcher/` và chạy trong job `test`.
 
 ## Rules
 - Harness tests prove **safety under failure**, not happy paths.

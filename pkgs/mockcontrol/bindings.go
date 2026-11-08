@@ -34,8 +34,8 @@ func DecodeMockDef(raw json.RawMessage) *MockDef {
 		return nil
 	}
 	var m MockDef
-	if json.Unmarshal(raw, &m) != nil {
-		return nil
+	if json.Unmarshal(raw, &m) != nil || !m.Enabled {
+		return nil // absent or explicitly disabled
 	}
 	return &m
 }

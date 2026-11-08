@@ -237,7 +237,9 @@ func (d Deps) get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, lt)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	httpx.WriteJSON(w, http.StatusOK, d.loadtestWithFlag(ctx, lt))
 }
 
 // stop: any active status → STOPPING (reconciler completes → STOPPED).
@@ -279,7 +281,39 @@ func (d Deps) events(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "events query failed")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"events": events})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"events":     events,
+		"unreliable": d.namespaceDegradedAfter(r.Context(), lt),
+	})
+}
+
+// namespaceDegradedAfter reports whether the namespace logged a DEGRADED
+// event (metadata namespace_degraded_at, written by the Status Watcher)
+// after the run started — plans/22 docs §6: the run keeps running, its
+// result is flagged unreliable.
+func (d Deps) namespaceDegradedAfter(ctx context.Context, lt store.LoadTest) bool {
+	var count int64
+	if err := d.DB.WithContext(ctx).Raw(
+		// Runs not started yet (PROVISIONING/QUEUED) compare against created_at
+		// — a namespace degraded before the run starts still taints the result.
+		`SELECT count(*) FROM tbl_namespace_events e
+		 JOIN tbl_load_tests l ON l.namespace_id = e.object_id
+		 WHERE l.id = ? AND e.to_status = 'DEGRADED'
+		   AND e.created_at > COALESCE(l.started_at, l.created_at)`,
+		lt.ID).Scan(&count).Error; err != nil {
+		return false // fail open for reporting only
+	}
+	return count > 0
+}
+
+// loadtestWithFlag returns the loadtest payload merged with the unreliable
+// flag (docs §6 — DEGRADED-after-start marks results unreliable).
+func (d Deps) loadtestWithFlag(ctx context.Context, lt store.LoadTest) map[string]any {
+	out := map[string]any{}
+	b, _ := json.Marshal(lt)
+	_ = json.Unmarshal(b, &out)
+	out["unreliable"] = d.namespaceDegradedAfter(ctx, lt)
+	return out
 }
 
 // --- helpers ---------------------------------------------------------------------

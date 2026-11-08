@@ -134,3 +134,11 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 5. `pkgs/namespace/handlers.go` — idempotency replay (captureWriter), ETag, 404-vs-403
 6. `pkgs/secrets/crypto.go` — format nonce(12)||ciphertext, master key lifecycle
 7. `sql/0002` — transition function template (dùng `%I` dynamic SQL — review injection surface)
+
+### plans/22 — Watcher hardening (2026-11-08)
+
+- `GET /readiness` **projection-backed khi K8S mode**: đọc `tbl_component_status` + `blocking_reasons` (fall back về readinessGates khi projection trống); legacy mode giữ compute on-the-fly.
+- Watcher event source: `k8s.Client.Watch` per GVK → workqueue dedup/rate-limited (client-go workqueue), workers gọi `ReconcileStatus`; polling resync giữ làm safety net.
+- `apply_deadline` enforce: namespace kẹt APPLYING/DATA_LOADING quá deadline → DEGRADED reason `apply_deadline_exceeded`; đủ 5 knobs `WATCHER_*` wired.
+- DEGRADED-with-running-run: event `namespace_degraded_at` metadata; GET loadtest + events trả `unreliable: true` khi namespace DEGRADED sau start của run (run không bị stop).
+- Harness WATCH-01..06: fake-client cases (CI `test` job) + `//go:build harness_k8s` trên kind (CI job `watcher-harness`) / colima local.

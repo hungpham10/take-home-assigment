@@ -189,3 +189,72 @@ func TestApplyK8SAsyncHandoff(t *testing.T) {
 		t.Fatalf("policy observed_generation %d, want 0 (watcher owns it)", policy.ObservedGeneration)
 	}
 }
+
+// TestReadinessProjectionBacked — plans/22: với cluster wired (K8S=true),
+// GET /readiness đọc tbl_component_status + blocking_reasons thay vì compute
+// readinessGates on-the-fly (docs/namespace-management-api.md §3).
+func TestReadinessProjectionBacked(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now, K8S: true})
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"), map[string]string{"name": "envproj"})
+	if rec.Code != 201 {
+		t.Fatalf("create ns: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	// Watcher projection state: service READY (gen 2), data_load PENDING.
+	now := time.Now().UTC()
+	rows := []store.ComponentStatus{
+		{NamespaceID: ns.ID, ComponentType: "service", ComponentID: "svc-1", Required: true,
+			DesiredGeneration: 2, ObservedGeneration: 2, Phase: "READY", ObservedAt: now},
+		{NamespaceID: ns.ID, ComponentType: "data_load", ComponentID: "-", Required: true,
+			DesiredGeneration: 2, ObservedGeneration: 1, Phase: "PENDING", Reason: store.StrPtr("restore_job_not_implemented"), ObservedAt: now},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocking, _ := json.Marshal([]string{"data_load/-: restore_job_not_implemented"})
+	if err := db.Model(&store.Namespace{}).Where("id = ?", ns.ID).Updates(map[string]any{
+		"blocking_reasons":   blocking,
+		"status_observed_at": now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID+"/readiness", principal, nil)
+	if rec.Code != 200 {
+		t.Fatalf("readiness: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status          string         `json:"status"`
+		Ready           bool           `json:"ready"`
+		BlockingReasons []string       `json:"blocking_reasons"`
+		Components      map[string]any `json:"components"`
+	}
+	if json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
+		t.Fatalf("decode: %s", rec.Body.String())
+	}
+	if _, ok := resp.Components["services"]; !ok {
+		t.Fatalf("projection blocks missing: %v", resp.Components)
+	}
+	if len(resp.BlockingReasons) == 0 {
+		t.Fatal("blocking_reasons not projection-backed")
+	}
+	if resp.Ready {
+		t.Fatal("ready=true despite PENDING component")
+	}
+
+	// Sanity: the payload must NOT come from readinessGates — readinessGates
+	// would report "no services registered" because no tbl_services rows
+	// exist; the projection reports READY for svc-1.
+	svcBlock := resp.Components["services"].(map[string]any)
+	if svcBlock["ready"].(float64) != 1 {
+		t.Fatalf("service block not from projection: %v", svcBlock)
+	}
+}

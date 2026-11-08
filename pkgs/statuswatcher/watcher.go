@@ -364,7 +364,18 @@ func (e *evalContext) evalNetworkPolicy(desired int64) store.ComponentStatus {
 		Required: true, DesiredGeneration: desired, ObservedAt: e.w.now(),
 	}
 	var policy store.NetworkPolicy
+	var depRows int64
+	_ = e.w.db.WithContext(e.ctx).Model(&store.Dependency{}).
+		Where("namespace_id = ?", e.ns.ID).Count(&depRows).Error
 	if err := e.w.db.WithContext(e.ctx).Where("namespace_id = ?", e.ns.ID).First(&policy).Error; err != nil {
+		// No resolved policy: required only when legacy tbl_dependencies rows
+		// exist (same semantics as the legacy readinessGates) — pre-apply
+		// namespaces with no dependencies are not blocked by it.
+		if depRows == 0 {
+			row.Required = false
+			row.Phase = phaseReady
+			return row
+		}
 		row.Phase, row.Reason = phasePending, ptrOf("no_resolved_policy")
 		return row
 	}
@@ -461,7 +472,7 @@ func (w *Watcher) persistProjection(ctx context.Context, ns *store.Namespace, ro
 // transitions (e.g. a racing user transition) are logged and retried on the
 // next pass — no crash loop.
 func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []store.ComponentStatus, stale bool) error {
-	allReady, anyFailed, anyPending := true, false, false
+	var anyFailed, anyPending bool
 	var blocking []string
 	for _, r := range rows {
 		if !r.Required {
@@ -477,6 +488,10 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 			blocking = append(blocking, fmt.Sprintf("%s/%s: %s", r.ComponentType, r.ComponentID, derefOr(r.Reason, "pending")))
 		}
 	}
+	// All required components ready = no failure AND nothing pending (a
+	// vacuous namespace with no required components is NOT ready — fail
+	// closed when the projection is empty).
+	allReady := len(rows) > 0 && !anyFailed && !anyPending
 	if stale {
 		allReady = false
 		blocking = append(blocking, "status heartbeat stale (STATUS_STALE)")
@@ -484,6 +499,10 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 	readyForLoadtest := allReady && !anyFailed && ns.Status == "READY"
 
 	next := ""
+	applyDeadlineExceeded := ns.Status == "APPLYING" || ns.Status == "DATA_LOADING"
+	if applyDeadlineExceeded {
+		applyDeadlineExceeded = !allReady && w.pastApplyDeadline(ctx, ns)
+	}
 	switch ns.Status {
 	case "APPLYING", "DATA_LOADING":
 		switch {
@@ -491,6 +510,11 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 			next = "INVALID"
 		case allReady && !anyPending:
 			next = "READY"
+		case applyDeadlineExceeded:
+			// Stuck mid-apply past the deadline → DEGRADED (docs/namespace-
+			// status-watcher.md §5); recovery re-runs validate.
+			next = "DEGRADED"
+			blocking = append(blocking, "apply_deadline_exceeded")
 		case anyPending && ns.Status == "APPLYING":
 			// data_load still in progress keeps APPLYING; restore-driven
 			// namespaces move to DATA_LOADING (seed transition exists).
@@ -526,7 +550,13 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 		}
 	}
 	if next != "" && next != ns.Status {
-		if err := store.Transition(ctx, w.db, "namespace", ns.ID, next, store.ActorJSON("system", "statuswatcher", "system"), "watcher aggregation"); err != nil {
+		// DEGRADED transitions carry namespace_degraded_at metadata (docs §6):
+		// running loadtests keep running, their results become unreliable.
+		meta := map[string]any{}
+		if next == "DEGRADED" {
+			meta["namespace_degraded_at"] = w.now()
+		}
+		if err := store.TransitionMeta(ctx, w.db, "namespace", ns.ID, next, store.ActorJSON("system", "statuswatcher", "system"), "watcher aggregation", store.JSONBytes(meta)); err != nil {
 			slog.Warn("statuswatcher: transition rejected", "namespace", ns.ID, "to", next, "err", err)
 			return nil // retry on the next pass; no crash loop
 		}
@@ -540,6 +570,25 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 		}
 	}
 	return nil
+}
+
+// pastApplyDeadline reports whether the namespace has been in its current
+// APPLYING/DATA_LOADING leg longer than cfg.ApplyDeadline (based on the last
+// transition event timestamp; missing event = not past deadline).
+func (w *Watcher) pastApplyDeadline(ctx context.Context, ns *store.Namespace) bool {
+	var createdAt time.Time
+	_ = w.db.WithContext(ctx).Raw(
+		`SELECT created_at FROM tbl_namespace_events
+		 WHERE object_id = ? AND to_status IN ('APPLYING','DATA_LOADING')
+		 ORDER BY id DESC LIMIT 1`, ns.ID).Scan(&createdAt)
+	if createdAt.IsZero() {
+		// No transition event (e.g. seeded state) — fall back to updated_at.
+		createdAt = ns.UpdatedAt
+	}
+	if createdAt.IsZero() {
+		return false
+	}
+	return w.now().Sub(createdAt) >= w.cfg.ApplyDeadline
 }
 
 // degradedFor/track the grace window for READY→DEGRADED (WATCH-06 hysteresis).
@@ -573,10 +622,18 @@ func hasPhase(rows []store.ComponentStatus, compType, phase string) bool {
 
 func marshalJSON(v any) []byte { return store.JSONBytes(v) }
 
-// Start runs the resync loop until ctx is cancelled (MVP event source =
-// polling; informer wiring replaces the ticker in PR E without changing the
-// reconcile contract).
+// Start runs the event source + workers + resync loop until ctx is
+// cancelled (docs/namespace-status-watcher.md S3): k8s.Client.Watch
+// consumers per GVK enqueue namespace keys into the dedup/rate-limited
+// workqueue; workers run ReconcileStatus (level-triggered - event payloads
+// are never trusted); the polling resync ticker stays as the safety net for
+// dropped/reordered events and startup relist.
 func (w *Watcher) Start(ctx context.Context) {
+	q := NewQueue()
+	w.runWatches(ctx, q)
+	for range 4 {
+		go w.worker(ctx, q)
+	}
 	ticker := time.NewTicker(w.cfg.Resync)
 	defer ticker.Stop()
 	for {
@@ -585,8 +642,23 @@ func (w *Watcher) Start(ctx context.Context) {
 		}
 		select {
 		case <-ctx.Done():
+			q.q.ShutDown()
 			return
 		case <-ticker.C:
+		}
+	}
+}
+
+// worker drains the queue, reconciling one namespace per key.
+func (w *Watcher) worker(ctx context.Context, q *Queue) {
+	for {
+		key, ok := q.Pop(ctx)
+		if !ok || ctx.Err() != nil {
+			return
+		}
+		if err := w.ReconcileStatus(ctx, key); err != nil {
+			slog.Warn("statuswatcher: reconcile", "namespace", key, "err", err)
+			q.AddAfter(key, time.Second) // retry with backoff
 		}
 	}
 }

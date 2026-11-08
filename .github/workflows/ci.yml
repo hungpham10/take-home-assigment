@@ -70,6 +70,48 @@ jobs:
             go build -o bin/mock-service ./cmds/mock-service
           fi
 
+  # Plans/22: WATCH-01..06 harness trên kind cluster (colima chạy local cùng
+  # cách — docs/namespace-status-watcher.md §9). Fake-client counterparts chạy
+  # trong job `test`; job này verify watcher trên cluster thật.
+  watcher-harness:
+    name: Status Watcher Harness (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ltp
+          POSTGRES_PASSWORD: ltp
+          POSTGRES_DB: ltp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltp -d ltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_DSN: postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Apply migrations
+        run: |
+          set -e
+          for f in $(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort); do
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ltp-harness
+      - name: Run WATCH-01..06 harness
+        run: |
+          go test -tags harness_k8s -v -timeout 15m \
+            ./tests/harness/watcher/... ./tests/harness/k8s/...
+
   # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
   # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
   # sources/opsense-rs/.github/workflows/ci.yml (service container + health

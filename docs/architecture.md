@@ -86,7 +86,7 @@ pkgs/
   testutil/              ✅ NewServer (real composition)
   k8s/                   ✅ Client interface (dynamic client + Fake + fault injection) — plans/21 PR A
   envreconciler/         ✅ desired -> K8s (SSA render/apply in locked order, prune) — plans/21 PR B
-  statuswatcher/         ✅ evaluators, projection (tbl_component_status), aggregator, hysteresis — plans/21 PR C
+  statuswatcher/         ✅ evaluators, projection (tbl_component_status), aggregator, hysteresis — plans/21 PR C + plans/22 (Watch→workqueue event source, apply_deadline, unreliable flag)
   mockcontrol/, mockruntime/ ✅ binding ConfigMaps + ExternalName wiring; snapshot runtime — plans/21 PR D
 docs/  plans/  sql/  tests/
 ```

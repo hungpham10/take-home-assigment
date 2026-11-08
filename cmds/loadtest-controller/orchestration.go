@@ -125,7 +125,7 @@ func derefS(s *string) string {
 }
 
 // startOrchestration boots the two loops; both stop when ctx is cancelled.
-func startOrchestration(ctx context.Context, db *gorm.DB, apiURL string, resync time.Duration) error {
+func startOrchestration(ctx context.Context, db *gorm.DB, apiURL string, resync, grace, stable, applyDeadline, staleness time.Duration) error {
 	client, err := k8s.NewDynamicClient(apiURL, "loadtest-controller")
 	if err != nil {
 		return err
@@ -134,7 +134,13 @@ func startOrchestration(ctx context.Context, db *gorm.DB, apiURL string, resync 
 	mockcontrol.Attach(rc) // binding ConfigMaps + MOCK_* env injection (step 5)
 	go rc.Start(ctx, envLoader(db))
 
-	w := statuswatcher.New(client, db, statuswatcher.Config{Resync: resync})
+	w := statuswatcher.New(client, db, statuswatcher.Config{
+		Resync:             resync,
+		Grace:              grace,
+		Stable:             stable,
+		ApplyDeadline:      applyDeadline,
+		StalenessThreshold: staleness,
+	})
 	go w.Start(ctx)
 	slog.Info("orchestration loops started", "api", apiURL, "resync", resync)
 	return nil
