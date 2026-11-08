@@ -61,8 +61,12 @@ SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=$BASE K8S_ENABLED=true K8S_API_URL="$SERVE
   ./bin/loadtest-controller > /tmp/ltp-full-deploy-controller.log 2>&1 &
 CTRL_PID=$!
 trap 'kill $CTRL_PID 2>/dev/null; docker rm -f ltp-full-deploy-pg >/dev/null 2>&1' EXIT
-sleep 3
-curl -sf "$BASE/health" >/dev/null || fail "controller health"
+HEALTH_OK=""
+for i in $(seq 1 30); do
+  if curl -sf "$BASE/health" >/dev/null 2>&1; then HEALTH_OK=1; break; fi
+  sleep 2
+done
+[ -n "$HEALTH_OK" ] || { echo "--- controller log ---"; tail -30 /tmp/ltp-full-deploy-controller.log >&2 || true; fail "controller health (60s)"; }
 
 # --- 3. fixture + namespace + database + echo service qua API ------------------
 say "seed tenant fixture"
