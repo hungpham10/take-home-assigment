@@ -384,9 +384,12 @@ To ensure maintainability and testability, all packages in  follow a strict 3-la
 
 | Layer | Responsibility | Dependencies | Key Constraints |
 | :--- | :--- | :--- | :--- |
-| **API / Handler** | HTTP transport, request parsing, basic schema validation, response formatting. | $ightarrow$ Service | No business logic; No direct DB access. |
-| **Service** | Core business logic, OpenAPI validation, dependency graph resolution, state transition orchestration. | $ightarrow$ Repo | No HTTP knowledge; No raw SQL. |
-| **Repo / Store** | Data persistence, complex SQL queries, transaction management. | $ightarrow$ Database | No business logic; Returns domain models. |
+| **API / Handler** | HTTP transport, request parsing, basic schema validation, response formatting. | $
+ightarrow$ Service | No business logic; No direct DB access. |
+| **Service** | Core business logic, OpenAPI validation, dependency graph resolution, state transition orchestration. | $
+ightarrow$ Repo | No HTTP knowledge; No raw SQL. |
+| **Repo / Store** | Data persistence, complex SQL queries, transaction management. | $
+ightarrow$ Database | No business logic; Returns domain models. |
 
 ### 5.2 Current Codebase Organization (2026-11-08)
 
@@ -399,7 +402,7 @@ The codebase is organized by domain boundary, not strictly by the API → servic
     └── mock-service/          Data plane: serves mock snapshots
     
     pkgs/
-    ├── A. API domains         namespace · serviceopenapi · script · loadtest · adminapi
+    ├── A. API domains         namespace · readiness · serviceopenapi · script · loadtest · adminapi
     ├── B. Reconcile loops     envreconciler (desired → K8s) · statuswatcher (observed → PG)
     ├── C. Runtime adapters    k8s · runner
     ├── D. Mock                mockcontrol (controller side) · mockruntime (mock-service side)
@@ -425,10 +428,11 @@ The codebase is organized by domain boundary, not strictly by the API → servic
 ### 5.3 Dependency rules
 
     cmds → A, B, D(controller side), E, F
-    A    → E, F, C(runner only), serviceopenapi
-    B    → C(k8s), F
+    A    → E, F, C(runner only), serviceopenapi, readiness
+    B    → C(k8s), F, D(pure helpers only: mockcontrol.DecodeMockDef,
+             envreconciler render/HashSpec/PolicySpecOf)
     D    → C(k8s), F
-    E    → F (authz role lookup only)
+    E    → F, httpx (error/response shaping only)
     F    → (no domain imports)
 
 Status changes happen only through store transitions. The Reconciler never writes readiness; the Watcher never writes K8s. Before cross-package refactors, update docs/plans, re-index CodeGraph, and inspect call chains for bypasses.
@@ -437,9 +441,9 @@ Status changes happen only through store transitions. The Reconciler never write
 
 | Stage | Deviation | Trigger | Action |
 |---|---|---|---|
-| 1 | namespace is the largest package. | Next readiness/component feature. | Split readiness projection/gate first. |
+| 1 | namespace is the largest package. | Next readiness/component feature. | Split readiness projection/gate first. ✅ **Done (plans/25)** — `pkgs/readiness` (Gates/ProjectionReport), namespace handlers gọi readiness.*. |
 | 2 | loadtest mixes handlers, gates, lifecycle, and reconciler. | K8s runner or quota gate. | Keep policy/lifecycle; move mechanics to runner. |
-| 3 | Some handlers use GORM models directly. | Second query consumer or transaction need. | Move the query into store; avoid speculative interfaces. |
+| 3 | Some handlers use GORM models directly (~55 refs / 15 files, baseline 2026-11-08). | Second query consumer or transaction need. | Move the query into store; avoid speculative interfaces. |
 | 4 | Service/Repo interfaces are not universal. | Unit testing is blocked by DB coupling. | Introduce an interface at that seam only. |
 
 Out of scope for MVP: full hexagonal restructuring, splitting store per aggregate, or shared libraries across the two reconciliation loops.
