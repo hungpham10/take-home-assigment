@@ -186,15 +186,7 @@ func Render(env *Env) []*unstructured.Unstructured {
 			"namespace": envNS,
 			"labels":    baseLabels(env),
 		},
-		"spec": map[string]any{
-			"podSelector": map[string]any{},
-			"policyTypes": []string{"Ingress", "Egress"},
-			// Empty rule object = allow in-namespace traffic only; the
-			// watcher's network_policy evaluator checks the full expected
-			// set + spec_hash.
-			"ingress": []any{map[string]any{}},
-			"egress":  renderEgress(env),
-		},
+		"spec": defaultDenySpec(env),
 	}, "networking.k8s.io", "v1", "NetworkPolicy")
 	annotate(np, HashSpec(env.Policy))
 	objs = append(objs, np)
@@ -251,7 +243,56 @@ func Render(env *Env) []*unstructured.Unstructured {
 	return objs
 }
 
-// renderEgress builds the egress rule list; DNS resolution is always allowed
+// defaultDenyNP là manifest default-deny dùng chung bởi Render (prune) và
+// BuildApplyTree (hierarchical apply) — một nguồn duy nhất.
+func defaultDenyNP(envNS string, env *Env) map[string]any {
+	return map[string]any{
+		"apiVersion": "networking.k8s.io/v1",
+		"kind":       "NetworkPolicy",
+		"metadata": map[string]any{
+			"name":      "default-deny",
+			"namespace": envNS,
+			"labels":    baseLabels(env),
+		},
+		"spec": defaultDenySpec(env),
+	}
+}
+
+// defaultDenySpec: deny in/out, ingress cho phép in-namespace; egress baseline
+// phải mở DNS (kube-system:53) + kube-apiserver (:443) — nếu không, CNPG
+// initdb và mọi pod cần API server đều chết vì i/o timeout (docs open item
+// #2 "NetworkPolicy baseline merge"). Thêm egress allow-list từ dependencies.
+func defaultDenySpec(env *Env) map[string]any {
+	egress := []map[string]any{
+		{
+			// DNS: kube-dns/kube-system UDP+TCP 53
+			"to": []map[string]any{{
+				"namespaceSelector": map[string]any{
+					"matchLabels": map[string]string{"kubernetes.io/metadata.name": "kube-system"},
+				},
+			}},
+			"ports": []map[string]any{
+				{"protocol": "UDP", "port": int64(53)},
+				{"protocol": "TCP", "port": int64(53)},
+			},
+		},
+		{
+			// kube-apiserver (kind/CI service CIDR 10.96.0.1 — operator CR
+			// pods như CNPG initdb cần nói chuyện với API server).
+			"to":    []map[string]any{{"ipBlock": map[string]any{"cidr": "10.96.0.1/32"}}},
+			"ports": []map[string]any{{"protocol": "TCP", "port": int64(443)}},
+		},
+	}
+	egress = append(egress, renderEgress(env)...)
+	return map[string]any{
+		"podSelector": map[string]any{},
+		"policyTypes": []string{"Ingress", "Egress"},
+		"ingress":     []any{map[string]any{}},
+		"egress":      egress,
+	}
+}
+
+// renderEgress builds the egress allow-list; DNS resolution is always allowed
 // so ExternalName-style mock wiring resolves.
 func renderEgress(env *Env) []map[string]any {
 	if env.Policy == nil {

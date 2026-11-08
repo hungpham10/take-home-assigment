@@ -102,21 +102,7 @@ func BuildApplyTree(env *Env) (Applier, error) {
 
 	var children []Applier
 	// 2. NetworkPolicy (default-deny) — ngay sau namespace.
-	np := toUnstructured(map[string]any{
-		"apiVersion": "networking.k8s.io/v1",
-		"kind":       "NetworkPolicy",
-		"metadata": map[string]any{
-			"name":      "default-deny",
-			"namespace": envNS,
-			"labels":    baseLabels(env),
-		},
-		"spec": map[string]any{
-			"podSelector": map[string]any{},
-			"policyTypes": []string{"Ingress", "Egress"},
-			"ingress":     []any{map[string]any{}},
-			"egress":      renderEgress(env),
-		},
-	}, "networking.k8s.io", "v1", "NetworkPolicy")
+	np := toUnstructured(defaultDenyNP(envNS, env), "networking.k8s.io", "v1", "NetworkPolicy")
 	annotate(np, HashSpec(env.Policy))
 	stampObject(np, env)
 	children = append(children, objectApplier{obj: np})

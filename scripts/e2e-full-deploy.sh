@@ -48,6 +48,8 @@ docker run -d --rm --name ltp-full-deploy-pg \
   -p "$PG_PORT:5432" postgres:16-alpine >/dev/null
 PGHOST=127.0.0.1 PGPORT=$PG_PORT PGUSER=ltp PGPASSWORD=ltp PGDATABASE=ltp
 export PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
+# psql wrapper: host không có psql → chạy qua container postgres (portable CI/local)
+psql() { docker exec -i ltp-full-deploy-pg psql -U ltp -d ltp "$@"; }
 for i in $(seq 1 30); do pg_in=$(psql -tAc "SELECT 1" 2>/dev/null || true); [ "$pg_in" = "1" ] && break; sleep 1; done
 [ "$pg_in" = "1" ] || fail "control-plane postgres not ready"
 
@@ -95,7 +97,7 @@ CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key:
   $H -H 'Content-Type: application/json' -d '{
     "name":"full-deploy-env",
     "spec":{
-      "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":8080,"health":{"path":"/","port":8080},
+      "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":8080,"env":{"ECHO_SERVER_PORT":"8080"},"health":{"path":"/","port":8080},
         "config_map":{"app.yaml":"listen: 8080\n"},"service_account":true,
         "hpa":{"min_replicas":1,"max_replicas":3,"cpu_target_percent":80}},
         "openapi":{"content":"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}}],
