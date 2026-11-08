@@ -107,9 +107,9 @@ jobs:
           LIMA_VER=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
           curl -fsSL "https://github.com/lima-vm/lima/releases/download/${LIMA_VER}/lima-${LIMA_VER#v}-Linux-x86_64.tar.gz" -o /tmp/lima.tgz
           sudo tar -C /usr/local -xzf /tmp/lima.tgz
-          # colima — release binary
-          curl -fsSL https://github.com/abiosoft/colima/releases/latest/download/colima-Linux-x86_64.tar.gz -o /tmp/colima.tgz
-          sudo tar -C /usr/local/bin -xzf /tmp/colima.tgz
+          # colima — release binary (plain executable, not a tarball)
+          curl -fsSL https://github.com/abiosoft/colima/releases/latest/download/colima-Linux-x86_64 -o /usr/local/bin/colima
+          sudo chmod +x /usr/local/bin/colima
           # kubectl
           curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o /tmp/kubectl
           sudo install /tmp/kubectl /usr/local/bin/kubectl
