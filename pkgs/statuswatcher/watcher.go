@@ -598,7 +598,9 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 			slog.Warn("statuswatcher: transition rejected", "namespace", ns.ID, "to", next, "err", err)
 			return nil // retry on the next pass; no crash loop
 		}
-		if next == "READY" {
+		if next == store.NamespaceStatusReady {
+			// ready_for_loadtest phải set CÙNG pass với transition READY —
+			// trước đây chỉ update ở pass kế (resync 5m) nên lag tới 5 phút.
 			if err := w.db.WithContext(ctx).Model(&store.Namespace{}).
 				Where("id = ?", ns.ID).Update("ready_for_loadtest", true).Error; err != nil {
 				return err

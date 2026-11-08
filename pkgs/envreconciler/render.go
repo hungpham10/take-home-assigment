@@ -277,10 +277,15 @@ func defaultDenySpec(env *Env) map[string]any {
 			},
 		},
 		{
-			// kube-apiserver (kind/CI service CIDR 10.96.0.1 — operator CR
-			// pods như CNPG initdb cần nói chuyện với API server).
-			"to":    []map[string]any{{"ipBlock": map[string]any{"cidr": "10.96.0.1/32"}}},
-			"ports": []map[string]any{{"protocol": "TCP", "port": int64(443)}},
+			// kube-apiserver: pod→ClusterIP 10.96.0.1 bị kube-proxy DNAT sang
+			// node IP:6443 TRƯỚC khi netpol check — ipBlock trên service IP
+			// KHÔNG match (gotcha kinh điển, verified bằng probe trên kind).
+			// Allow node CIDR kind/colima (172.18.0.0/16), ports 443+6443.
+			"to":    []map[string]any{{"ipBlock": map[string]any{"cidr": "172.18.0.0/16"}}},
+			"ports": []map[string]any{
+				{"protocol": "TCP", "port": int64(443)},
+				{"protocol": "TCP", "port": int64(6443)},
+			},
 		},
 	}
 	egress = append(egress, renderEgress(env)...)
@@ -319,7 +324,7 @@ func cnpgCluster(envNS string, env *Env, db DatabaseSpec) map[string]any {
 		},
 	}
 	if db.Image != "" {
-		spec["imageName"] = db.Image
+		spec["imageName"] = cnpgImage(db.Image)
 	}
 	return map[string]any{
 		"apiVersion": "postgresql.cnpg.io/v1",
@@ -637,5 +642,19 @@ func eckElasticsearch(envNS string, env *Env, db DatabaseSpec) map[string]any {
 			"labels":    baseLabels(env),
 		},
 		"spec": spec,
+	}
+}
+
+// cnpgImage maps vanilla postgres images to the CNPG-built image — CNPG
+// initdb yêu cầu user postgres UID 26 chỉ có trong image chính chủ
+// ("initdb: could not look up effective user ID 26" với vanilla postgres).
+func cnpgImage(image string) string {
+	switch {
+	case strings.Contains(image, "cloudnative-pg"):
+		return image
+	case strings.HasPrefix(image, "postgres:"):
+		return "ghcr.io/cloudnative-pg/postgresql:" + strings.TrimPrefix(image, "postgres:")
+	default:
+		return image
 	}
 }

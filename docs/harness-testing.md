@@ -139,7 +139,7 @@ Shared (non-fault) test infrastructure used by both harness and functional integ
 | K8s/NetworkPolicy/CNI harness | `tests/harness/k8s/` (`//go:build harness_k8s`) | cluster CI / manual / nightly | **Required before GA/K8s production claim**; optional in minimal CI if no cluster |
 | **Nginx integration (`INT-NGX-*`)**, §12.1 | `tests/nginx/` (compose: nginx + controller + postgres + fake OIDC) | CI/nightly | **Yes** (subset); required for PRs touching `conf/nginx` |
 | k6 perf | `tests/perf/` | per `plans/14-local-stack-e2e.md` | **Yes** (merge gate) |
-| E2E smoke | compose/Earthfile stack, `scripts/e2e-smoke.sh` | CI/local | **Yes** |
+| E2E smoke | compose/Earthfile stack, `tests/e2e-smoke.sh` | CI/local | **Yes** |
 
 **Reporting:** harness failures must emit object IDs, tenant scope, state/version, idempotency key (redacted if needed), and transition/event evidence — no secrets.
 
@@ -487,7 +487,7 @@ Giữ ở `tests/harness/k8s/`; ngoài `WATCH-01..06` và `RUN-NET-02`, thêm ca
 | `INT-K8S-05` 🔜 | `TestRun` k6-operator thật | Cần K8s runner (hiện `newRunner()` luôn trả Local); `status.stage` → `fn_loadtest_transition` |
 | `INT-K8S-06` | RBAC ServiceAccount controller | Mọi verb trong bảng RBAC `k8s-orchestration.md` §6 hoạt động; verb ngoài bảng bị từ chối |
 
-### 12.3 E2E smoke (`scripts/e2e-smoke.sh`)
+### 12.3 E2E smoke (`tests/e2e-smoke.sh`)
 Hiện đã PASS: seed → namespace → service → validate → apply → script → loadtest → events.
 
 | ID | Kịch bản | Môi trường |
@@ -533,7 +533,7 @@ go test -race ./... -run 'TestINT_LT_03'
 go test -tags harness_k8s ./tests/harness/k8s/...
 
 # E2E
-docker compose up -d --build && ./scripts/e2e-smoke.sh
+docker compose up -d --build && ./tests/e2e-smoke.sh
 ```
 
 | CI job | Chạy | Ghi chú |
@@ -544,7 +544,7 @@ docker compose up -d --build && ./scripts/e2e-smoke.sh
 | `build` | image | |
 | `watcher-harness` | `harness_k8s` trên kind | |
 | *(đề xuất)* `nginx-integration` | `tests/nginx/` trên compose | PR đụng `conf/nginx` bắt buộc |
-| *(đề xuất)* `e2e` | `scripts/e2e-smoke.sh` | |
+| *(đề xuất)* `e2e` | `tests/e2e-smoke.sh` | |
 | *(đề xuất, nightly)* `perf`, `k6-real` | k6 perf + Local runner với k6 thật | |
 
 ## 14. Khoảng trống đã biết & theo dõi coverage

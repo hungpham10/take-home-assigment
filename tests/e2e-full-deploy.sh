@@ -2,7 +2,7 @@
 # E2E full deploy (plans/26) — vòng đời ĐẦY ĐỦ với database + service demo:
 #   namespace → database (CNPG postgres:16) + echo-server service → validate
 #   → apply (202) → Env Reconciler apply thật → Status Watcher projection
-#   → READY → port-forward curl echo-server trả JSON.
+#   → READY → port-forward curl echo-server trả JSON → DELETE namespace + verify K8s ns gone.
 #
 # Yêu cầu: docker, kind (hoặc KUBECONFIG trỏ sẵn), kubectl, curl, python3.
 # Env: KEEP_CLUSTER=1 giữ lại kind cluster sau khi chạy; SKIP_BOOTSTRAP=1 dùng
@@ -29,6 +29,11 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   say "kind cluster: $CLUSTER"
   kind get clusters | grep -q "^$CLUSTER$" || kind create cluster --name "$CLUSTER" --wait 120s
   kind export kubeconfig --name "$CLUSTER"
+  # Pre-load images vào kind node: CNPG bootstrap không phải pull ghcr/postgres
+  # mỗi lần (5-7m → ~1-2m, ổn định CI).
+  docker pull ealen/echo-server:latest >/dev/null 2>&1 || true
+  docker pull ghcr.io/cloudnative-pg/postgresql:16 >/dev/null 2>&1 || true
+  kind load docker-image ealen/echo-server:latest ghcr.io/cloudnative-pg/postgresql:16 --name "$CLUSTER" 2>/dev/null || true
 fi
 [ -n "${KUBECONFIG:-}" ] || KUBECONFIG="$HOME/.kube/config"
 export KUBECONFIG
@@ -97,7 +102,7 @@ CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key:
   $H -H 'Content-Type: application/json' -d '{
     "name":"full-deploy-env",
     "spec":{
-      "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":8080,"env":{"ECHO_SERVER_PORT":"8080"},"health":{"path":"/","port":8080},
+      "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":80,"health":{"path":"/","port":80},
         "config_map":{"app.yaml":"listen: 8080\n"},"service_account":true,
         "hpa":{"min_replicas":1,"max_replicas":3,"cpu_target_percent":80}},
         "openapi":{"content":"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}}],
@@ -106,6 +111,7 @@ CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key:
   }')
 echo "$CREATE" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['namespace']['id']" >/dev/null 2>&1 || fail "create-with-spec: $CREATE"
 NS=$(echo "$CREATE" | jqget "['namespace']['id']")
+ENVNS="lt-env-$NS"
 echo "   namespace=$NS services=$(echo "$CREATE" | jqget "['services']" | head -c 40) databases=$(echo "$CREATE" | jqget "['databases']" | head -c 40)"
 
 say "validate + apply (separate endpoints)"
@@ -116,12 +122,13 @@ APPLY=$(curl -s -o /tmp/fd-apply.json -w "%{http_code}" -X POST "$BASE/api/loadt
 echo "   apply → 202 $(cat /tmp/fd-apply.json)"
 
 # --- 4. đợi READY qua projection ----------------------------------------------
-say "poll readiness (deadline 5m — CNPG pull postgres:16 lần đầu)"
+say "poll readiness (deadline 12m — CNPG bootstrap, images pre-loaded)"
 READY=false
-for i in $(seq 1 150); do
-  STATUS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H | jqget "['status']" 2>/dev/null || echo "?")
-  READYF=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H | jqget "['ready']" 2>/dev/null || echo false)
-  if [ "$STATUS" = "READY" ] && [ "$READYF" = "true" ]; then READY=true; break; fi
+for i in $(seq 1 360); do
+  READINESS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H 2>/dev/null || echo '{}')
+  STATUS=$(printf '%s' "$READINESS" | jqget "['status']" 2>/dev/null || echo "?")
+  READYF=$(printf '%s' "$READINESS" | jqget "['ready']" 2>/dev/null || echo "false")
+  if [ "$STATUS" = "READY" ] && { [ "$READYF" = "true" ] || [ "$READYF" = "True" ]; }; then READY=true; break; fi
   sleep 2
 done
 if [ "$READY" != "true" ]; then
@@ -162,12 +169,16 @@ ECHO_AVAIL=$(kubectl -n "$ENVNS" get deploy echo -o jsonpath='{.status.condition
 
 # --- 6. echo phục vụ thật qua port-forward --------------------------------------
 say "curl echo-server qua port-forward"
-kubectl -n "$ENVNS" port-forward svc/echo 18082:8080 >/dev/null 2>&1 &
+kubectl -n "$ENVNS" port-forward svc/echo 18082:80 >/tmp/ltp-full-deploy-pf.log 2>&1 &
 PF_PID=$!
-sleep 3
-ECHO_BODY=$(curl -s --max-time 5 http://localhost:18082/)
-kill $PF_PID 2>/dev/null
-[ -n "$ECHO_BODY" ] || fail "echo-server did not respond"
+ECHO_BODY=""
+for i in $(seq 1 20); do
+  ECHO_BODY=$(curl -s --max-time 5 http://localhost:18082/ 2>/dev/null || true)
+  [ -n "$ECHO_BODY" ] && break
+  sleep 1
+done
+kill $PF_PID 2>/dev/null || true
+[ -n "$ECHO_BODY" ] || { echo "--- port-forward log ---"; tail -20 /tmp/ltp-full-deploy-pf.log >&2 || true; fail "echo-server did not respond"; }
 echo "   echo response: $(echo "$ECHO_BODY" | head -c 120)"
 
 # --- 7. projection dump ----------------------------------------------------------
@@ -175,6 +186,21 @@ say "projection"
 psql -c "SELECT component_type, component_id, phase, desired_generation, observed_generation
          FROM tbl_component_status WHERE namespace_id = '$NS' ORDER BY component_type"
 psql -tAc "SELECT status || ' ready=' || ready_for_loadtest FROM tbl_namespaces WHERE id = '$NS'"
+
+say "delete namespace (cleanup sau khi sài xong)"
+DELCODE=$(curl -s -o /tmp/fd-del.json -w "%{http_code}" -X DELETE "$BASE/api/loadtest/v1/namespaces/$NS" $H)
+[ "$DELCODE" = "202" ] || fail "delete namespace: $DELCODE $(cat /tmp/fd-del.json 2>/dev/null || true)"
+DELSTATUS=$(jqget "['status']" < /tmp/fd-del.json 2>/dev/null || echo "?")
+[ "$DELSTATUS" = "DELETING" ] || fail "delete status = $DELSTATUS (want DELETING)"
+# Env Reconciler (K8S_ENABLED) xoá K8s namespace khi status DELETING.
+say "wait for env namespace to be removed from cluster"
+NS_GONE=false
+for i in $(seq 1 90); do
+  if ! kubectl get ns "$ENVNS" >/dev/null 2>&1; then NS_GONE=true; break; fi
+  sleep 2
+done
+[ "$NS_GONE" = "true" ] || { kubectl get ns "$ENVNS" -o yaml 2>&1 | head -40 || true; fail "env namespace $ENVNS still present after delete"; }
+echo "   env namespace $ENVNS deleted ✅"
 
 echo "FULL-DEPLOY E2E PASS (namespace=$NS)"
 if [ "${KEEP_CLUSTER:-0}" != "1" ] && [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then

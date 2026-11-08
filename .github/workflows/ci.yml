@@ -106,7 +106,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.15.2
         with:
           cluster_name: ltp-harness
           kubectl_version: v1.31.0
@@ -147,13 +147,13 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Create kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.15.2
         with:
           cluster_name: ltp-full-deploy
       - name: Run full deploy E2E
         env:
           SKIP_BOOTSTRAP: "0"
-        run: ./scripts/e2e-full-deploy.sh
+        run: ./tests/e2e-full-deploy.sh
       - name: Dump cluster state on failure
         if: failure()
         run: |
