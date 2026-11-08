@@ -26,14 +26,21 @@ Run against a real cluster — colima locally, kind in CI (job `watcher-harness`
 # local (colima)
 colima start --kubernetes
 export TEST_DATABASE_DSN=postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
-export K8S_API_URL=https://$(colima kubernetes config | grep server | cut -d" " -f6)  # hoặc từ ~/.colima/k8s/kubeconfig
+export KUBECONFIG=~/.colima/_lima/colima/sshconfig  # hoặc: colima kubernetes config > kubeconfig
 go test -tags harness_k8s -v ./tests/harness/watcher/...
 ```
 
 `TestWATCH00Setup` seeds tenant/namespace/service rows vào Postgres và apply
 deployment thật lên cluster qua `pkgs/envreconciler`; các case WATCH-01..06
-chạy trên đó. Fake-client counterparts (không cần cluster) nằm ở
-`pkgs/statuswatcher/` và chạy trong job `test`.
+chạy trên đó. Client build từ `KUBECONFIG` (TLS certs — bắt buộc cho
+colima/kind vì cert self-signed) hoặc bare `K8S_API_URL` fallback.
+Fake-client counterparts (không cần cluster) nằm ở `pkgs/statuswatcher/`
+và chạy trong job `test`.
+
+CI: job `integration-colima` trong `.github/workflows/ci.yml` cài colima qua
+Homebrew trên ubuntu runner (qemu, không KVM — start 3-6 phút, retry x2) và
+chạy cùng harness. Nếu colima flaky trên runner, đổi sang kind chỉ cần 1
+step: `uses: helm/kind-action@v1` + export KUBECONFIG của kind.
 
 ## Rules
 - Harness tests prove **safety under failure**, not happy paths.

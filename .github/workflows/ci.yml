@@ -70,13 +70,14 @@ jobs:
             go build -o bin/mock-service ./cmds/mock-service
           fi
 
-  # Plans/22: WATCH-01..06 harness trên kind cluster (colima chạy local cùng
-  # cách — docs/namespace-status-watcher.md §9). Fake-client counterparts chạy
-  # trong job `test`; job này verify watcher trên cluster thật.
-  watcher-harness:
-    name: Status Watcher Harness (kind)
+  # Plans/22 + plans/23: integration harness trên colima (cùng tooling chạy
+  # local — docs/namespace-status-watcher.md §9). Ubuntu runner không có KVM
+  # nên Lima chạy qemu (start ~3-6 phút, timeout generous). Fake-client
+  # counterparts chạy trong job `test`.
+  integration-colima:
+    name: Integration Tests (colima k8s)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -97,20 +98,50 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Install colima + kubectl (Homebrew on runner)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 2
+          command: |
+            brew install colima kubectl
+            colima version
+
+      - name: Start colima with kubernetes
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: 2
+          command: colima start --kubernetes --cpu 2 --memory 6
+
+      - name: Verify cluster + export K8S_API_URL
+        id: cluster
+        run: |
+          kubectl get nodes
+          SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+          echo "server=$SERVER" >> "$GITHUB_OUTPUT"
+          echo "API server: $SERVER"
+
       - name: Apply migrations
         run: |
           set -e
           for f in $(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort); do
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
-      - name: Create kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: ltp-harness
-      - name: Run WATCH-01..06 harness
+
+      - name: Run WATCH-01..06 integration harness
+        env:
+          K8S_API_URL: ${{ steps.cluster.outputs.server }}
         run: |
-          go test -tags harness_k8s -v -timeout 15m \
+          go test -tags harness_k8s -v -timeout 20m \
             ./tests/harness/watcher/... ./tests/harness/k8s/...
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods -A || true
+          colima kubernetes logs 2>/dev/null | tail -50 || true
 
   # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
   # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ

@@ -38,9 +38,18 @@ var (
 // TestWATCH00Setup runs FIRST (Go executes tests in file order): it applies
 // a minimal environment (namespace + service deployment) to the real cluster
 // via the Env Reconciler so the WATCH-01..06 cases observe genuine objects.
+// harnessClient builds a cluster client: KUBECONFIG (colima/kind carry TLS
+// certs there) takes precedence, bare K8S_API_URL as fallback.
+func harnessClient() (k8s.Client, error) {
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		return k8s.NewClientFromKubeconfig(kc)
+	}
+	return k8s.NewDynamicClient(os.Getenv("K8S_API_URL"), k8s.FieldManager)
+}
+
 func TestWATCH00Setup(t *testing.T) {
 	db := harnessDB(t)
-	client, err := k8s.NewDynamicClient(os.Getenv("K8S_API_URL"), k8s.FieldManager)
+	client, err := harnessClient()
 	if err != nil {
 		t.Skipf("no cluster: %v", err)
 	}
@@ -67,7 +76,7 @@ func newHarness(t *testing.T) *harnessEnv {
 	if sharedDB == nil || sharedNSID == "" {
 		t.Skip("harness not set up (TestWATCH00Setup must run first)")
 	}
-	client, err := k8s.NewDynamicClient(os.Getenv("K8S_API_URL"), k8s.FieldManager)
+	client, err := harnessClient()
 	if err != nil {
 		t.Skipf("no cluster: %v", err)
 	}

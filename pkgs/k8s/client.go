@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // ErrNotFound is returned by Get/Delete when the object does not exist. The
@@ -86,6 +87,26 @@ type DynamicClient struct {
 // at the call site).
 func NewDynamicClient(serverURL string, _ string) (*DynamicClient, error) {
 	cfg := &rest.Config{Host: serverURL}
+	return newDynamicForConfig(cfg)
+}
+
+// NewClientFromKubeconfig builds the client from a kubeconfig file (colima /
+// kind clusters carry TLS certs there — a bare URL would fail the self-signed
+// handshake). Falls back to the default loading rules when path is "".
+func NewClientFromKubeconfig(path string) (*DynamicClient, error) {
+	loadingRules := &clientcmd.ClientConfigLoadingRules{}
+	if path != "" {
+		loadingRules.ExplicitPath = path
+	}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("k8s: kubeconfig: %w", err)
+	}
+	return newDynamicForConfig(cfg)
+}
+
+func newDynamicForConfig(cfg *rest.Config) (*DynamicClient, error) {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("k8s: dynamic client: %w", err)
