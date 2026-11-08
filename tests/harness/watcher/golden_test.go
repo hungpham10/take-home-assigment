@@ -59,8 +59,9 @@ func TestWATCH07GoldenPath(t *testing.T) {
 		t.Fatalf("create ns failed: %v", ns)
 	}
 
+	// Legacy shape: "spec" is the raw OpenAPI document (JSON string payload).
 	svc := call("POST", "/api/loadtest/v1/namespaces/"+nsID+"/services", principal, map[string]any{
-		"name": "golden-svc", "spec": map[string]any{"openapi": map[string]any{"content": goldenSpec}},
+		"name": "golden-svc", "spec": json.RawMessage(goldenSpec),
 	})
 	if svc["id"] == nil && svc["service_id"] == nil {
 		t.Fatalf("create service failed: %v", svc)
