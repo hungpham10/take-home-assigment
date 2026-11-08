@@ -57,7 +57,7 @@ say "build + start controller (K8S_ENABLED=true)"
 SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 go build -o bin/loadtest-controller ./cmds/loadtest-controller
 DATABASE_DSN="postgres://ltp:ltp@127.0.0.1:$PG_PORT/ltp?sslmode=disable" \
-SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=${BASE#http://localhost} K8S_ENABLED=true K8S_API_URL="$SERVER" \
+SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=${BASE#http://localhost} K8S_ENABLED=true K8S_API_URL="$SERVER" KUBECONFIG="$HOME/.kube/config" \
   ./bin/loadtest-controller > /tmp/ltp-full-deploy-controller.log 2>&1 &
 CTRL_PID=$!
 trap 'kill $CTRL_PID 2>/dev/null; docker rm -f ltp-full-deploy-pg >/dev/null 2>&1' EXIT

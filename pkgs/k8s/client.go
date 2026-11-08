@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -420,4 +421,20 @@ func parseFakeKey(key string) schema.GroupVersionKind {
 	version, kind, _ := strings.Cut(rest1, ", ")
 	kind = strings.TrimSpace(strings.TrimPrefix(kind, "Kind="))
 	return schema.GroupVersionKind{Group: group, Version: version, Kind: kind}
+}
+
+// NewClientFromEnv builds a Client from the runtime environment, in order:
+// 1) KUBECONFIG file (controller outside the cluster, e.g. kind/colima local
+// run) — carries the TLS certs a bare URL lacks; 2) in-cluster ServiceAccount
+// config when running as a pod; 3) bare K8S_API_URL (plain http test setups).
+func NewClientFromEnv(apiURL string) (Client, error) {
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		if c, err := NewClientFromKubeconfig(kc); err == nil {
+			return c, nil
+		}
+	}
+	if cfg, err := rest.InClusterConfig(); err == nil {
+		return newDynamicForConfig(cfg)
+	}
+	return NewDynamicClient(apiURL, FieldManager)
 }
