@@ -3,6 +3,7 @@ package envreconciler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -186,8 +187,9 @@ func (r *Reconciler) Start(ctx context.Context, load EnvLoader) {
 	for {
 		if err := r.Tick(ctx, load); err != nil {
 			// Log-and-continue: level-triggered convergence means the next
-			// tick retries. A dead reconciler cannot damage the cluster.
-			_ = err
+			// tick retries. Không nuốt lỗi — apply lỗi phải thấy được trong
+			// log (bắt được bug tree apply dừng giữa chừng trên kind).
+			slog.Warn("envreconciler: tick", "err", err)
 		}
 		select {
 		case <-ctx.Done():
