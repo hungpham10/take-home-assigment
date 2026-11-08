@@ -69,19 +69,28 @@ func Replay(endpoint string, db *gorm.DB, next http.HandlerFunc) http.HandlerFun
 			return
 		}
 
+		// Reserve the key BEFORE running the handler: a concurrent duplicate
+		// (same key, arrives while the first request is still processing)
+		// must get 409 in-flight instead of executing twice (API-IDEM-02 —
+		// trước đây row chỉ được lưu SAU handler nên cả hai request đều chạy).
+		reserved := store.IdempotencyKey{
+			TenantID: p.TenantID, Endpoint: endpoint, Key: key, RequestHash: reqHash,
+		}
+		if err := db.WithContext(ctx).Create(&reserved).Error; err != nil {
+			// Lost the reserve race → treat as in-flight duplicate (fail
+			// closed: safer to reject than double-execute).
+			httpx.WriteCodeError(w, "INVALID_TRANSITION", "request with this Idempotency-Key is in progress")
+			return
+		}
+
 		rec := &captureWriter{ResponseWriter: w}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next(rec, r)
 
 		if rec.status >= 200 && rec.status < 500 {
-			_ = db.WithContext(ctx).Create(&store.IdempotencyKey{
-				TenantID:       p.TenantID,
-				Endpoint:       endpoint,
-				Key:            key,
-				RequestHash:    reqHash,
-				ResponseStatus: &rec.status,
-				ResponseBody:   store.StrPtr(rec.bodyString()),
-			}).Error
+			updates := map[string]any{"response_status": rec.status, "response_body": rec.bodyString()}
+			_ = db.WithContext(ctx).Model(&store.IdempotencyKey{}).
+				Where("id = ?", reserved.ID).Updates(updates).Error
 		}
 	}
 }

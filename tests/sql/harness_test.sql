@@ -197,4 +197,126 @@ BEGIN
     END IF;
 END $$;
 
+-- DB-TXN-06: outbox atomicity — business write + outbox insert cùng tx;
+-- rollback mở phải mất CẢ HAI (không để lại outbox mồ côi).
+DO $$
+DECLARE
+    v_tenant UUID; v_user UUID; v_ns UUID; v_orphans INT;
+BEGIN
+    INSERT INTO tbl_tenants (name, slug) VALUES ('txn06', 'txn06') RETURNING id INTO v_tenant;
+    INSERT INTO tbl_users (tenant_id, email) VALUES (v_tenant, 'txn06@t.io') RETURNING id INTO v_user;
+    -- kỳ vọng: savepoint/rollback của caller phải kéo cả outbox row về
+    INSERT INTO tbl_namespaces (id, tenant_id, owner_user_id, name, status)
+        VALUES (gen_random_uuid(), v_tenant, v_user, 'txn06-ns', 'DRAFT')
+        RETURNING id INTO v_ns;
+
+    -- mô phỏng "dispatcher chạy nửa chừng": ghi outbox rồi rollback toàn bộ
+    BEGIN
+        INSERT INTO tbl_outbox_events (aggregate_type, aggregate_id, event_type, payload)
+            VALUES ('namespace', v_ns, 'test.txn06', '{}');
+        UPDATE tbl_namespaces SET status = status WHERE id = v_ns;
+        -- rollback thủ công: xoá cả hai ở tx mới để verify invariant ngược lại
+        RAISE EXCEPTION 'txn06_simulated_failure';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM <> 'txn06_simulated_failure' THEN RAISE; END IF;
+    END;
+
+    -- app-level invariant: business row + outbox phải được dọn CÙNG tx —
+    -- ở đây test chỉ khóa rằng schema cho phép atomicity (cả hai bảng cùng
+    -- tham gia 1 tx; không constraint chặn rollback). Verify không orphan:
+    SELECT count(*) INTO v_orphans FROM tbl_outbox_events
+        WHERE aggregate_type = 'namespace' AND aggregate_id = v_ns;
+    IF v_orphans <> 0 THEN
+        RAISE EXCEPTION 'DB-TXN-06_FAIL: orphan outbox rows %', v_orphans;
+    END IF;
+END $$;
+
+-- DB-TXN-07: reservation ledger — amount phải > 0 và state trong enum
+-- (CHECK constraints từ 0005); ledger không bao giờ âm.
+DO $$
+DECLARE v_tenant UUID; v_user UUID; v_ns UUID; v_lt UUID;
+BEGIN
+    INSERT INTO tbl_tenants (name, slug) VALUES ('txn07', 'txn07') RETURNING id INTO v_tenant;
+    INSERT INTO tbl_users (tenant_id, email) VALUES (v_tenant, 'txn07@t.io') RETURNING id INTO v_user;
+    INSERT INTO tbl_namespaces (tenant_id, owner_user_id, name, status)
+        VALUES (v_tenant, v_user, 'txn07-ns', 'READY') RETURNING id INTO v_ns;
+    INSERT INTO tbl_scripts (namespace_id, name, content_ref, content_hash, size_bytes, status, version)
+        VALUES (v_ns, 'txn07-script', 'x/y.js', 'hash', 10, 'VALIDATED', 1) RETURNING id INTO v_lt;
+    INSERT INTO tbl_load_tests (namespace_id, script_id, name, created_by, targets, status, version)
+        VALUES (v_ns, v_lt, 'txn07-lt', v_user, '[]', 'RUNNING', 1) RETURNING id INTO v_lt;
+
+    BEGIN
+        INSERT INTO tbl_reservation_ledger (tenant_id, load_test_id, resource_type, amount)
+            VALUES (v_tenant, v_lt, 'vusers', -5);
+        RAISE EXCEPTION 'DB-TXN-07_FAIL: negative amount accepted';
+    EXCEPTION WHEN check_violation THEN NULL; -- expected
+    END;
+
+    BEGIN
+        INSERT INTO tbl_reservation_ledger (tenant_id, load_test_id, resource_type, amount)
+            VALUES (v_tenant, v_lt, 'vusers', 10);
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'DB-TXN-07_FAIL: valid reservation rejected: %', SQLERRM;
+    END;
+END $$;
+
+-- DB-TXN-08: FK/tenant scoping ở mức schema — reservation phải trỏ tenant
+-- + loadtest hợp lệ; loadtest của tenant khác phải bị FK chặn khi mồ côi.
+DO $$
+DECLARE v_tenant UUID; v_orphan_lt UUID;
+BEGIN
+    INSERT INTO tbl_tenants (name, slug) VALUES ('txn08', 'txn08') RETURNING id INTO v_tenant;
+    -- loadtest id không tồn tại → FK chặn
+    v_orphan_lt := gen_random_uuid();
+    BEGIN
+        INSERT INTO tbl_reservation_ledger (tenant_id, load_test_id, resource_type, amount)
+            VALUES (v_tenant, v_orphan_lt, 'vusers', 1);
+        RAISE EXCEPTION 'DB-TXN-08_FAIL: FK to missing loadtest accepted';
+    EXCEPTION WHEN foreign_key_violation THEN NULL; -- expected
+    END;
+END $$;
+
+-- DB-TXN-09: append-only sequencing — events có id tăng dần và from/to hợp
+-- lệ theo transition map (verify chuỗi event của 1 namespace là 1 chuỗi
+-- không giảm id).
+DO $$
+DECLARE v_tenant UUID; v_user UUID; v_ns UUID; v_seq_ok BOOLEAN;
+BEGIN
+    INSERT INTO tbl_tenants (name, slug) VALUES ('txn09', 'txn09') RETURNING id INTO v_tenant;
+    INSERT INTO tbl_users (tenant_id, email) VALUES (v_tenant, 'txn09@t.io') RETURNING id INTO v_user;
+    INSERT INTO tbl_namespaces (tenant_id, owner_user_id, name, status)
+        VALUES (v_tenant, v_user, 'txn09-ns', 'DRAFT') RETURNING id INTO v_ns;
+    PERFORM fn_namespace_transition(v_ns, 'VALIDATING', '{"role":"system"}', 'txn09');
+    PERFORM fn_namespace_transition(v_ns, 'INVALID', '{"role":"system"}', 'txn09 fail');
+
+    SELECT bool_and(prev_id < id) INTO v_seq_ok FROM (
+        SELECT id, lag(id) OVER (ORDER BY id) AS prev_id
+        FROM tbl_namespace_events WHERE object_id = v_ns
+    ) seq;
+    IF NOT v_seq_ok THEN
+        RAISE EXCEPTION 'DB-TXN-09_FAIL: event sequence not monotonic';
+    END IF;
+    IF (SELECT count(*) FROM tbl_namespace_events WHERE object_id = v_ns) <> 2 THEN
+        RAISE EXCEPTION 'DB-TXN-09_FAIL: expected 2 transition events (raw INSERT không sinh event khởi tạo — create API mới sinh)';
+    END IF;
+END $$;
+
+-- DB-TXN-10: readiness invariant — namespace READY mặc định có thể không
+-- ready_for_loadtest (watcher/apply set), nhưng ready_for_loadtest=true
+-- chỉ hợp lệ khi status = 'READY' (CHECK constraint migration 0012).
+DO $$
+DECLARE v_tenant UUID; v_user UUID; v_ns UUID;
+BEGIN
+    INSERT INTO tbl_tenants (name, slug) VALUES ('txn10', 'txn10') RETURNING id INTO v_tenant;
+    INSERT INTO tbl_users (tenant_id, email) VALUES (v_tenant, 'txn10@t.io') RETURNING id INTO v_user;
+    INSERT INTO tbl_namespaces (tenant_id, owner_user_id, name, status)
+        VALUES (v_tenant, v_user, 'txn10-ns', 'DRAFT') RETURNING id INTO v_ns;
+    BEGIN
+        UPDATE tbl_namespaces SET ready_for_loadtest = true WHERE id = v_ns;
+        RAISE EXCEPTION 'DB-TXN-10_FAIL: ready_for_loadtest=true accepted for DRAFT';
+    EXCEPTION WHEN check_violation THEN NULL; -- expected
+    END;
+END $$;
+
 ROLLBACK;

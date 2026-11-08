@@ -2,7 +2,7 @@
 
 This document defines the **observed → Postgres** loop: who computes readiness, where the data comes from, and where it is written. It is the inverse of [`k8s-orchestration.md`](k8s-orchestration.md) (desired → K8s) and the **data source** for the readiness payload in [`namespace-management-api.md`](namespace-management-api.md) §3 (`GET /readiness` is projection-backed, not computed on the fly).
 
-**Scope:** design locked (plans/20); **implemented in plans/21** — migration 0011 (`tbl_component_status` + namespace columns + seed transition delta), `pkgs/statuswatcher` (evaluators, projection, aggregator, hysteresis, STATUS_STALE gate), WATCH-01..06 harness cases pending PR E. Readiness `GET /readiness` reads the projection when the cluster path is enabled; legacy mode keeps the on-the-fly computation.
+**Scope:** design locked (plans/20); **implemented in plans/21/22** — migration 0011 (`tbl_component_status` + namespace columns + seed transition delta), `pkgs/statuswatcher` (evaluators, projection, aggregator, hysteresis, STATUS_STALE gate), Watch→workqueue event source, apply_deadline, DEGRADED-with-running-run. **WATCH-01..06 harness cases: implemented** — fake-client cases chạy trong CI job `test`, real-cluster cases trên kind trong job `integration-k8s` (`tests/harness/watcher/`, plans/22). 🔜 còn lại: informer-cache sharing đa replica / leader-sharding, restore Job (INT-LOOP-02/03).
 
 ## 1. Two separated loops
 

@@ -59,7 +59,7 @@ func itoa(n int64) string {
 	return string(b[i:])
 }
 
-func TestScriptUploadAndValidationLifecycle(t *testing.T) {
+func TestINT_SCR_01_02_08_UploadAndValidationLifecycle(t *testing.T) {
 	h, db, dir := testServer(t)
 	principal := nsFixture(t, db)
 	nsID := principal["X-Ns-Id"]
@@ -120,7 +120,7 @@ func TestScriptUploadAndValidationLifecycle(t *testing.T) {
 	}
 }
 
-func TestScriptPathTraversalBlocked(t *testing.T) {
+func TestINT_SCR_07_PathTraversalBlocked(t *testing.T) {
 	_, _, dir := testServer(t)
 	if _, err := script.ReadStaged(dir, "../../etc/passwd"); err == nil {
 		t.Error("path traversal must be rejected")
