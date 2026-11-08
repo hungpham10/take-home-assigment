@@ -131,10 +131,18 @@ if [ "$READY" != "true" ]; then
   for p in $(kubectl get pods -n "$ENVNS" -o name | grep initdb | head -2); do
     kubectl -n "$ENVNS" logs "$p" 2>&1 | tail -15
   done
-  echo "--- echo deploy describe ---"
-  kubectl -n "$ENVNS" describe deploy echo 2>&1 | tail -15
+  echo "--- all objects in env ns ---"
+  kubectl -n "$ENVNS" get all,cm,secret,sa,hpa 2>&1 | head -20 || true
+  echo "--- echo pod logs/describe ---"
+  for p in $(kubectl -n "$ENVNS" get pods -o name 2>/dev/null | grep echo | head -1); do
+    kubectl -n "$ENVNS" logs "$p" --all-containers 2>&1 | tail -10
+    kubectl -n "$ENVNS" describe "$p" 2>&1 | tail -20
+  done
+  echo "--- events ---"
+  kubectl -n "$ENVNS" get events --sort-by=.lastTimestamp 2>&1 | tail -15
   echo "--- controller log (apply-now/loop warnings) ---"
-  tail -40 /tmp/ltp-full-deploy-controller.log >&2 || true
+  grep -E "apply-now|WARN|tree apply" /tmp/ltp-full-deploy-controller.log | tail -15 >&2 || true
+  tail -20 /tmp/ltp-full-deploy-controller.log >&2 || true
   fail "namespace did not reach READY"
 fi
 echo "   namespace READY ✅"
