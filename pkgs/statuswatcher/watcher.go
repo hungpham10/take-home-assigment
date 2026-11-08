@@ -19,6 +19,7 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/mockcontrol"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -462,7 +463,19 @@ func (w *Watcher) persistProjection(ctx context.Context, ns *store.Namespace, ro
 				}
 				continue
 			}
-			if err := tx.Create(&row).Error; err != nil {
+			// Upsert: concurrent reconciles (4 workers + resync tick) of the
+			// same namespace race the First/Create window — ON CONFLICT
+			// resolves it instead of a duplicate-key error loop (caught on
+			// kind in CI; workers rarely overlapped against the fake).
+			if err := tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{
+					{Name: "namespace_id"}, {Name: "component_type"}, {Name: "component_id"},
+				},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"required", "desired_generation", "observed_generation", "phase",
+					"reason", "message", "observed_at",
+				}),
+			}).Create(&row).Error; err != nil {
 				return err
 			}
 		}
