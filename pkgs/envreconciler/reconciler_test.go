@@ -37,7 +37,7 @@ func testEnv() *envreconciler.Env {
 	}
 }
 
-func TestRenderOrderAndLabels(t *testing.T) {
+func TestINT_ENV_01_RenderOrderAndLabels(t *testing.T) {
 	objs := envreconciler.Render(testEnv())
 	if len(objs) == 0 {
 		t.Fatal("no objects rendered")
@@ -78,7 +78,7 @@ func TestRenderOrderAndLabels(t *testing.T) {
 	}
 }
 
-func TestRenderServiceShape(t *testing.T) {
+func TestINT_ENV_02_RenderServiceShape(t *testing.T) {
 	objs := envreconciler.Render(testEnv())
 	var dep *unstructured.Unstructured
 	for _, o := range objs {
@@ -112,7 +112,7 @@ func TestRenderServiceShape(t *testing.T) {
 	}
 }
 
-func TestRenderNetworkPolicyDefaultDeny(t *testing.T) {
+func TestINT_ENV_03_RenderNetworkPolicyDefaultDeny(t *testing.T) {
 	objs := envreconciler.Render(testEnv())
 	np := objs[1]
 	podSel, _, _ := unstructured.NestedMap(np.Object, "spec", "podSelector")
@@ -128,7 +128,7 @@ func TestRenderNetworkPolicyDefaultDeny(t *testing.T) {
 	}
 }
 
-func TestReconcilerAppliesAndPrunes(t *testing.T) {
+func TestINT_ENV_04_AppliesAndPrunes(t *testing.T) {
 	c := k8s.NewFake()
 	rc := envreconciler.New(c, envreconciler.Options{})
 	ctx := context.Background()
@@ -172,7 +172,7 @@ func TestReconcilerAppliesAndPrunes(t *testing.T) {
 	}
 }
 
-func TestReconcilerDeleteEnv(t *testing.T) {
+func TestINT_ENV_05_DeleteEnv(t *testing.T) {
 	c := k8s.NewFake()
 	rc := envreconciler.New(c, envreconciler.Options{})
 	ctx := context.Background()
@@ -193,7 +193,7 @@ func TestReconcilerDeleteEnv(t *testing.T) {
 	}
 }
 
-func TestReconcilerFaultPropagates(t *testing.T) {
+func TestINT_ENV_06_FaultPropagates(t *testing.T) {
 	c := k8s.NewFake()
 	c.Faults.ApplyErr = errors.New("api server down")
 	rc := envreconciler.New(c, envreconciler.Options{})
@@ -202,7 +202,7 @@ func TestReconcilerFaultPropagates(t *testing.T) {
 	}
 }
 
-func TestReconcilerTickDelegates(t *testing.T) {
+func TestINT_ENV_07_TickDelegates(t *testing.T) {
 	c := k8s.NewFake()
 	rc := envreconciler.New(c, envreconciler.Options{Interval: 10 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())

@@ -375,27 +375,130 @@ Status sources: today the `LocalRunner` is reconciled by polling (2s). With the 
 | `mock-service` (separate) | Serve mocks; no PG writes, no user RBAC, no public ingress. |
 | Telemetry adapter | Authz-scoped logs/metrics/events; redact secrets. |
 
-## 5. Core flows
 
-### 5.1 Define Environment
+## 5. Codebase Framework & Layering
+
+To ensure maintainability and testability, all packages in  follow a strict 3-layer architecture. This separation ensures that business logic is decoupled from transport (HTTP) and storage (SQL).
+
+### 5.1 Layer Responsibilities (target shape)
+
+| Layer | Responsibility | Dependencies | Key Constraints |
+| :--- | :--- | :--- | :--- |
+| **API / Handler** | HTTP transport, request parsing, basic schema validation, response formatting. | $ightarrow$ Service | No business logic; No direct DB access. |
+| **Service** | Core business logic, OpenAPI validation, dependency graph resolution, state transition orchestration. | $ightarrow$ Repo | No HTTP knowledge; No raw SQL. |
+| **Repo / Store** | Data persistence, complex SQL queries, transaction management. | $ightarrow$ Database | No business logic; Returns domain models. |
+
+### 5.2 Current Codebase Organization (2026-11-08)
+
+The codebase is organized by domain boundary, not strictly by the API → service → repo layering above. The layering is a target shape, applied incrementally when a concrete trigger fires.
+
+#### 5.2.1 Blocks at a glance
+
+    cmds/                      Entry points (composition roots only)
+    ├── loadtest-controller/   Control plane: router, middleware, loop wiring
+    └── mock-service/          Data plane: serves mock snapshots
+    
+    pkgs/
+    ├── A. API domains         namespace · serviceopenapi · script · loadtest · adminapi
+    ├── B. Reconcile loops     envreconciler (desired → K8s) · statuswatcher (observed → PG)
+    ├── C. Runtime adapters    k8s · runner
+    ├── D. Mock                mockcontrol (controller side) · mockruntime (mock-service side)
+    ├── E. Cross-cutting       authz · secrets · idempotency
+    ├── F. Persistence         store
+    └── G. Test support        testutil
+    
+    tests/                     harness/ · sql/ · nginx/ · perf/ · fixtures/
+
+#### 5.2.2 Block responsibilities
+
+| Block | Responsibility | Must not |
+|---|---|---|
+| Entry points | Wire components and read config/env. | Contain business rules or SQL. |
+| API domains | HTTP handlers and domain rules. | Import each other's internals; loadtest must not recompute namespace state. |
+| Reconcile loops | Desired→K8s and observed→PG loops. | Be merged; shared code is pure helpers only. |
+| Runtime adapters | Narrow interfaces to external systems. | Leak client-go types into domains. |
+| Mock | mockcontrol publishes bindings/ledger; mockruntime serves in-memory snapshots. | mockruntime must not write DB or make authz decisions. |
+| Cross-cutting | Identity/RBAC, secret handling, and idempotency replay. | Be re-implemented per handler. |
+| Persistence | Models, migrations, transactions, and the only raw-SQL transition point. | Contain business rules or duplicate transitions. |
+| Test support | Real composition for integration and harness tests. | Rebuild router, middleware, or auth. |
+
+### 5.3 Dependency rules
+
+    cmds → A, B, D(controller side), E, F
+    A    → E, F, C(runner only), serviceopenapi
+    B    → C(k8s), F
+    D    → C(k8s), F
+    E    → F (authz role lookup only)
+    F    → (no domain imports)
+
+Status changes happen only through store transitions. The Reconciler never writes readiness; the Watcher never writes K8s. Before cross-package refactors, update docs/plans, re-index CodeGraph, and inspect call chains for bypasses.
+
+### 5.4 Known deviations and staged refactors (MVP-scoped)
+
+| Stage | Deviation | Trigger | Action |
+|---|---|---|---|
+| 1 | namespace is the largest package. | Next readiness/component feature. | Split readiness projection/gate first. |
+| 2 | loadtest mixes handlers, gates, lifecycle, and reconciler. | K8s runner or quota gate. | Keep policy/lifecycle; move mechanics to runner. |
+| 3 | Some handlers use GORM models directly. | Second query consumer or transaction need. | Move the query into store; avoid speculative interfaces. |
+| 4 | Service/Repo interfaces are not universal. | Unit testing is blocked by DB coupling. | Introduce an interface at that seam only. |
+
+Out of scope for MVP: full hexagonal restructuring, splitting store per aggregate, or shared libraries across the two reconciliation loops.
+
+
+
+### 5.2.1 Blocks at a glance
+
+Codebase hiện có boundary theo domain tương đối rõ, nhưng chưa hoàn toàn theo mô hình `API → service/use-case → store` ở mục 4.1. Đây là baseline cho các lần review và refactor tiếp theo:
+
+| Khu vực | Hiện trạng | Nhận xét / rủi ro |
+|---|---|---|
+| `cmds/loadtest-controller` | Composition root, wiring router, middleware, reconciler và worker | Giữ mỏng; không đưa business rule vào `main.go` hoặc orchestration wiring. |
+| `cmds/mock-service` | Data-plane binary riêng, dùng `pkgs/mockruntime`/`pkgs/mockcontrol` | Không import `namespace`, `authz` hoặc controller store vào hot path. |
+| `pkgs/namespace` | Handler, lifecycle, spec validation, component CRUD, readiness và projection/view | Package lớn nhất; khi mở rộng nên tách readiness, components và lifecycle theo boundary. |
+| `pkgs/loadtest` | Handler, create gate, lifecycle, runner orchestration và reconciler | Tránh thành god package; policy ở đây, process/K8s adapter ở `pkgs/runner`. |
+| `pkgs/envreconciler` / `pkgs/statuswatcher` | Hai loop đã tách desired→K8s và observed→PG | Không gộp lại; shared code chỉ nên là model/render/validation thuần. |
+| `pkgs/store` | GORM models, migrations, transaction helpers và transition SQL | `transitions.go` là điểm Raw SQL duy nhất; mọi status transition đi qua đây. |
+| `pkgs/authz`, `pkgs/secrets`, `pkgs/idempotency` | Cross-cutting packages dùng chung | Không nhân bản policy trong từng handler; giữ fail-closed và replay semantics nhất quán. |
+| `pkgs/testutil` / `tests/harness` | Dùng composition thật cho integration và harness | Không dựng router/middleware/auth riêng trong từng test. |
+
+Nguyên tắc sắp xếp:
+
+- Handler chỉ parse request, gọi use-case và map lỗi; không thêm transaction orchestration hoặc query DB trực tiếp.
+- `namespace` là aggregate boundary của environment; `loadtest` chỉ dùng readiness/gates, không tự tính lại trạng thái namespace.
+- `envreconciler` chỉ ghi K8s; `statuswatcher` chỉ ghi projection/PG.
+- `store` chứa repository/query và transaction primitives; transition map không được nhân bản ở handler, reconciler hoặc test helper.
+- Code mới phải có test đúng tầng: pure rule ở unit, SQL/transaction ở integration, fault/convergence ở harness.
+- Trước refactor cross-package, cập nhật docs/plan; sau đó re-index CodeGraph và kiểm tra call-chain để tránh bypass transition, authz, readiness hoặc idempotency.
+
+Ưu tiên refactor hiện tại: (1) tách readiness projection/gate khỏi `pkgs/namespace`; (2) giữ `pkgs/loadtest` tập trung vào policy/lifecycle; (3) chuẩn hóa repository interfaces để handler không phụ thuộc trực tiếp vào GORM model ngoài `pkgs/store`.
+
+### 5.5 Testing strategy per layer
+
+- **API Tests**: Focus on HTTP contracts, status codes, and error responses (Mock Service). 
+- **Service Tests ( )**: The primary focus of the Harness. Test business rules, edge cases, and state transitions (Mock Repo or Integration DB). 
+- **Repo Tests**: Verify SQL correctness, constraints, and performance (Real DB). 
+
+## 6. Core flows
+
+### 6.1 Define Environment
 1. Client creates the Environment (full `spec` and/or component CRUD).
 2. BFF validates schema, OpenAPI, bindings, ingress, deps, NetworkPolicy renderability.
 3. On apply: one tx stores spec, bumps `desired_generation`, writes idempotency + outbox; status → `APPLYING`.
 4. **Env Reconciler** applies resources in order (§3.3). **Status Watcher** observes K8s and moves the namespace to `DATA_LOADING` / `READY` / `DEGRADED` / `INVALID` with `blocking_reasons`.
 5. `GET /readiness` serves the projection.
 
-### 5.2 Define/trigger load test
+### 6.2 Define/trigger load test
 1. `POST /loadtests` with `namespace_id`, `targets[]`, `script`, `load_config`.
 2. Authz, then **gate**: `ready_for_loadtest=true` **and** `now - status_observed_at <= staleness_threshold`; else `409 NAMESPACE_NOT_READY` (reason may be `STATUS_STALE`).
 3. Resolve `targets[]` against OpenAPI; validate script (+ `VALIDATED` for refs); guardrails/quota.
 4. Persist run, transition in tx, `Runner.Start`; return `202`.
 5. Reconcile to terminal state (`COMPLETED/FAILED/STOPPED/TIMEOUT_CLEANED/CLEANUP_FAILED`); reaper cleans up.
 
-## 6. API surface (summary)
+## 7. API surface (summary)
 
 Base `/api/loadtest/v1` (details in `bff-loadtest-api-spec.md`): namespaces (+ readiness/validate/apply/events), components (`services`, `databases`, `ingress`, `dependencies`, `network-policies`), scripts, loadtests, datasets, mock status/pools, `/me`, `/guardrails`. Control plane: `/api/admin/v1`.
 
-## 7. Security & operations
+## 8. Security & operations
 
 - Integrity/fault harness is a release gate: [`harness-testing.md`](harness-testing.md) (includes `WATCH-01..06`).
 - Trust only nginx-injected identity at the boundary; fail closed; never trust client owner/tenant.
@@ -404,7 +507,7 @@ Base `/api/loadtest/v1` (details in `bff-loadtest-api-spec.md`): namespaces (+ r
 - Async + idempotent mutations (`Idempotency-Key`), optimistic concurrency (ETag/`If-Match`), TTL/force-stop cleanup, audit for admin actions.
 - **Operational signals for the Watcher:** heartbeat age per namespace, workqueue depth, resync duration, illegal-transition count, time-in-`APPLYING`.
 
-## 8. MVP decisions and open items
+## 9. MVP decisions and open items
 
 ### Locked
 1. 1 Environment = 1 K8s Namespace (`lt-env-<namespace_id>`, deterministic labels).

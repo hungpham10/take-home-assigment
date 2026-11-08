@@ -55,7 +55,7 @@ func fixtures(t *testing.T) (http.Handler, *gorm.DB, string, string, string) {
 	return h, db, tenant.ID, user.ID, slug
 }
 
-func TestResolveTenantID(t *testing.T) {
+func TestINT_ADM_01_02_ResolveTenantID(t *testing.T) {
 	h, _, tenantID, _, slug := fixtures(t)
 	host := slug + ".local"
 
@@ -70,7 +70,7 @@ func TestResolveTenantID(t *testing.T) {
 	}
 }
 
-func TestAuthConfigShape(t *testing.T) {
+func TestINT_ADM_03_04_05_06_07_AuthConfigShape(t *testing.T) {
 	h, db, tenantID, _, slug := fixtures(t)
 	cfg := store.AuthProfile{
 		TenantID: tenantID,
@@ -134,7 +134,7 @@ func introspect(t *testing.T, h http.Handler, token string) introspectResponse {
 	return resp
 }
 
-func TestIntrospectLifecycle(t *testing.T) {
+func TestINT_ADM_08_09_10_11_12_15_TokenLifecycle(t *testing.T) {
 	h, db, tenantID, userID, _ := fixtures(t)
 
 	// issue by ANOTHER user in same tenant without admin → 403 (self-only gate)
@@ -213,7 +213,7 @@ func TestIntrospectLifecycle(t *testing.T) {
 	}
 }
 
-func TestIntrospectExpired(t *testing.T) {
+func TestINT_ADM_11_IntrospectExpired(t *testing.T) {
 	h, _, tenantID, userID, _ := fixtures(t)
 
 	rec := testutil.Do(t, h, http.MethodPost, "/api/admin/v1/users/"+userID+"/tokens",
@@ -232,7 +232,7 @@ func TestIntrospectExpired(t *testing.T) {
 }
 
 // operator endpoints require the principal middleware (fail-closed).
-func TestOperatorRequiresPrincipal(t *testing.T) {
+func TestINT_ADM_16_OperatorRequiresPrincipal(t *testing.T) {
 	h, _, _, userID, _ := fixtures(t)
 	rec := testutil.Do(t, h, http.MethodPost, fmt.Sprintf("/api/admin/v1/users/%s/tokens", userID), nil, nil)
 	if rec.Code != 401 {

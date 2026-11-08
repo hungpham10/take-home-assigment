@@ -383,9 +383,9 @@ func TestWatcherDegradedWithRunningRun(t *testing.T) {
 	}
 }
 
-// WATCH-04 (fake-CI): a rejected/racing transition between projection upsert
-// and status write must not crash-loop — the next pass converges without
-// duplicating the DEGRADED/READY event.
+// WATCH-04 / RUN-CRASH-01 (fake-CI): a rejected/racing transition between
+// projection upsert and status write must not crash-loop — the next pass
+// converges without duplicating the DEGRADED/READY event.
 func TestWatcherRacingTransitionConverges(t *testing.T) {
 	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
 	w.nsID = seedNamespace(t, w.db, "APPLYING")
@@ -398,10 +398,11 @@ func TestWatcherRacingTransitionConverges(t *testing.T) {
 		t.Fatalf("first reconcile: %v", err)
 	}
 	// Race: the user transitioned the namespace back to APPLYING (re-validate)
-	// right after the watcher wrote READY — the next pass must converge again
-	// without error or duplicate-event loops.
+	// right after the watcher wrote READY — ready_for_loadtest drops cùng lúc
+	// (CHECK chk_namespaces_ready_only_when_ready, DB-TXN-10). The next pass
+	// must converge again without error or duplicate-event loops.
 	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
-		Update("status", "APPLYING").Error; err != nil {
+		Updates(map[string]any{"status": "APPLYING", "ready_for_loadtest": false}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
@@ -442,5 +443,64 @@ func TestWatcherFlapWithinGraceNoDegraded(t *testing.T) {
 	_ = w.db.Where("id = ?", w.nsID).First(&ns)
 	if ns.Status != "READY" {
 		t.Fatalf("status %s after flapping within grace, want READY (WATCH-06)", ns.Status)
+	}
+}
+
+// MOCK-VER-01 (plans/24 e2e): binding snapshot với schema_version sai bị
+// mockruntime reject; generation mismatch giữa binding và desired_generation
+// giữ mock evaluator ở PROGRESSING — không bao giờ READY.
+func TestWatcherMockSnapshotContract(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	applyEnv(t, w, 1)
+	markDeploymentReady(t, w)
+
+	mockRaw, _ := json.Marshal(mockcontrol.MockDef{Enabled: true, Generation: 1, Routes: []mockruntime.Route{{
+		Method: "GET", Path: "/x", Variants: []mockruntime.Variant{{Weight: 1, Status: 200}},
+	}}})
+	if err := w.db.Exec(
+		`INSERT INTO tbl_services (namespace_id, name, deploy, mock, openapi_spec, spec_hash) VALUES (?, 'mock-svc', '{}', ?, '{}', 'h1')`,
+		w.nsID, mockRaw).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Runtime từ chối snapshot schema_version sai (MOCK-VER-01 header rule).
+	rt := mockruntime.New()
+	if err := rt.ApplySnapshot(&mockruntime.Snapshot{SchemaVersion: "v0", Generation: 1}); err == nil {
+		t.Fatal("runtime accepted wrong schema_version")
+	}
+
+	// 2. Binding apply với generation DESIRED (1) → READY như bình thường.
+	env := &envreconciler.Env{NamespaceID: w.nsID, TenantID: "t", Generation: 1,
+		Services: []envreconciler.ServiceSpec{{Name: "mock-svc", Image: "i", Replicas: 1, Port: 80, Mock: mockRaw}}}
+	rc := envreconciler.New(w.client, envreconciler.Options{})
+	mockcontrol.Attach(rc)
+	if err := rc.ApplyEnv(context.Background(), env); err != nil {
+		t.Fatalf("apply bindings: %v", err)
+	}
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// 3. Spec edit → desired_generation=2; binding vẫn gen 1 → fencing
+	// giữ mock ở PROGRESSING (mock_generation_pending), không READY.
+	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("desired_generation", 2).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	var row store.ComponentStatus
+	if err := w.db.Where("namespace_id = ? AND component_type = 'mock'", w.nsID).
+		First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.Phase == "READY" {
+		t.Fatal("mock READY despite binding generation < desired_generation (MOCK-VER-01)")
+	}
+	if row.Phase != "PROGRESSING" {
+		t.Fatalf("mock phase %s, want PROGRESSING", row.Phase)
 	}
 }

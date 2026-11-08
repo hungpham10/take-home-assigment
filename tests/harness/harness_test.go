@@ -674,3 +674,116 @@ func TestRUNTIMEOUT01ReapTimeouts(t *testing.T) {
 		return cur.Status == "TIMEOUT_CLEANED"
 	}, "loadtest not TIMEOUT_CLEANED after reap ticks")
 }
+
+// --- API-IDEM-02: in-flight duplicate — hai request cùng key gửi đồng thời;
+// request thứ hai (đến khi request đầu chưa commit response) phải nhận
+// 409 conflict, không replay-không-kết-quả.
+func TestAPIIDEM02InFlightDuplicate(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{
+		DB: db, Runner: &harnessRunner{states: map[string]string{}, missing: map[string]bool{}},
+		Now: time.Now, ScriptsDir: t.TempDir(),
+	})
+	headers, _, _ := fullFixture(t, db)
+
+	// Hai request ĐỒNG THỜI, cùng key + cùng payload: winner chạy handler;
+	// loser 409 in-flight (nếu về trước khi winner commit) hoặc 201 replay
+	// (nếu winner đã commit). Invariant: KHÔNG BAO GIỜ tạo hai lần.
+	nsName := fmt.Sprintf("inflight-dup-%d", time.Now().UnixNano())
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-release
+			codes[i%2] = api(t, h, http.MethodPost, "/namespaces",
+				testutil.WithKey(headers, "k-inflight-dup"),
+				map[string]any{"name": nsName}).Code
+		}()
+	}
+	close(release)
+	wg.Wait()
+
+	for _, c := range codes {
+		if c != http.StatusCreated && c != http.StatusConflict {
+			t.Fatalf("in-flight race unexpected code %d in %v (want 201 or 409 only)", c, codes)
+		}
+	}
+	var count int64
+	if err := db.Model(&store.Namespace{}).Where("name = ?", nsName).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("namespaces created %d, want exactly 1 (codes %v)", count, codes)
+	}
+}
+
+// --- API-IDEM-03: replay trả lại ĐÚNG response của lần đầu kể cả khi lần
+// đầu là 202 Accepted (async hand-off, K8S mode) — client gọi lại vẫn nhận
+// 202 + cùng body, không bump desired_generation lần hai.
+func TestAPIIDEM03ReplayAsyncResponse(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{
+		DB: db, Runner: &harnessRunner{states: map[string]string{}, missing: map[string]bool{}},
+		Now: time.Now, ScriptsDir: t.TempDir(), K8S: true,
+	})
+	headers, _, _ := fullFixture(t, db)
+
+	rec := api(t, h, http.MethodPost, "/namespaces", testutil.WithKey(headers, "k-idem-202"),
+		map[string]any{"name": "idem-202-" + strconv.FormatInt(time.Now().UnixNano(), 36)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	// Thêm service qua API (raw OpenAPI document) trước khi validate.
+	svcBody := map[string]any{
+		"name":   "idem-svc",
+		"spec":   json.RawMessage(`{"openapi":"3.0.0","info":{"title":"I","version":"1"},"paths":{"/x":{"get":{"responses":{"200":{"description":"ok"}}}}}}`),
+		"deploy": map[string]any{"image": "nginx:alpine", "replicas": 1, "port": 80},
+	}
+	if rec := api(t, h, http.MethodPost, "/namespaces/"+ns.ID+"/services", headers, svcBody); rec.Code != 201 {
+		t.Fatalf("create service: %d %s", rec.Code, rec.Body.String())
+	}
+	// validate → APPLYING (qua transition), rồi apply với key → 202.
+	if rec := api(t, h, http.MethodPost, "/namespaces/"+ns.ID+"/validate", headers, nil); rec.Code != 200 {
+		t.Fatalf("validate: %d %s", rec.Code, rec.Body.String())
+	}
+	first := api(t, h, http.MethodPost, "/namespaces/"+ns.ID+"/apply", testutil.WithKey(headers, "k-idem-apply"), nil)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first apply: %d %s, want 202", first.Code, first.Body.String())
+	}
+
+	// Replay cùng key: cùng 202 + cùng desired_generation (không bump lần hai).
+	second := api(t, h, http.MethodPost, "/namespaces/"+ns.ID+"/apply", testutil.WithKey(headers, "k-idem-apply"), nil)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("replay apply: %d %s, want replayed 202", second.Code, second.Body.String())
+	}
+	if second.Header().Get("Idempotency-Replayed") != "true" {
+		t.Errorf("Idempotency-Replayed header missing on 202 replay")
+	}
+	// So sánh SEMANTIC (cùng id/status/desired_generation), không byte-equality —
+	// replay trả đúng payload lần đầu dù format serialization có thể khác.
+	var firstResp, secondResp struct {
+		ID                string `json:"id"`
+		Status            string `json:"status"`
+		DesiredGeneration int64  `json:"desired_generation"`
+	}
+	_ = json.Unmarshal(first.Body.Bytes(), &firstResp)
+	_ = json.Unmarshal(second.Body.Bytes(), &secondResp)
+	if firstResp != secondResp {
+		t.Errorf("replay payload differs: %+v vs %+v", firstResp, secondResp)
+	}
+	var row store.Namespace
+	if err := db.Where("id = ?", ns.ID).First(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.DesiredGeneration != 1 {
+		t.Errorf("desired_generation %d after replay, want 1 (no double bump)", row.DesiredGeneration)
+	}
+}
