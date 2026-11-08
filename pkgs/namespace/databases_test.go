@@ -53,7 +53,7 @@ func dbBody(name string) map[string]any {
 	}
 }
 
-func TestDatabaseCRUD(t *testing.T) {
+func TestINT_DB_01_DatabaseCRUD(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -142,7 +142,7 @@ func TestDatabaseCRUD(t *testing.T) {
 	}
 }
 
-func TestDatasetLifecycle(t *testing.T) {
+func TestINT_DATASET_01_DatasetLifecycle(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/datasets"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -274,7 +274,7 @@ func TestDatasetLifecycle(t *testing.T) {
 	}
 }
 
-func TestIngressCRUD(t *testing.T) {
+func TestINT_INGRESS_01_IngressCRUD(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -356,7 +356,7 @@ func TestIngressCRUD(t *testing.T) {
 	}
 }
 
-func TestViewsAndMockStubs(t *testing.T) {
+func TestINT_NS_32_ViewsAndMockStubs(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1"
 	principal := testutil.TenantUserHeaders(t, db, "user")

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"gorm.io/gorm"
 
@@ -146,7 +147,71 @@ func validateSpecComponents(spec *namespaceSpec) error {
 			}
 		}
 	}
+	// Dependency graph phải là DAG — vòng deps (A→B→A) chết readiness vì
+	// không service nào bao giờ "resolved" (harness-testing.md INT-NS-33).
+	if cycle := detectDependencyCycle(spec.Services); cycle != "" {
+		return specErr{"spec.services dependency cycle: " + cycle}
+	}
 	return nil
+}
+
+// detectDependencyCycle returns "a -> b -> a" describing the first cycle in
+// the services' dependency graph ("" when acyclic).
+func detectDependencyCycle(services []serviceSpec) string {
+	edges := map[string][]string{}
+	for _, s := range services {
+		var deps []dependencyRef
+		if json.Unmarshal(s.Dependencies, &deps) != nil {
+			continue // malformed deps are caught by validateServiceDefinition
+		}
+		for _, d := range deps {
+			if d.ServiceID == "" {
+				continue
+			}
+			edges[s.Name] = append(edges[s.Name], d.ServiceID)
+		}
+	}
+	const (
+		white = 0 // unvisited
+		gray  = 1 // in progress (current DFS path)
+		black = 2 // done
+	)
+	state := map[string]int{}
+	path := []string{}
+	var cycle string
+	var dfs func(node string)
+	dfs = func(node string) {
+		if cycle != "" || state[node] == black {
+			return
+		}
+		if state[node] == gray {
+			start := 0
+			for i, p := range path {
+				if p == node {
+					start = i
+				}
+			}
+			cycle = strings.Join(append(append([]string{}, path[start:]...), node), " -> ")
+			return
+		}
+		state[node] = gray
+		path = append(path, node)
+		for _, next := range edges[node] {
+			dfs(next)
+			if cycle != "" {
+				return
+			}
+		}
+		path = path[:len(path)-1]
+		state[node] = black
+	}
+	for _, s := range services {
+		dfs(s.Name)
+		if cycle != "" {
+			return cycle
+		}
+	}
+	return ""
 }
 
 // datasetAvailable checks (inside the tx) that data_source.dataset_id refers

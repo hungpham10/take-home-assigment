@@ -107,7 +107,7 @@ func itoa(n int64) string {
 	return string(b[i:])
 }
 
-func TestLoadTestGatesAndLifecycle(t *testing.T) {
+func TestINT_LT_01_LoadTestGatesAndLifecycle(t *testing.T) {
 	h, db, fr := testServer(t)
 	headers, nsID := readyFixture(t, db)
 
@@ -191,7 +191,7 @@ func testServerK8S(t *testing.T, staleAfter time.Duration) (http.Handler, *gorm.
 // TestCreateStatusStaleGate — plans/21 WATCH-05: with the cluster wired, a
 // READY namespace whose watcher heartbeat is missing/old returns 409
 // NAMESPACE_NOT_READY reason STATUS_STALE (fail-closed).
-func TestCreateStatusStaleGate(t *testing.T) {
+func TestINT_LT_02_CreateStatusStaleGate(t *testing.T) {
 	h, db := testServerK8S(t, 15*time.Minute)
 	headers, nsID := readyFixture(t, db)
 
@@ -217,7 +217,7 @@ func TestCreateStatusStaleGate(t *testing.T) {
 // namespace DEGRADED event after the run's started_at flags the run
 // "unreliable": true in GET /loadtests/{id} and /events. The run keeps
 // running (the watcher never stops it).
-func TestGetUnreliableFlag(t *testing.T) {
+func TestINT_LT_03_GetUnreliableFlag(t *testing.T) {
 	h, db, _ := testServer(t)
 	headers, nsID := readyFixture(t, db)
 

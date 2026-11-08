@@ -309,7 +309,7 @@ Ký hiệu: ☐ = chưa xác nhận đã có test (xem §14.1); 🔜 = chưa vi�
 | `INT-NS-11` | `GET /events` | Lịch sử transition đúng thứ tự, append-only, có actor + reason |
 | `INT-NS-12` | `DELETE` namespace không có run | Soft delete → `DELETED` (qua `fn_namespace_transition`), row còn, `GET` sau đó 404 |
 | `INT-NS-13` | `DELETE` khi còn run active | 409 |
-| `INT-NS-14` | Sau `DELETED`: tạo lại cùng name | Theo policy đã chốt (cho phép hoặc 409) — test khóa hành vi để không đổi ngầm |
+| `INT-NS-14` | Sau `DELETED`: tạo lại cùng name | **409 `NAME_CONFLICT`** (row DELETED còn, UNIQUE(tenant,name)) — khóa bằng `TestINT_NS_14_DeletedReuse` (plans/22) |
 
 **Validate → Apply → Ready**
 
@@ -328,6 +328,8 @@ Ký hiệu: ☐ = chưa xác nhận đã có test (xem §14.1); 🔜 = chưa vi�
 | `INT-NS-30` | `GET /readiness` K8s mode, projection có dữ liệu | Đọc `tbl_component_status` + `blocking_reasons`, không tính lại |
 | `INT-NS-31` | `GET /readiness` K8s mode, projection rỗng | Fallback về `readinessGates` (không 500, không báo READY giả) |
 | `INT-NS-32` | `GET /dependencies`, `/network-policies` | Đồ thị đã resolve; policy per-service khớp `dependencies[]`; default-deny có mặt |
+| `INT-NS-33` | Create-with-spec với dependency vòng (A→B→A) | 422 `dependency cycle: a -> b -> a` (DAG bắt buộc); DAG hợp lệ vẫn 201 — `TestINT_NS_33_CircularDeps` |
+| `INT-NS-07b` | Golden path K8S mode: POST /apply → Reconciler → Watcher → `GET /readiness` ready:true | Chạy trên cluster thật (`tests/harness/watcher`, `//go:build harness_k8s`) — `TestWATCH07GoldenPath` |
 
 ### 11.3 Service, OpenAPI, Database, Dataset (`pkgs/serviceopenapi`, components)
 

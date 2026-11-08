@@ -41,7 +41,7 @@ func specFull(name, slug string) map[string]any {
 	}
 }
 
-func TestCreateWithSpecFull(t *testing.T) {
+func TestINT_NS_02_CreateWithSpecFull(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -96,7 +96,7 @@ func TestCreateWithSpecFull(t *testing.T) {
 	}
 }
 
-func TestCreateWithSpecAtomicRollback(t *testing.T) {
+func TestINT_NS_02_CreateWithSpecAtomicRollback(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -132,7 +132,7 @@ func TestCreateWithSpecAtomicRollback(t *testing.T) {
 	}
 }
 
-func TestCreateWithSpecApply(t *testing.T) {
+func TestINT_NS_02_CreateWithSpecApply(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -158,7 +158,7 @@ func TestCreateWithSpecApply(t *testing.T) {
 	}
 }
 
-func TestCreateWithSpecBadOpenAPI(t *testing.T) {
+func TestINT_NS_21_CreateWithSpecBadOpenAPI(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -179,7 +179,7 @@ func TestCreateWithSpecBadOpenAPI(t *testing.T) {
 	}
 }
 
-func TestCreateWithSpecBackwardCompat(t *testing.T) {
+func TestINT_NS_02_CreateWithSpecBackwardCompat(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")

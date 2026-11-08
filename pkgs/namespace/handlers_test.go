@@ -59,7 +59,7 @@ func itoa(n int64) string {
 	return string(b[i:])
 }
 
-func TestNamespaceCRUDAndETag(t *testing.T) {
+func TestINT_NS_05_06_07_NamespaceCRUDAndETag(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -86,10 +86,10 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 		t.Errorf("ETag = %q", etag)
 	}
 
-	// duplicate name → 422
+	// duplicate name → 409 NAME_CONFLICT (INT-NS-05)
 	rec = testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k2"), map[string]string{"name": "ns1"})
-	if rec.Code != 422 {
-		t.Errorf("duplicate create: status = %d, want 422", rec.Code)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("duplicate create: status = %d, want 409", rec.Code)
 	}
 
 	// get with ETag
@@ -168,7 +168,7 @@ func TestNamespaceCRUDAndETag(t *testing.T) {
 	}
 }
 
-func TestOwnerIsolationAndAdminOverride(t *testing.T) {
+func TestINT_NS_09_10_OwnerIsolationAndAdminOverride(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	owner := testutil.TenantUserHeaders(t, db, "user")
