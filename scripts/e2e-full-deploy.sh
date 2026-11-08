@@ -35,7 +35,7 @@ export KUBECONFIG
 
 if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   say "install CNPG operator"
-  kubectl apply -f "$CNPG_MANIFEST" >/dev/null
+  kubectl apply --server-side -f "$CNPG_MANIFEST" >/dev/null
   kubectl -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=180s
 fi
 kubectl get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 || fail "CNPG CRD not present"
