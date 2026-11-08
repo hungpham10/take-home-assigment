@@ -26,7 +26,7 @@ func serviceFull(name string) map[string]any {
 	}
 }
 
-func TestServiceAPIByServiceID(t *testing.T) {
+func TestINT_SVC_01_ServiceAPIByServiceID(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -136,7 +136,7 @@ func TestServiceAPIByServiceID(t *testing.T) {
 	}
 }
 
-func TestServiceMockValidation(t *testing.T) {
+func TestINT_SVC_MockValidation(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -185,7 +185,7 @@ func TestServiceMockValidation(t *testing.T) {
 	}
 }
 
-func TestServiceDeleteConflict(t *testing.T) {
+func TestINT_SVC_DeleteConflict(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -228,7 +228,7 @@ func TestServiceDeleteConflict(t *testing.T) {
 	}
 }
 
-func TestReadinessComponents(t *testing.T) {
+func TestINT_NS_29_ReadinessComponents(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")

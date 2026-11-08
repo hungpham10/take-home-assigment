@@ -110,7 +110,10 @@ func (d Deps) createNamespace(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := d.DB.WithContext(ctx).Create(&ns).Error; err != nil {
 			if isUniqueViolation(err) {
-				httpx.WriteCodeError(w, "VALIDATION_FAILED", "namespace name already exists in tenant")
+				// UNIQUE(tenant_id,name) — cả trùng name đang sống lẫn name
+				// của namespace DELETED (row còn). 409 theo contract
+				// (harness-testing.md INT-NS-05/INT-NS-14).
+				httpx.WriteCodeError(w, "NAME_CONFLICT", "namespace name already exists in tenant")
 				return
 			}
 			httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "create namespace failed")

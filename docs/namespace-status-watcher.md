@@ -137,7 +137,7 @@ Today the gate only reads `ready_for_loadtest` — if the watcher stops, a names
 
 All configurable via controller env/config.
 
-## 9. Harness tests (described — implemented in plan 21)
+## 9. Harness tests (implemented — plans/21 PR E fake-client cases + plans/22 colima/kind harness)
 
 | ID | Scenario |
 |---|---|

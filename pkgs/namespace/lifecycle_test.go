@@ -1,6 +1,7 @@
 package namespace_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -28,7 +29,7 @@ const brokenSpec = `{
   "paths": {"/items/{id}": {"get": {"responses": {"200": {"description": "ok"}}}}}
 }`
 
-func TestValidateApplyReadinessLifecycle(t *testing.T) {
+func TestINT_NS_20_21_22_24_29_ValidateApplyReadinessLifecycle(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -97,7 +98,7 @@ func TestValidateApplyReadinessLifecycle(t *testing.T) {
 	}
 }
 
-func TestValidateFailsOnBadSpec(t *testing.T) {
+func TestINT_NS_21_ValidateFailsOnBadSpec(t *testing.T) {
 	h, db := testServer(t)
 	base := "/api/loadtest/v1/namespaces"
 	principal := testutil.TenantUserHeaders(t, db, "user")
@@ -134,7 +135,7 @@ func TestValidateFailsOnBadSpec(t *testing.T) {
 // TestApplyK8SAsyncHandoff — plans/21 PR B: with the cluster wired (K8S=true)
 // POST /apply must NOT reach READY synchronously. It bumps desired_generation
 // and leaves the status at APPLYING for the Env Reconciler + Status Watcher.
-func TestApplyK8SAsyncHandoff(t *testing.T) {
+func TestINT_NS_25_ApplyK8SAsyncHandoff(t *testing.T) {
 	db := testutil.TestDB(t)
 	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now, K8S: true})
 	base := "/api/loadtest/v1/namespaces"
@@ -187,5 +188,136 @@ func TestApplyK8SAsyncHandoff(t *testing.T) {
 	}
 	if policy.ObservedGeneration != 0 {
 		t.Fatalf("policy observed_generation %d, want 0 (watcher owns it)", policy.ObservedGeneration)
+	}
+}
+
+// TestReadinessProjectionBacked — plans/22: với cluster wired (K8S=true),
+// GET /readiness đọc tbl_component_status + blocking_reasons thay vì compute
+// readinessGates on-the-fly (docs/namespace-management-api.md §3).
+func TestINT_NS_30_ReadinessProjectionBacked(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now, K8S: true})
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"), map[string]string{"name": "envproj"})
+	if rec.Code != 201 {
+		t.Fatalf("create ns: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	// Watcher projection state: service READY (gen 2), data_load PENDING.
+	now := time.Now().UTC()
+	rows := []store.ComponentStatus{
+		{NamespaceID: ns.ID, ComponentType: "service", ComponentID: "svc-1", Required: true,
+			DesiredGeneration: 2, ObservedGeneration: 2, Phase: "READY", ObservedAt: now},
+		{NamespaceID: ns.ID, ComponentType: "data_load", ComponentID: "-", Required: true,
+			DesiredGeneration: 2, ObservedGeneration: 1, Phase: "PENDING", Reason: store.StrPtr("restore_job_not_implemented"), ObservedAt: now},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocking, _ := json.Marshal([]string{"data_load/-: restore_job_not_implemented"})
+	if err := db.Model(&store.Namespace{}).Where("id = ?", ns.ID).Updates(map[string]any{
+		"blocking_reasons":   blocking,
+		"status_observed_at": now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID+"/readiness", principal, nil)
+	if rec.Code != 200 {
+		t.Fatalf("readiness: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Status          string         `json:"status"`
+		Ready           bool           `json:"ready"`
+		BlockingReasons []string       `json:"blocking_reasons"`
+		Components      map[string]any `json:"components"`
+	}
+	if json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
+		t.Fatalf("decode: %s", rec.Body.String())
+	}
+	if _, ok := resp.Components["services"]; !ok {
+		t.Fatalf("projection blocks missing: %v", resp.Components)
+	}
+	if len(resp.BlockingReasons) == 0 {
+		t.Fatal("blocking_reasons not projection-backed")
+	}
+	if resp.Ready {
+		t.Fatal("ready=true despite PENDING component")
+	}
+
+	// Sanity: the payload must NOT come from readinessGates — readinessGates
+	// would report "no services registered" because no tbl_services rows
+	// exist; the projection reports READY for svc-1.
+	svcBlock := resp.Components["services"].(map[string]any)
+	if svcBlock["ready"].(float64) != 1 {
+		t.Fatalf("service block not from projection: %v", svcBlock)
+	}
+}
+
+// --- INT-NS-04: cùng Idempotency-Key, payload khác → 422, không áp payload thứ hai.
+func TestINT_NS_04_IdempotencyConflict(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now})
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	key := "int-ns-04-" + time.Now().Format("150405.000000000")
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, key), map[string]string{"name": "env-idem"})
+	if rec.Code != 201 {
+		t.Fatalf("first create: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns1 store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns1)
+
+	rec = testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, key), map[string]string{"name": "env-khac"})
+	if rec.Code != 422 {
+		t.Fatalf("conflict: %d %s, want 422 (different payload, same key)", rec.Code, rec.Body.String())
+	}
+	// Đúng 1 row, payload thứ hai KHÔNG được áp.
+	var count int64
+	_ = db.Model(&store.Namespace{}).Where("tenant_id = ?", ns1.TenantID).Count(&count)
+	if count != 1 {
+		t.Fatalf("namespaces %d, want 1", count)
+	}
+}
+
+// --- INT-NS-14: sau DELETED, tạo lại cùng name (row vẫn còn) → 409 (khóa behavior).
+func TestINT_NS_14_DeletedReuse(t *testing.T) {
+	db := testutil.TestDB(t)
+	h := testutil.NewServer(t, testutil.ServerDeps{DB: db, Now: time.Now})
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k-del"), map[string]string{"name": "env-del"})
+	if rec.Code != 201 {
+		t.Fatalf("create: %d", rec.Code)
+	}
+	var ns store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	rec = testutil.Do(t, h, http.MethodDelete, base+"/"+ns.ID, principal, nil)
+	if rec.Code != 202 {
+		t.Fatalf("delete: %d %s, want 202 DELETING (async)", rec.Code, rec.Body.String())
+	}
+	// Reaper hoàn tất: DELETING → DELETED (transition qua DB function).
+	if err := store.Transition(context.Background(), db, "namespace", ns.ID, "DELETED",
+		store.ActorJSON("system", "reaper", "system"), "reaper teardown"); err != nil {
+		t.Fatalf("reaper transition: %v", err)
+	}
+	// GET sau delete → 404 (row còn, status DELETED).
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, principal, nil)
+	if rec.Code != 404 {
+		t.Fatalf("get after delete: %d, want 404", rec.Code)
+	}
+	// Tạo lại cùng name → 409 (UNIQUE(tenant,name) + row DELETED còn).
+	rec = testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k-del-2"), map[string]string{"name": "env-del"})
+	if rec.Code != 409 {
+		t.Fatalf("reuse deleted name: %d %s, want 409", rec.Code, rec.Body.String())
 	}
 }

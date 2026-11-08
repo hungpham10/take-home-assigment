@@ -42,6 +42,7 @@ var statusByCode = map[string]int{
 	"BAD_REQUEST":                http.StatusBadRequest,          // 400
 	"UNAUTHORIZED":               http.StatusUnauthorized,        // 401
 	"FORBIDDEN":                  http.StatusForbidden,           // 403
+	"NAME_CONFLICT":              http.StatusConflict,            // 409 (INT-NS-05/14)
 }
 
 // WriteCodeError maps a platform error code to its HTTP status.

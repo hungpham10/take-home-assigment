@@ -104,6 +104,11 @@ func (r *Reconciler) prune(ctx context.Context, env *Env, desired []*unstructure
 	for _, gvk := range kinds {
 		objs, err := r.client.List(ctx, gvk, envNS, labels.Set{k8s.LabelManagedBy: k8s.ManagedByValue})
 		if err != nil {
+			if err == k8s.ErrNotFound {
+				// API resource kind absent on this cluster (e.g. CNPG CRD not
+				// installed) — nothing of that kind to prune.
+				continue
+			}
 			return fmt.Errorf("envreconciler: list %s for prune: %w", gvk.Kind, err)
 		}
 		for _, o := range objs {

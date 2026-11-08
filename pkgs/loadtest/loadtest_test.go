@@ -107,7 +107,7 @@ func itoa(n int64) string {
 	return string(b[i:])
 }
 
-func TestLoadTestGatesAndLifecycle(t *testing.T) {
+func TestINT_LT_01_LoadTestGatesAndLifecycle(t *testing.T) {
 	h, db, fr := testServer(t)
 	headers, nsID := readyFixture(t, db)
 
@@ -191,7 +191,7 @@ func testServerK8S(t *testing.T, staleAfter time.Duration) (http.Handler, *gorm.
 // TestCreateStatusStaleGate — plans/21 WATCH-05: with the cluster wired, a
 // READY namespace whose watcher heartbeat is missing/old returns 409
 // NAMESPACE_NOT_READY reason STATUS_STALE (fail-closed).
-func TestCreateStatusStaleGate(t *testing.T) {
+func TestINT_LT_02_CreateStatusStaleGate(t *testing.T) {
 	h, db := testServerK8S(t, 15*time.Minute)
 	headers, nsID := readyFixture(t, db)
 
@@ -210,5 +210,48 @@ func TestCreateStatusStaleGate(t *testing.T) {
 		map[string]any{"name": "lt-fresh", "script_id": headers["X-Script-Id"]})
 	if rec.Code == http.StatusConflict && strings.Contains(rec.Body.String(), "STATUS_STALE") {
 		t.Fatalf("fresh heartbeat blocked: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGetUnreliableFlag — plans/22 DEGRADED-with-running-run (docs §6): a
+// namespace DEGRADED event after the run's started_at flags the run
+// "unreliable": true in GET /loadtests/{id} and /events. The run keeps
+// running (the watcher never stops it).
+func TestINT_LT_03_GetUnreliableFlag(t *testing.T) {
+	h, db, _ := testServer(t)
+	headers, nsID := readyFixture(t, db)
+
+	rec := doLT(t, h, testutil.WithKey(headers, "k1"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt-unreliable", "script_id": headers["X-Script-Id"]})
+	if rec.Code != 201 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var lt store.LoadTest
+	_ = json.Unmarshal(rec.Body.Bytes(), &lt)
+
+	// No degradation yet → not unreliable.
+	rec = doLT(t, h, headers, http.MethodGet, nsID, "/"+lt.ID, nil)
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["unreliable"] == true {
+		t.Fatal("unreliable before any DEGRADED event")
+	}
+
+	// Namespace degrades AFTER the run started.
+	if err := db.Exec(
+		`INSERT INTO tbl_namespace_events (object_id, to_status, actor, metadata)
+		 VALUES (?, 'DEGRADED', '{}', jsonb_build_object('namespace_degraded_at', now()))`,
+		nsID).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec = doLT(t, h, headers, http.MethodGet, nsID, "/"+lt.ID, nil)
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["unreliable"] != true {
+		t.Fatalf("unreliable flag missing after DEGRADED: %v", got)
+	}
+
+	rec = doLT(t, h, headers, http.MethodGet, nsID, "/"+lt.ID+"/events", nil)
+	if !strings.Contains(rec.Body.String(), `"unreliable":true`) {
+		t.Fatalf("events payload missing unreliable flag: %s", rec.Body.String())
 	}
 }

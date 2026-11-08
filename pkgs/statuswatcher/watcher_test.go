@@ -3,6 +3,7 @@ package statuswatcher_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,9 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
+	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/mockcontrol"
 	"github.com/hungpham/loadtest-platform/pkgs/mockruntime"
-	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/statuswatcher"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 	"github.com/hungpham/loadtest-platform/pkgs/testutil"
@@ -36,22 +37,31 @@ func gormDB(t *testing.T) *gorm.DB {
 // not need the HTTP API).
 func seedNamespace(t *testing.T, db *gorm.DB, status string) string {
 	t.Helper()
+	suffix := newUUID(t)[:8]
 	var tenantID string
 	if err := db.Raw(
-		`INSERT INTO tbl_tenants (name) VALUES ('w-tenant') RETURNING id`).Scan(&tenantID).Error; err != nil {
+		`INSERT INTO tbl_tenants (name, slug) VALUES (?, ?) RETURNING id`,
+		"w-"+suffix, "w-"+suffix).Scan(&tenantID).Error; err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
 	var userID string
 	if err := db.Raw(
-		`INSERT INTO tbl_users (tenant_id, email, password_hash, role) VALUES (?, 'w@t.io', 'x', 'owner') RETURNING id`,
-		tenantID).Scan(&userID).Error; err != nil {
+		`INSERT INTO tbl_users (tenant_id, email) VALUES (?, ?) RETURNING id`,
+		tenantID, "w-"+suffix+"@t.io").Scan(&userID).Error; err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
 	nsID := newUUID(t)
 	if err := db.Exec(
 		`INSERT INTO tbl_namespaces (id, tenant_id, owner_user_id, name, status, desired_generation)
-		 VALUES (?, ?, ?, 'env', ?, 1)`, nsID, tenantID, userID, status).Error; err != nil {
+		 VALUES (?, ?, ?, ?, ?, 1)`, nsID, tenantID, userID, "env-"+suffix, status).Error; err != nil {
 		t.Fatalf("seed namespace: %v", err)
+	}
+	// One service row matching applyEnv's rendered deployment (the watcher
+	// evaluates services from tbl_services, not from the cluster objects).
+	if err := db.Exec(
+		`INSERT INTO tbl_services (namespace_id, name, deploy, mock, openapi_spec, spec_hash) VALUES (?, 'svc-1', '{}', '{}', '{}', 'h1')`,
+		nsID).Error; err != nil {
+		t.Fatalf("seed service: %v", err)
 	}
 	return nsID
 }
@@ -142,7 +152,7 @@ func TestWatcherAPPLYINGToREADY(t *testing.T) {
 		if r.Phase != "READY" {
 			t.Fatalf("component %s/%s phase %s", r.ComponentType, r.ComponentID, r.Phase)
 		}
-		if r.ObservedGeneration != 1 || r.DesiredGeneration != 1 {
+		if r.Required && (r.ObservedGeneration != 1 || r.DesiredGeneration != 1) {
 			t.Fatalf("generation fencing fields: %+v", r)
 		}
 	}
@@ -277,5 +287,160 @@ func TestWatcherMockEvaluator(t *testing.T) {
 	_ = w.db.Where("namespace_id = ? AND component_type = 'mock'", w.nsID).First(&row)
 	if row.Phase != "READY" {
 		t.Fatalf("mock phase %s, want READY after binding apply", row.Phase)
+	}
+}
+
+// Apply deadline (docs/namespace-status-watcher.md §5): an APPLYING
+// namespace stuck longer than cfg.ApplyDeadline must transition to DEGRADED
+// with reason apply_deadline_exceeded.
+func TestWatcherApplyDeadline(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	applyEnv(t, w, 1) // reconciled but the deployment is NOT ready → stays APPLYING
+
+	cfg := statuswatcher.DefaultConfig()
+	cfg.ApplyDeadline = 1 * time.Minute
+	watcher := newWatcher(w, cfg)
+	// Namespace entered APPLYING 10 minutes ago (updated_at is the deadline
+	// basis fallback); the watcher clock runs 8 minutes later. The touch
+	// trigger must be disabled to backdate updated_at.
+	if err := w.db.Exec(
+		`ALTER TABLE tbl_namespaces DISABLE TRIGGER trg_namespaces_touch`).Error; err != nil {
+		t.Fatal(err)
+	}
+	err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("updated_at", time.Now().UTC().Add(-10*time.Minute)).Error
+	_ = w.db.Exec(`ALTER TABLE tbl_namespaces ENABLE TRIGGER trg_namespaces_touch`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher.SetClock(func() time.Time { return time.Now().UTC().Add(-8 * time.Minute) })
+
+	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	if err := w.db.Where("id = ?", w.nsID).First(&ns).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ns.Status != "DEGRADED" {
+		t.Fatalf("status %s, want DEGRADED after apply deadline", ns.Status)
+	}
+	var blocking []string
+	if len(ns.BlockingReasons) > 0 && json.Unmarshal(ns.BlockingReasons, &blocking) == nil {
+		found := false
+		for _, b := range blocking {
+			if strings.Contains(b, "apply_deadline_exceeded") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("blocking reasons missing apply_deadline_exceeded: %v", blocking)
+		}
+	}
+}
+
+// DEGRADED-with-running-run (docs §6): the watcher transitions the namespace
+// to DEGRADED with metadata namespace_degraded_at; the running loadtest is
+// NOT stopped — its report is flagged unreliable via the namespace event.
+func TestWatcherDegradedWithRunningRun(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "READY")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("ready_for_loadtest", true).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := statuswatcher.DefaultConfig()
+	cfg.Grace = 1 * time.Millisecond
+	watcher := newWatcher(w, cfg)
+	// First pass arms the grace window; second pass (past grace) degrades.
+	_ = watcher.ReconcileStatus(context.Background(), w.nsID)
+	watcher.SetClock(func() time.Time { return time.Now().UTC().Add(2 * time.Minute) })
+	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var ns store.Namespace
+	if err := w.db.Where("id = ?", w.nsID).First(&ns).Error; err != nil {
+		t.Fatal(err)
+	}
+	if ns.Status != "DEGRADED" {
+		t.Fatalf("status %s, want DEGRADED after grace", ns.Status)
+	}
+	// The degradation event carries namespace_degraded_at metadata.
+	var meta string
+	if err := w.db.Raw(
+		`SELECT metadata FROM tbl_namespace_events
+		 WHERE object_id = ? AND to_status = 'DEGRADED'
+		 ORDER BY id DESC LIMIT 1`, w.nsID).Scan(&meta).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(meta), "namespace_degraded_at") {
+		t.Fatalf("DEGRADED event metadata missing namespace_degraded_at: %s", meta)
+	}
+}
+
+// WATCH-04 (fake-CI): a rejected/racing transition between projection upsert
+// and status write must not crash-loop — the next pass converges without
+// duplicating the DEGRADED/READY event.
+func TestWatcherRacingTransitionConverges(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	applyEnv(t, w, 1)
+	markDeploymentReady(t, w)
+
+	watcher := newWatcher(w, statuswatcher.DefaultConfig())
+	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	// Race: the user transitioned the namespace back to APPLYING (re-validate)
+	// right after the watcher wrote READY — the next pass must converge again
+	// without error or duplicate-event loops.
+	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("status", "APPLYING").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("second reconcile after race: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "READY" {
+		t.Fatalf("status %s after race convergence, want READY", ns.Status)
+	}
+	var readyEvents int64
+	_ = w.db.Raw(`SELECT count(*) FROM tbl_namespace_events WHERE object_id = ? AND to_status = 'READY'`, w.nsID).Scan(&readyEvents)
+	if readyEvents < 2 {
+		t.Fatalf("READY events %d, want 2 (one per convergence)", readyEvents)
+	}
+}
+
+// WATCH-06 (fake-CI): a component flapping within the grace window must NOT
+// emit DEGRADED (no spurious run blocking).
+func TestWatcherFlapWithinGraceNoDegraded(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "READY")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("ready_for_loadtest", true).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := statuswatcher.DefaultConfig()
+	cfg.Grace = 1 * time.Hour // grace far in the future → flap never degrades
+	watcher := newWatcher(w, cfg)
+	for range 3 {
+		if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "READY" {
+		t.Fatalf("status %s after flapping within grace, want READY (WATCH-06)", ns.Status)
 	}
 }

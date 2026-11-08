@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // ErrNotFound is returned by Get/Delete when the object does not exist. The
@@ -67,10 +68,21 @@ type Client interface {
 	Watch(ctx context.Context, gvk schema.GroupVersionKind, ns string) (watch.Interface, error)
 }
 
-// GVRFor maps a GroupVersionKind to the resource plural name via a RESTMapper.
-// Kept package-level so Fake-free callers (and tests) share one mapping table.
+// GVRFor maps a GroupVersionKind to its plural resource via the RESTMapper
+// (falls back to UnsafeGuessKindToResource for irregular plurals —
+// NetworkPolicy→networkpolicies, Ingress→ingresses — that discovery-derived
+// mappers can miss before CRDs are fully listed).
 func GVRFor(mapper meta.RESTMapper, gvk schema.GroupVersionKind) (schema.GroupVersionResource, error) {
-	return mapper.ResourceFor(gvk.GroupVersion().WithResource(gvk.Kind + "s"))
+	gvr, err := mapper.ResourceFor(gvk.GroupVersion().WithResource(gvk.Kind))
+	if err == nil {
+		return gvr, nil
+	}
+	plural, singular := meta.UnsafeGuessKindToResource(gvk)
+	if plural.Resource != "" {
+		return gvk.GroupVersion().WithResource(plural.Resource), nil
+	}
+	_ = singular
+	return schema.GroupVersionResource{}, fmt.Errorf("k8s: map %s: %w", gvk, err)
 }
 
 // DynamicClient is the real Client backed by discovery + dynamic client-go.
@@ -86,6 +98,26 @@ type DynamicClient struct {
 // at the call site).
 func NewDynamicClient(serverURL string, _ string) (*DynamicClient, error) {
 	cfg := &rest.Config{Host: serverURL}
+	return newDynamicForConfig(cfg)
+}
+
+// NewClientFromKubeconfig builds the client from a kubeconfig file (colima /
+// kind clusters carry TLS certs there — a bare URL would fail the self-signed
+// handshake). Falls back to the default loading rules when path is "".
+func NewClientFromKubeconfig(path string) (*DynamicClient, error) {
+	loadingRules := &clientcmd.ClientConfigLoadingRules{}
+	if path != "" {
+		loadingRules.ExplicitPath = path
+	}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("k8s: kubeconfig: %w", err)
+	}
+	return newDynamicForConfig(cfg)
+}
+
+func newDynamicForConfig(cfg *rest.Config) (*DynamicClient, error) {
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("k8s: dynamic client: %w", err)
@@ -261,6 +293,13 @@ func (f *Fake) Apply(ctx context.Context, obj *unstructured.Unstructured) error 
 		merged := prev.DeepCopy()
 		merged.SetLabels(mergeLabels(prev.GetLabels(), obj.GetLabels()))
 		merged.SetAnnotations(mergeLabels(prev.GetAnnotations(), obj.GetAnnotations()))
+		// SSA field-manager ownership covers spec; the API server keeps
+		// subresource status from the previous write unless the apply sets it
+		// (client-go ApplyStatus) — mirror that: new status replaces, absent
+		// status keeps the old one.
+		if st, has := obj.UnstructuredContent()["status"]; has {
+			merged.UnstructuredContent()["status"] = st
+		}
 		merged.UnstructuredContent()["spec"] = obj.UnstructuredContent()["spec"]
 		bucket[id] = merged
 		f.emitLocked(watch.Modified, merged)

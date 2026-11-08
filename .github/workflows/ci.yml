@@ -48,13 +48,11 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run unit tests
-        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        run: go test ./... -race -coverprofile=coverage.txt -covermode=atomic
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          name: coverage
-          path: coverage.out
-          if-no-files-found: ignore
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   build:
     runs-on: ubuntu-latest
@@ -69,6 +67,70 @@ jobs:
           if [ -d ./cmds/mock-service ]; then
             go build -o bin/mock-service ./cmds/mock-service
           fi
+
+  # Plans/22: integration harness trên kind cluster (CI chuẩn — không cần
+  # VM/qemu như colima; colima giữ cho local dev, cùng harness chạy được cả
+  # hai qua KUBECONFIG — docs/namespace-status-watcher.md §9). Fake-client
+  # counterparts chạy trong job `test`.
+  integration-k8s:
+    name: Integration Tests (kind k8s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ltp
+          POSTGRES_PASSWORD: ltp
+          POSTGRES_DB: ltp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltp -d ltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_DSN: postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ltp
+      PGPASSWORD: ltp
+      PGDATABASE: ltp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ltp-harness
+          kubectl_version: v1.31.0
+
+      - name: Verify cluster + export KUBECONFIG
+        run: |
+          kind export kubeconfig --name ltp-harness
+          kubectl get nodes
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Apply migrations
+        run: |
+          set -e
+          for f in $(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort); do
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run WATCH-01..06 integration harness
+        run: |
+          go test -tags harness_k8s -v -timeout 15m \
+            ./tests/harness/watcher/... ./tests/harness/k8s/...
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods -A || true
+          kubectl logs -l app --all-containers --tail=50 -A || true
 
   # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
   # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
