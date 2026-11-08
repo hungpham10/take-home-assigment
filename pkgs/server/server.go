@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -33,6 +34,9 @@ type Deps struct {
 	Runner     runner.Runner    // load-test execution backend (local/k8s)
 	K8S        bool             // cluster wired → async apply (plans/21); false = legacy sync
 	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
+	// ApplyNow (plans/26): hierarchical apply ngay trong request path sau khi
+	// desired-state commit (nil ở legacy mode).
+	ApplyNow func(ctx context.Context, namespaceID string)
 }
 
 // NewRouter builds the full HTTP handler.
@@ -76,8 +80,8 @@ func NewRouter(d Deps) http.Handler {
 	// with server-side role resolution (X-User-Role is not authoritative).
 	r.Route("/api/loadtest/v1", func(r chi.Router) {
 		r.Use(authz.RequirePrincipalWithRole(d.DB))
-		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S})
-		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S})
+		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
+		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
 		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8S: d.K8S, StaleAfter: d.StaleAfter})
 	})

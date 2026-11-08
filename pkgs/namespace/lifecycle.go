@@ -86,7 +86,7 @@ func (d Deps) runApply(ctx context.Context, ns store.Namespace, actor string) er
 // applyDesired resolves the desired state in PG and hands off to the two
 // control loops. It writes NO readiness and NO terminal status — the watcher
 // owns APPLYING→READY (one writer per direction, namespace-status-watcher.md §1).
-func (d Deps) applyDesired(_ context.Context, ns store.Namespace, _ string) error {
+func (d Deps) applyDesired(ctx context.Context, ns store.Namespace, _ string) error {
 	return d.DB.Transaction(func(tx *gorm.DB) error {
 		// Resolve dependencies → egress policy spec (allow-list).
 		var deps []store.Dependency
@@ -115,13 +115,22 @@ func (d Deps) applyDesired(_ context.Context, ns store.Namespace, _ string) erro
 		}
 		// Bump desired_generation in the SAME tx as the policy spec so the
 		// watcher can never see a new spec under an old generation.
-		return tx.Model(&store.Namespace{}).
+		if err := tx.Model(&store.Namespace{}).
 			Where("id = ?", ns.ID).
 			Updates(map[string]any{
 				"desired_generation": gorm.Expr("desired_generation + 1"),
 				"ready_for_loadtest": false,
 				"blocking_reasons":   store.JSONBytes(map[string]any{}),
-			}).Error
+			}).Error; err != nil {
+			return err
+		}
+		// Hierarchical apply NGAY (ngoài→trong) — best-effort: lỗi không fail
+		// request (response vẫn 202 APPLYING); Env Reconciler loop + watcher
+		// tự converge level-triggered.
+		if d.ApplyNow != nil {
+			d.ApplyNow(ctx, ns.ID)
+		}
+		return nil
 	})
 }
 

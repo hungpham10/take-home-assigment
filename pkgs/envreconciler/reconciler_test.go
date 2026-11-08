@@ -2,6 +2,7 @@ package envreconciler_test
 
 import (
 	"context"
+	"sync"
 
 	"errors"
 	"testing"
@@ -366,5 +367,74 @@ func TestRenderUnknownOperatorFailsClosed(t *testing.T) {
 	env.Databases = []envreconciler.DatabaseSpec{{Name: "weird", Operator: "mongodb-operator"}}
 	if err := envreconciler.ValidateDatabaseOperators(env); err == nil {
 		t.Fatal("unknown operator accepted — want fail closed")
+	}
+}
+
+type recordingClient struct {
+	k8s.Client
+	mu    sync.Mutex
+	order []string
+}
+
+func (r *recordingClient) Apply(ctx context.Context, obj *unstructured.Unstructured) error {
+	r.mu.Lock()
+	r.order = append(r.order, obj.GetKind()+"/"+obj.GetName())
+	r.mu.Unlock()
+	return r.Client.Apply(ctx, obj)
+}
+
+func (r *recordingClient) appliedOrder() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string{}, r.order...)
+}
+
+func indexOf(order []string, key string) int {
+	for i, k := range order {
+		if k == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestINT_ENV_08_HierarchicalApplyOrder — namespace áp TRƯỚC tất cả con;
+// trong mỗi service: ConfigMap/Secret/ServiceAccount trước Deployment.
+func TestINT_ENV_08_HierarchicalApplyOrder(t *testing.T) {
+	rc := &recordingClient{Client: k8s.NewFake()}
+	env := fullServiceEnv()
+	env.Ingresses = []envreconciler.IngressSpec{{
+		Name: "main", IngressClass: "nginx", SpecHash: "h-ing",
+		Rules: []envreconciler.IngressRule{{Host: "x.example.com", Path: "/", ServiceName: "echo", Port: 8080}},
+	}}
+	if err := envreconciler.ApplyTree(context.Background(), rc, env); err != nil {
+		t.Fatalf("apply tree: %v", err)
+	}
+	order := rc.appliedOrder()
+
+	nsIdx := indexOf(order, "Namespace/lt-env-11111111-2222-3333-4444-555555555555")
+	if nsIdx == -1 {
+		t.Fatalf("namespace not applied: %v", order)
+	}
+	for _, key := range []string{
+		"NetworkPolicy/default-deny",
+		"Cluster/demo-db",
+		"ConfigMap/echo-config",
+		"Secret/echo-secret",
+		"Deployment/echo",
+		"Service/echo",
+		"HorizontalPodAutoscaler/echo",
+		"Ingress/main",
+	} {
+		i := indexOf(order, key)
+		if i == -1 {
+			t.Fatalf("%s not applied: %v", key, order)
+		}
+		if i < nsIdx {
+			t.Fatalf("%s applied BEFORE namespace (order %v)", key, order)
+		}
+	}
+	if indexOf(order, "ConfigMap/echo-config") > indexOf(order, "Deployment/echo") {
+		t.Fatalf("ConfigMap after Deployment (order %v)", order)
 	}
 }

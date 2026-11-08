@@ -694,8 +694,14 @@ func (w *Watcher) worker(ctx context.Context, q *Queue) {
 // Tick reconciles every namespace with pending work.
 func (w *Watcher) Tick(ctx context.Context) error {
 	var ids []string
+	// Batch: mỗi tick xử lý tối đa tickBatchSize namespace, ưu tiên những
+	// namespace CHƯA từng được reconcile (status_observed_at NULL) — backlog
+	// lớn không được phép serialize vô hạn trong 1 tick.
+	const tickBatchSize = 100
 	if err := w.db.WithContext(ctx).Model(&store.Namespace{}).
 		Where("status IN ?", []string{"APPLYING", "DATA_LOADING", "READY", "DEGRADED"}).
+		Order("status_observed_at ASC NULLS FIRST, updated_at DESC").
+		Limit(tickBatchSize).
 		Pluck("id", &ids).Error; err != nil {
 		return fmt.Errorf("statuswatcher: list namespaces: %w", err)
 	}

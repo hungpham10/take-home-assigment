@@ -67,11 +67,18 @@ func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
 	if err := ValidateDatabaseOperators(env); err != nil {
 		return err
 	}
-	objs := r.render(env)
-	if r.BindingsFunc != nil {
-		objs = append(objs, r.BindingsFunc(env)...)
+	// Hierarchical apply (plans/26): ngoài→trong qua Applier tree — namespace
+	// tự áp trước rồi gọi Apply() của con. Flat Render list chỉ còn phục vụ
+	// prune.
+	if err := ApplyTree(ctx, r.client, env); err != nil {
+		return err
 	}
-	for _, obj := range objs {
+	// Mockcontrol bindings (ConfigMap + ExternalName Service) — apply step 5.
+	var bound []*unstructured.Unstructured
+	if r.BindingsFunc != nil {
+		bound = r.BindingsFunc(env)
+	}
+	for _, obj := range bound {
 		if env.Generation > 0 {
 			ann := obj.GetAnnotations()
 			if ann == nil {
@@ -84,7 +91,9 @@ func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
 			return fmt.Errorf("envreconciler: apply %s/%s: %w", obj.GetKind(), obj.GetName(), err)
 		}
 	}
-	return r.prune(ctx, env, objs)
+	desired := r.render(env)
+	desired = append(desired, bound...)
+	return r.prune(ctx, env, desired)
 }
 
 // prune deletes managed objects in the env namespace whose kind+name are no
