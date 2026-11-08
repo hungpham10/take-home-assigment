@@ -37,10 +37,14 @@ colima/kind vì cert self-signed) hoặc bare `K8S_API_URL` fallback.
 Fake-client counterparts (không cần cluster) nằm ở `pkgs/statuswatcher/`
 và chạy trong job `test`.
 
-CI: job `integration-colima` trong `.github/workflows/ci.yml` cài colima qua
-Homebrew trên ubuntu runner (qemu, không KVM — start 3-6 phút, retry x2) và
-chạy cùng harness. Nếu colima flaky trên runner, đổi sang kind chỉ cần 1
-step: `uses: helm/kind-action@v1` + export KUBECONFIG của kind.
+CI: job `integration-k8s` trong `.github/workflows/ci.yml` dùng **kind**
+(`helm/kind-action`) — không VM/qemu, start ~1-2 phút; colima giữ cho local
+dev. Cả hai cluster đều chạy được vì harness build client từ `KUBECONFIG`
+(`k8s.NewClientFromKubeconfig`) — chỉ cần export kubeconfig đúng.
+
+# kind local (nếu không dùng colima)
+kind create cluster --name ltp-harness
+export KUBECONFIG=$(kind get kubeconfig --name ltp-harness)
 
 ## Rules
 - Harness tests prove **safety under failure**, not happy paths.

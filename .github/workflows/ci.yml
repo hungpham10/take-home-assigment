@@ -70,14 +70,14 @@ jobs:
             go build -o bin/mock-service ./cmds/mock-service
           fi
 
-  # Plans/22 + plans/23: integration harness trên colima (cùng tooling chạy
-  # local — docs/namespace-status-watcher.md §9). Ubuntu runner không có KVM
-  # nên Lima chạy qemu (start ~3-6 phút, timeout generous). Fake-client
+  # Plans/22: integration harness trên kind cluster (CI chuẩn — không cần
+  # VM/qemu như colima; colima giữ cho local dev, cùng harness chạy được cả
+  # hai qua KUBECONFIG — docs/namespace-status-watcher.md §9). Fake-client
   # counterparts chạy trong job `test`.
-  integration-colima:
-    name: Integration Tests (colima k8s)
+  integration-k8s:
+    name: Integration Tests (kind k8s)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -99,39 +99,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install colima + lima + kubectl (official binaries)
-        run: |
-          set -e
-          sudo mkdir -p /usr/local/bin
-          # lima (colima's VM backend) — release tarball
-          LIMA_VER=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
-          curl -fsSL "https://github.com/lima-vm/lima/releases/download/${LIMA_VER}/lima-${LIMA_VER#v}-Linux-x86_64.tar.gz" -o /tmp/lima.tgz
-          sudo tar -C /usr/local -xzf /tmp/lima.tgz
-          # colima — release binary (plain executable, not a tarball)
-          curl -fsSL https://github.com/abiosoft/colima/releases/latest/download/colima-Linux-x86_64 -o /usr/local/bin/colima
-          sudo chmod +x /usr/local/bin/colima
-          # kubectl
-          curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o /tmp/kubectl
-          sudo install /tmp/kubectl /usr/local/bin/kubectl
-          colima version && limactl --version && kubectl version --client
-
-      - name: Install qemu (qemu-img required by lima on the runner)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq qemu-utils qemu-system-x86
-
-      - name: Start colima with kubernetes
-        uses: nick-fields/retry@v3
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
         with:
-          timeout_minutes: 15
-          max_attempts: 2
-          command: colima start --kubernetes --cpu 2 --memory 6
+          cluster_name: ltp-harness
+          kubectl_version: v1.31.0
 
-      - name: Verify cluster + export K8S_API_URL
-        id: cluster
+      - name: Verify cluster + export KUBECONFIG
         run: |
           kubectl get nodes
-          SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-          echo "server=$SERVER" >> "$GITHUB_OUTPUT"
-          echo "API server: $SERVER"
+          echo "KUBECONFIG=$(kind get kubeconfig --name ltp-harness)" >> "$GITHUB_ENV"
 
       - name: Apply migrations
         run: |
@@ -141,17 +118,15 @@ jobs:
           done
 
       - name: Run WATCH-01..06 integration harness
-        env:
-          K8S_API_URL: ${{ steps.cluster.outputs.server }}
         run: |
-          go test -tags harness_k8s -v -timeout 20m \
+          go test -tags harness_k8s -v -timeout 15m \
             ./tests/harness/watcher/... ./tests/harness/k8s/...
 
       - name: Dump cluster state on failure
         if: failure()
         run: |
           kubectl get ns,deploy,svc,pods -A || true
-          colima kubernetes logs 2>/dev/null | tail -50 || true
+          kubectl logs -l app --all-containers --tail=50 -A || true
 
   # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
   # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
