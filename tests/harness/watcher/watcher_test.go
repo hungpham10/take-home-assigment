@@ -124,7 +124,8 @@ func TestWATCH01ResyncConvergesAfterDroppedEvents(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Fatalf("no convergence within deadline (last status %s)", harnessStatus(h, t))
+	t.Fatalf("no convergence within deadline (last status %s)\nprojection: %s",
+		harnessStatus(h, t), harnessDumpProjection(h, t))
 }
 
 // WATCH-02: duplicate/reordered events → reconcile is idempotent (same

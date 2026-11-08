@@ -68,3 +68,32 @@ func seedHarnessNamespace(t *testing.T, db *gorm.DB) string {
 	}
 	return nsID
 }
+
+// harnessDumpProjection renders the current projection rows for failure
+// diagnostics (phase/reason/generations per component).
+func harnessDumpProjection(h *harnessEnv, t *testing.T) string {
+	t.Helper()
+	var rows []struct {
+		ComponentType string
+		ComponentID   string
+		Phase         string
+		Reason        *string
+		Required      bool
+		DesiredGen    int64 `gorm:"column:desired_generation"`
+		ObservedGen   int64 `gorm:"column:observed_generation"`
+		ObservedAt    time.Time
+	}
+	if err := harnessDB(t).Raw(
+		`SELECT component_type, component_id, phase, reason, required,
+		        desired_generation, observed_generation, observed_at
+		 FROM tbl_component_status WHERE namespace_id = ? ORDER BY component_type`, h.nsID).Scan(&rows).Error; err != nil {
+		return fmt.Sprintf("dump error: %v", err)
+	}
+	out := ""
+	for _, r := range rows {
+		out += fmt.Sprintf("%s/%s phase=%s reason=%v req=%v des=%d obs=%d at=%s | ",
+			r.ComponentType, r.ComponentID, r.Phase, r.Reason, r.Required,
+			r.DesiredGen, r.ObservedGen, r.ObservedAt.Format("15:04:05"))
+	}
+	return out
+}

@@ -1,10 +1,17 @@
-# Harness Testing — Integrity, Safety & ACID (MVP)
+# Harness & Integration Testing — Integrity, Safety, ACID & Functional Scenarios (MVP)
 
-This document defines **harness tests**: fault-injection and integrity tests that **prove** the load-testing platform remains **safe, consistent, and stable** under failures (crash, exception, network error, timeout, partial outage, retries, concurrency). These are **not** happy-path functional tests and **not** performance tests.
+This document defines the **test strategy and scenario catalogue** of the load-testing platform. It has two complementary halves:
+
+- **Harness tests (§1–§8):** fault-injection and integrity tests that **prove** the platform remains **safe, consistent, and stable** under failures (crash, exception, network error, timeout, partial outage, retries, concurrency).
+- **Functional integration tests (§9–§14):** scenarios that prove the platform **behaves correctly per contract** (happy path, business rules, stable error codes, end-to-end lifecycles) across HTTP → handler → Postgres, fake K8s/runner, nginx, and kind.
+
+Neither half is a performance test; perf has its own gate (§5, §12.4).
 
 **Why:** `AGENTS.md` requires CodeGraph/no-missing-edge-cases quality gates and k6 perf gates. The control plane manages metadata, K8s/runtime resources, and untrusted execution (k6 JS, external refs). Correctness under failure is a release-blocking property.
 
-**Primary related docs:** [`docs/architecture.md`](architecture.md), [`docs/database-schema.md`](database-schema.md), [`docs/bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md), [`docs/k6-operator-go-client.md`](k6-operator-go-client.md), [`docs/mock-service-api.md`](mock-service-api.md), [`docs/nginx-oidc-auth.md`](nginx-oidc-auth.md).
+**Primary related docs:** [`docs/architecture.md`](architecture.md), [`docs/database-schema.md`](database-schema.md), [`docs/bff-loadtest-api-spec.md`](bff-loadtest-api-spec.md), [`docs/k6-operator-go-client.md`](k6-operator-go-client.md), [`docs/mock-service-api.md`](mock-service-api.md), [`docs/nginx-oidc-auth.md`](nginx-oidc-auth.md), [`docs/mvp-status.md`](mvp-status.md) (what is implemented today), `sql/README.md`.
+
+**Boundary between the two halves:** a scenario whose point is a **fault injected into the system** (crash between two steps, duplicate event, K8s timeout, concurrent writers) is a harness case (`DB-TXN-*`, `API-*`, `RUN-*`, `WATCH-*`, …). A scenario whose point is **correct behaviour of a feature** is a functional integration case (`INT-*`, `E2E-*`). When both apply, keep the ID in one place and cross-reference it from the other (see §11.6).
 
 ## 1. Scope & principles
 
@@ -118,6 +125,8 @@ Implementations should expose **test-only** controls (build tag `harness` or int
 - Network/ref resolver with DNS failure, timeout, redirect, disallowed host fixtures.
 - Reconciler single-step/run-once mode for deterministic assertions.
 
+Shared (non-fault) test infrastructure used by both harness and functional integration tests — composition root, identity fixtures, data fixtures, isolation rules — is in §9.
+
 ## 5. Execution model & CI placement
 
 | Layer | Location | Runs when | Blocking |
@@ -125,10 +134,12 @@ Implementations should expose **test-only** controls (build tag `harness` or int
 | SQL integrity harness | `tests/sql/*` (+ new harness cases) | CI on SQL/Go changes, local | **Yes** |
 | Go unit + race (where practical) | `pkgs/...`, `cmds/...` | CI/local | **Yes** |
 | Integration harness (Postgres + fakes) | `tests/integration/` or tagged packages | CI/local | **Yes** (MVP core cases) |
+| **Functional integration (`INT-*`)** — Postgres + fake K8s/runner, §11 | `pkgs/*/*_integration_test.go`, `tests/integration/` | CI `test`; local with `TEST_DATABASE_DSN` | **Yes** |
 | LocalRunner + real k6 harness | `tests/integration/` | CI if k6 available / nightly | MVP subset blocking |
 | K8s/NetworkPolicy/CNI harness | `tests/harness/k8s/` (`//go:build harness_k8s`) | cluster CI / manual / nightly | **Required before GA/K8s production claim**; optional in minimal CI if no cluster |
+| **Nginx integration (`INT-NGX-*`)**, §12.1 | `tests/nginx/` (compose: nginx + controller + postgres + fake OIDC) | CI/nightly | **Yes** (subset); required for PRs touching `conf/nginx` |
 | k6 perf | `tests/perf/` | per `plans/14-local-stack-e2e.md` | **Yes** (merge gate) |
-| E2E smoke | compose/Earthfile stack | CI/local | **Yes** |
+| E2E smoke | compose/Earthfile stack, `scripts/e2e-smoke.sh` | CI/local | **Yes** |
 
 **Reporting:** harness failures must emit object IDs, tenant scope, state/version, idempotency key (redacted if needed), and transition/event evidence — no secrets.
 
@@ -140,6 +151,14 @@ Before merge/release of controller/runner/mock control-plane changes:
 - [ ] No bypass of readiness/quota/network safety found in CodeGraph review.
 - [ ] K8s/NetworkPolicy harness executed for changes affecting runner egress, TestRun lifecycle, or namespace isolation (or explicitly waived with risk note).
 - [ ] `docs/` + `plans/` updated if invariants/behavior changed.
+
+Additional gate for **functional behaviour changes** (definition of done):
+- [ ] At least one `INT-*` scenario added/updated per new behaviour, using the ID and domain table in §11.
+- [ ] New route added to the route × principal matrix (`INT-MATRIX-01`); new transition covered by `INT-MATRIX-02`.
+- [ ] New error branch has a stable error code and is asserted via `INT-MATRIX-03`.
+- [ ] Status changes go only through `fn_*_transition` (`INT-LT-27` green).
+- [ ] Failure semantics touched (retry, crash, concurrency) → harness case added/updated in §2.
+- [ ] Column "status" in `docs/mvp-status.md` updated; known gaps in §14 updated.
 
 ## 7. Non-goals (MVP harness)
 
@@ -171,3 +190,377 @@ Implemented per `plans/16-harness-testing-integrity.md` "Implementation scope 20
 - **Invariant-break proof:** disabling the `RequireSelfOrAdmin` check in
   `issueToken` flips `TestAPIAUTHZ03AdminCrossOwnerMutationAndAudit` and
   `TestAPIAUTHZ03SelfOnlyTokenGate` to FAIL (verified 2026-11-07; check restored).
+
+---
+
+# Phần II — Functional integration tests
+
+Các mục §9–§14 bên dưới là catalogue kịch bản **functional integration** (viết bằng tiếng Việt, đồng bộ với `mvp-status.md` và `k8s-orchestration.md`). Số mục §1–§8 phía trên được giữ nguyên để không làm gãy tham chiếu từ các tài liệu khác (`k8s-orchestration.md`, `namespace-status-watcher.md`, `architecture.md`).
+
+## 9. Nguyên tắc & hạ tầng test dùng chung
+
+### 9.1 Quy tắc chọn tầng
+- Logic thuần không cần I/O → **unit**.
+- Có SQL, transaction, constraint, JOIN, hoặc cần verify trạng thái DB sau request → **integration**. Không mock DB ở tầng này; mock DB làm mất đúng thứ cần kiểm chứng (transition function, CHECK, FK).
+- K8s: mặc định **fake client** (`pkgs/k8s` fake, có fault injection). Chỉ lên kind khi cần hành vi cluster thật (NetworkPolicy enforcement, CRD, informer thật).
+- k6 binary: mặc định **fake k6** (script shell trong `PATH`) cho test deterministic; k6 thật chỉ ở nightly/e2e.
+
+### 9.2 Composition
+Mọi integration test (cả harness lẫn `INT-*`) đi qua **đúng composition root của server** (`pkgs/testutil.NewServer`) — không tự dựng router/middleware, không tái tạo auth (plans/16). Test cần cấu hình khác (`K8S_ENABLED`, master key, runner) truyền qua option của `NewServer`, không fork wiring.
+
+```go
+srv := testutil.NewServer(t, testutil.WithK8s(fakeK8s), testutil.WithRunner(fakeRunner),
+                          testutil.WithClock(clk), testutil.WithMasterKey(key))
+```
+
+### 9.3 Fixtures danh tính
+Mỗi test tự tạo dữ liệu qua helper, không dùng dữ liệu chung giữa test:
+
+| Fixture | Mô tả |
+|---|---|
+| `tenantA`, `tenantB` | Hai tenant, slug ngẫu nhiên theo test (`t-<rand>`) |
+| `ownerA` | user role `user`, tenant A |
+| `otherA` | user role `user`, tenant A (không phải owner) |
+| `adminA` | role `admin`, tenant A — role **ghi trong `tbl_user_roles`** (không chỉ header) |
+| `adminB` | role `admin`, tenant B |
+| `abtToken(user)` | token `abt_` thật qua API issue |
+
+Helper `srv.As(user).Do(req)` set trusted headers (`X-Tenant-Id`, `X-User-Id`, `X-User-Role`) giống nginx; `srv.AsRaw(headers)` để test header giả/thiếu.
+
+### 9.4 Cô lập dữ liệu & thời gian
+- Migration chạy **một lần mỗi package** (`TestMain`) bằng migration runner thật.
+- Mỗi test dùng tenant riêng → `t.Parallel()` được, không cần truncate. Test cần trạng thái toàn cục (reconciler quét toàn bảng, reaper) dùng **DB/schema riêng** (`testutil.NewIsolatedDB`) và không parallel.
+- Không dùng `time.Sleep`. Chờ trạng thái bất đồng bộ bằng `testutil.Eventually(t, 5*time.Second, cond)`; thời gian (TTL, timeout, grace/stable window, staleness) điều khiển bằng **fake clock** (§4).
+
+### 9.5 Fixtures dữ liệu
+```text
+tests/fixtures/
+  openapi/   orders_valid.yaml  orders_valid.json  payment_valid.yaml
+             invalid_syntax.yaml  invalid_semantic.yaml  no_paths.yaml
+             no_operation_id.yaml  oversize.yaml
+  k6/        ok.js  syntax_error.js  import_forbidden.js  slow_30s.js  exit_nonzero.js  oversize_1mib.js
+  fakebin/   k6    # shell stub: hành vi chọn bằng env FAKE_K6_MODE=ok|inspect_fail|exit1|hang
+```
+
+### 9.6 Quy ước viết test
+- Tên: `TestINT_<DOMAIN>_<NN>_<MoTa>` — ID khớp bảng ở §10–§12 để grep được. Test harness giữ ID gốc của §2 (`TestAPIAUTHZ03…`, `TestAPIIDEM01…`).
+- Mỗi test integration assert **ba lớp** khi có thể: (1) HTTP status + error envelope `{error:{code,message,details}}`; (2) trạng thái DB (`status`, `version`); (3) event trail (`tbl_*_events`) đúng thứ tự, đúng actor.
+- Table-driven cho các biến thể (role × route, định dạng OpenAPI…).
+- Assert **mã lỗi ổn định** (`NAMESPACE_NOT_READY`, `SCRIPT_NOT_VALIDATED`, `QUOTA_EXCEEDED`, `STATUS_STALE`), không assert chuỗi message.
+- Không log/assert plaintext secret; test secret kiểm tra **sự vắng mặt** của giá trị trong DB, log, response.
+- Local không có DB → `t.Skip`; `CI=true` → **fail cứng** (đã có, giữ nguyên).
+
+## 10. Ma trận kiểm soát chéo (viết một lần, chạy cho mọi route)
+
+Ba test "sinh tự động" bắt lỗi quên test khi thêm route/transition:
+
+| ID | Nội dung | Cách làm / Expected |
+|---|---|---|
+| `INT-MATRIX-01` | **Route × principal.** Dùng `chi.Walk` liệt kê mọi route của `/api/loadtest/v1` và `/api/admin/v1` (operator). Với mỗi route chạy 5 principal: không header, ownerA (resource của ownerA), otherA, adminA, adminB. | Không header → 401; otherA/adminB → 404 (không 403, chống leak); ownerA/adminA → không 401/404. Route mới chưa có trong bảng kỳ vọng → test fail ("route chưa khai báo policy"). Mở rộng từ `API-AUTHZ-01..04`. |
+| `INT-MATRIX-02` | **Transition coverage.** Đọc `tbl_status_transitions` (seed) cho từng `object_type`. | Mỗi cặp `allowed=true` có ít nhất một test đi qua (qua API hoặc `fn_*_transition`); mỗi cặp ngoài map bị từ chối (409/exception). Cặp seed mới chưa có test → fail. Bổ sung cho `DB-TXN-01`. |
+| `INT-MATRIX-03` | **Error envelope.** Gọi nhánh lỗi 400/401/404/409/412/422/429 đại diện. | Luôn đúng schema `{error:{code,message,details[]}}`; `Content-Type: application/json`; không lộ stack trace/SQL/secret. |
+
+## 11. Kịch bản integration theo domain
+
+Ký hiệu: ☐ = chưa xác nhận đã có test (xem §14.1); 🔜 = chưa viết được vì tính năng chưa có.
+
+### 11.1 Admin & Auth (`pkgs/adminapi`, `pkgs/authz`, `pkgs/secrets`)
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-ADM-01` | `GET /tenant/{host}/id` host đã map | 200, body là UUID thuần (plain), không JSON |
+| `INT-ADM-02` | Host không tồn tại | 404; nginx coi là lỗi resolve tenant |
+| `INT-ADM-03` | `GET /tenant/{host}/auth-config?name=default` | 200, shape `{auth:{id,jwt_mode,oidc_*,...}}`; field không nhạy cảm từ DB, secret từ env `LTP_TENANT_<SLUG>_*` |
+| `INT-ADM-04` | Slug có dấu gạch (`acme-co`) | Env key resolve `ACME_CO`; secret đúng tenant, không lẫn sang tenant khác |
+| `INT-ADM-05` | Thiếu env secret | 200 với secret rỗng/null; log **WARN không chứa giá trị**; không panic |
+| `INT-ADM-06` | `name` không tồn tại | 404 rõ ràng, không lộ secret |
+| `INT-ADM-07` | Sau migration 0007, `config` của auth_profile cũ có key nhạy cảm | Key bị strip; response auth-config vẫn đầy đủ nhờ env |
+| `INT-ADM-08` | Issue token `POST /users/{uid}/tokens` | 201, plaintext `abt_…` **một lần**; DB chỉ có `token_hash` + `prefix` (8 ký tự) + `token_encrypted` ≠ plaintext |
+| `INT-ADM-09` | `GET /users/{uid}/tokens` | Metadata đủ, **không** có plaintext/hash/encrypted |
+| `INT-ADM-10` | Introspect token hợp lệ | `{active:true,user_id,tenant_id,roles,is_admin}` đúng với DB |
+| `INT-ADM-11` | Introspect: sai token / hết hạn / đã revoke / prefix trùng nhưng hash khác | `{active:false}`; không phân biệt lý do cho caller |
+| `INT-ADM-12` | Revoke `POST /tokens/{id}/revoke` rồi introspect ngay | Inactive ngay (không phụ thuộc cache controller); audit ghi |
+| `INT-ADM-13` | Reveal: self / admin cùng tenant / admin khác tenant / user khác | 200 plaintext khớp token đã issue / 200 / 404 / 404; mỗi lần reveal có 1 dòng `tbl_audit_log` |
+| `INT-ADM-14` | Reveal khi chưa cấu hình `LTP_MASTER_KEY` | 503; không rò thông tin cấu hình |
+| `INT-ADM-15` | Issue token cho user của tenant khác (tenant lấy từ DB của target user, không từ header) | 404/403; không tạo row (regression của lỗ hổng bắt bởi `API-AUTHZ-03`) |
+| `INT-ADM-16` | Mọi mutation admin | Đúng 1 dòng `tbl_audit_log` với `actor` JSONB = principal |
+| `INT-AUTHZ-01` | `RequirePrincipalWithRole`: header `X-User-Role: admin` nhưng DB không có role admin | Không được coi là admin (spoof bị chặn) |
+| `INT-AUTHZ-02` | User bị gỡ role admin giữa hai request | Request sau mất quyền ngay (role đọc DB, không cache dài) |
+| `INT-SEC-01` | Crypto: roundtrip `Encrypt/Decrypt` | Blob = `nonce(12)‖ciphertext`; hai lần encrypt cùng plaintext cho blob khác nhau |
+| `INT-SEC-02` | Sai master key / blob bị sửa 1 byte / blob ngắn hơn 12 byte | Decrypt trả lỗi, không panic, không trả plaintext rác |
+| `INT-SEC-03` | `LoadMasterKey` với hex sai độ dài/không hợp lệ | Lỗi khởi động rõ ràng |
+
+### 11.2 Namespace lifecycle (`pkgs/namespace`, `pkgs/store`)
+
+**CRUD, idempotency, concurrency**
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-NS-01` | `POST /namespaces` thiếu `Idempotency-Key` | 4xx theo contract (xác nhận 400), không tạo row |
+| `INT-NS-02` | Create hợp lệ | 201, `status=DRAFT`, `owner_user_id` = `X-User-Id`; `tenant_id`/`owner_user_id` trong body bị **bỏ qua**; 1 event khởi tạo |
+| `INT-NS-03` | Replay cùng key + cùng payload | Cùng status/body với lần đầu; đúng 1 row (đặc biệt khi lần đầu trả 202). Liên quan `API-IDEM-01` |
+| `INT-NS-04` | Cùng key, payload khác | 409 (theo policy), không áp payload thứ hai. Liên quan `API-IDEM-02` |
+| `INT-NS-05` | Trùng `(tenant_id,name)` với key khác | 409; tenant khác cùng name → OK |
+| `INT-NS-06` | `GET` trả `ETag`; `PATCH` với `If-Match` đúng | 200, `version+1`, ETag mới |
+| `INT-NS-07` | `PATCH` `If-Match` cũ | 412, không đổi dữ liệu. Liên quan `API-CONC-01` |
+| `INT-NS-08` | `GET /namespaces` phân trang (`page`,`limit`,`total`,`data`), filter `status`, `ready_for_loadtest`, `q` | Đúng tổng/trang; user thường chỉ thấy của mình |
+| `INT-NS-09` | Filter `owner=` | Admin dùng được trong tenant; user thường: bị bỏ qua hoặc 403 theo contract |
+| `INT-NS-10` | Admin xem/sửa namespace của owner cùng tenant | 200 + audit cross-owner; admin tenant khác → 404 |
+| `INT-NS-11` | `GET /events` | Lịch sử transition đúng thứ tự, append-only, có actor + reason |
+| `INT-NS-12` | `DELETE` namespace không có run | Soft delete → `DELETED` (qua `fn_namespace_transition`), row còn, `GET` sau đó 404 |
+| `INT-NS-13` | `DELETE` khi còn run active | 409 |
+| `INT-NS-14` | Sau `DELETED`: tạo lại cùng name | Theo policy đã chốt (cho phép hoặc 409) — test khóa hành vi để không đổi ngầm |
+
+**Validate → Apply → Ready**
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-NS-20` | `validate` namespace không có service nào | Theo contract (INVALID hoặc cho qua); khóa bằng test |
+| `INT-NS-21` | `validate` khi có service thiếu OpenAPI | `DRAFT→VALIDATING→INVALID`, 422 + checklist (component, path, reason) |
+| `INT-NS-22` | `validate` hợp lệ | `→VALIDATING→APPLYING` |
+| `INT-NS-23` | `apply` từ `DRAFT` chưa validate / từ `DELETED` / `DELETING` | 409 (transition không hợp lệ), không đổi trạng thái |
+| `INT-NS-24` | **Legacy mode** (không cluster): `apply` | `APPLYING→DATA_LOADING→READY` đồng bộ, `ready_for_loadtest=true`, network_policies đã resolve từ dependencies |
+| `INT-NS-25` | **K8S_ENABLED**: `apply` | 202 `APPLYING`; chỉ `desired_generation++`; **không** ghi `READY` (Watcher mới ghi) |
+| `INT-NS-26` | `apply` với `Idempotency-Key` replay | Không bump `desired_generation` lần hai |
+| `INT-NS-27` | Sửa spec service khi namespace `READY` | `ready_for_loadtest=false`, đi nhánh revalidate (`→VALIDATING` / `DEGRADED→VALIDATING`) |
+| `INT-NS-28` | Sửa service nhưng nội dung spec không đổi (`spec_hash` giống) | `unchanged`, **không** reset ready, không bump generation |
+| `INT-NS-29` | `GET /readiness` legacy mode | Tính on-the-fly: services, policies, `mock_capacity` hook |
+| `INT-NS-30` | `GET /readiness` K8s mode, projection có dữ liệu | Đọc `tbl_component_status` + `blocking_reasons`, không tính lại |
+| `INT-NS-31` | `GET /readiness` K8s mode, projection rỗng | Fallback về `readinessGates` (không 500, không báo READY giả) |
+| `INT-NS-32` | `GET /dependencies`, `/network-policies` | Đồ thị đã resolve; policy per-service khớp `dependencies[]`; default-deny có mặt |
+
+### 11.3 Service, OpenAPI, Database, Dataset (`pkgs/serviceopenapi`, components)
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-SVC-01` | Thêm service với OpenAPI 3.0 YAML hợp lệ | 201; `spec_hash`, `parsed_summary` có; `GET /apis` liệt kê đúng operation (`operationId` hoặc method+path) |
+| `INT-SVC-02` | Cùng spec dạng JSON | Kết quả parsed tương đương YAML |
+| `INT-SVC-03` | Thiếu `openapi` | 422 |
+| `INT-SVC-04` | Cú pháp sai / ngữ nghĩa sai (`$ref` hỏng, thiếu `info`) | 422 + `details` có vị trí; **không** lưu service |
+| `INT-SVC-05` | Spec không có `paths` / không có operation | Theo contract (422 hoặc cho phép nhưng `targets` rỗng); khóa bằng test |
+| `INT-SVC-06` | Operation không có `operationId` | Vẫn index được bằng method+path |
+| `INT-SVC-07` | Spec vượt giới hạn kích thước | 413/422 theo guardrail, không treo parser |
+| `INT-SVC-08` | `PUT …/spec` cùng nội dung | `unchanged`; khác nội dung → ready reset, `spec_hash` đổi |
+| `INT-SVC-09` | Dependency trỏ `service_id` không tồn tại | 422 |
+| `INT-SVC-10` | `database_bindings` trỏ `database_id` không tồn tại | 422 |
+| `INT-SVC-11` | Xoá service đang được service khác phụ thuộc / đang có run | 409 |
+| `INT-SVC-12` | Dependency vòng (A→B→A) | Theo policy (cho phép vì là đồ thị gọi, hoặc 422); khóa bằng test, NetworkPolicy vẫn đúng |
+| `INT-SVC-13` | `service_id` trùng trong namespace | 409; trùng ở namespace khác → OK |
+| `INT-SVC-14` | Ingress trỏ service/port không tồn tại; host/path xung đột | 422 / 409 |
+| `INT-DB-01` | Thêm database hợp lệ (engine postgres, cnpg) | 201; binding hợp lệ sau đó OK |
+| `INT-DB-02` 🔜 | `data_source.dataset_id` không tồn tại / dataset không `AVAILABLE` / khác tenant / engine version lệch | 422 (hoặc 409) với lý do rõ |
+| `INT-DB-03` | `secret_ref` | Chỉ lưu reference; response không bao giờ có giá trị secret |
+| `INT-DB-04` 🔜 | `mock.enabled` + real provisioning cùng bật (mơ hồ) | 422 (không cho dual-active) — chờ mock-service |
+| `INT-DS-01` 🔜 | Tạo dataset (`Idempotency-Key`), `pii_classification` ∈ {masked, synthetic, non_prod_raw} | 201/202; giá trị khác → 422/CHECK |
+| `INT-DS-02` 🔜 | Dataset: owner own, admin cùng tenant xem/suspend, admin **không** thành owner | Đúng như `database-management-api.md` §10.3 |
+| `INT-DS-03` 🔜 | Xoá dataset đang được namespace tham chiếu | 409 |
+| `INT-DS-04` 🔜 | Location không thuộc bucket non-prod được duyệt / URL tuỳ ý | 422 (SSRF-safe). Liên quan `EXT-NET-02` |
+
+### 11.4 Script & Loadtest (`pkgs/script`, `pkgs/loadtest`, `pkgs/runner`)
+
+**Script**
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-SCR-01` | Upload `ok.js` ≤1MiB | `PENDING_VALIDATION`; worker chuyển `VALIDATING→VALIDATED` (Eventually); `content_hash` đúng |
+| `INT-SCR-02` | `oversize_1mib.js` (>1MiB) | 413/422 ở API; CHECK `size_bytes ≤ 1MiB` là lớp bảo vệ thứ hai |
+| `INT-SCR-03` | `syntax_error.js` | `INVALID`; `GET …/validations` có `attempt=1`, `errors` JSONB có dòng/lý do |
+| `INT-SCR-04` | `POST …/validate` (revalidate) từ `INVALID` | `→VALIDATING`, `attempt=2`, kết quả cũ giữ trong lịch sử |
+| `INT-SCR-05` | Revalidate từ `VALIDATED` (migration 0009) | Cho phép; không mất trạng thái cũ nếu validate lỗi hạ tầng |
+| `INT-SCR-06` | Validator lỗi hạ tầng (`FAKE_K6_MODE=inspect_fail` / binary thiếu) | `VALIDATION_FAILED` (khác `INVALID`), không tính là script sai |
+| `INT-SCR-07` | Queue worker đầy | 429 `QUOTA_EXCEEDED`, trạng thái script **không đổi** (= `STATE-QUEUE-01`, regression plan-16 High-2) |
+| `INT-SCR-08` | Script thuộc namespace khác hoặc tenant khác | 404 |
+| `INT-SCR-09` | Path traversal khi đọc staged script (`../`, symlink, `\x00`) | Bị chặn, không đọc ngoài thư mục staging |
+| `INT-SCR-10` | Validate đồng thời cùng một script | Chỉ một attempt chạy, không tạo attempt trùng |
+
+**Loadtest create (gates).** Chuẩn bị chung: namespace `READY` (legacy apply hoặc fake K8s + Watcher), script `VALIDATED`, service có OpenAPI `orders_valid.yaml`.
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-LT-01` | Happy path: targets hợp lệ + script VALIDATED + load_config | 202 + `status_url`; run `QUEUED/PROVISIONING→RUNNING`; transition trong tx; `Runner.Start` gọi đúng 1 lần với args/labels đúng |
+| `INT-LT-02` | Namespace chưa READY (DRAFT/APPLYING/DEGRADED/INVALID) | 409 `NAMESPACE_NOT_READY` + chi tiết readiness; **không** tạo run |
+| `INT-LT-03` | `ready_for_loadtest=true` nhưng `status_observed_at` quá `staleness_threshold` (fake clock) | 409 `NAMESPACE_NOT_READY` lý do `STATUS_STALE` (cùng gate với `WATCH-05`) |
+| `INT-LT-04` | Script chưa `VALIDATED` (PENDING/VALIDATING/INVALID/VALIDATION_FAILED) | 409 `SCRIPT_NOT_VALIDATED` |
+| `INT-LT-05` | `targets` rỗng | 422 |
+| `INT-LT-06` | Target: service không tồn tại / `operation_id` không tồn tại / method+path không khớp spec | 422 + `details` chỉ ra target nào |
+| `INT-LT-07` | Target bằng `operation_id` và bằng `method+path` cho cùng operation | Cả hai resolve; lưu dạng chuẩn hoá |
+| `INT-LT-08` | `load_config` vượt guardrail (vusers/duration/timeout) | 422 hoặc 429 theo policy; `GET /guardrails` khớp giới hạn thực |
+| `INT-LT-09` | Namespace của tenant khác / của owner khác (user thường) | 404 |
+| `INT-LT-10` | Admin tạo run trên namespace của owner cùng tenant | Cho phép nếu policy cho phép; `owner_user_id` của run theo contract; audit |
+| `INT-LT-11` | `Idempotency-Key` replay | Không tạo run thứ hai, không gọi `Runner.Start` lần hai |
+| `INT-LT-12` 🔜 | Quota 429 (`tbl_reservation_ledger`) | 429 `QUOTA_EXCEEDED` — chưa wire (`mvp-status.md` §7.5) |
+
+**Loadtest lifecycle & reconciler**
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-LT-20` | Run thành công (fake k6 `ok`) | `RUNNING→COMPLETED`; events liên tục, `seq` không đứt |
+| `INT-LT-21` | Run lỗi (`exit_nonzero`) | `FAILED`, lý do ghi trong event |
+| `INT-LT-22` | `POST /stop` khi RUNNING | `STOPPING→STOPPED`; process/TestRun fake bị dừng; stop lần hai idempotent 2xx (`RUN-STOP-01`) |
+| `INT-LT-23` | `stop` trên run đã terminal (COMPLETED/STOPPED) | Theo policy (2xx no-op hoặc 409); khóa bằng test |
+| `INT-LT-24` | Vượt `timeout_at` (fake clock) | `TIMED_OUT→TIMEOUT_CLEANED`; cleanup lỗi → `CLEANUP_FAILED`, reaper retry idempotent (`RUN-TIMEOUT-01`, `RUN-LEAK-01`) |
+| `INT-LT-25` | Reconciler mất runner (process không còn, DB vẫn RUNNING) | `FAILED` (runner-lost, plan-16 High) |
+| `INT-LT-26` | Reconciler khởi động lại giữa lúc có run RUNNING | Tiếp tục theo dõi từ `runner_ref`, không tạo run mới (`RUN-CRASH-01`) |
+| `INT-LT-27` | Reconciler chỉ đổi trạng thái qua `fn_loadtest_transition` | Không có `UPDATE … SET status` trực tiếp (test + grep CI cho `Raw` ngoài `pkgs/store/transitions.go`) |
+| `INT-LT-28` | `GET /loadtests` filter `namespace_id`, `status`; `owner` chỉ admin | Đúng phạm vi tenant/owner |
+| `INT-LT-29` | Namespace chuyển `DEGRADED` khi run đang RUNNING | Run **không** bị stop; event `namespace_degraded_at`; `GET` + events trả `unreliable:true` (plans/22) |
+| `INT-LT-30` | Namespace `DEGRADED` **trước** khi run bắt đầu | Không `unreliable` (cờ chỉ cho run bắt đầu trước degrade) |
+| `INT-LT-31` | `/logs` | Đã redact secret; chỉ owner/admin cùng tenant |
+
+### 11.5 Env Reconciler & Status Watcher (fake K8s client)
+
+Dùng `pkgs/k8s` fake (ghi lại lời gọi theo thứ tự, mô phỏng status). Case bám cluster thật ở §12.2.
+
+**Env Reconciler (desired → K8s)**
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-ENV-01` | Apply namespace đủ thành phần | Thứ tự lời gọi: Namespace → NetworkPolicy → CNPG Cluster → restore Job → mock binding → Deployment/Service → Ingress (`k8s-orchestration.md` §4.1) |
+| `INT-ENV-02` | Apply lại cùng `spec_hash` | No-op (không patch lại resource) |
+| `INT-ENV-03` | Đổi một service | Chỉ resource của `component-id` đó được apply lại |
+| `INT-ENV-04` | Xoá service khỏi spec | Resource có label `component-id` đó bị prune; resource **không** có label managed không bị đụng |
+| `INT-ENV-05` | Mọi resource tạo ra | Đủ 5 label (`managed-by`, `tenant-id`, `namespace-id`, `component-id`, `component-kind`); `fieldManager=loadtest-controller` |
+| `INT-ENV-06` | Manifest render | Không chứa plaintext secret; DB creds qua `secretKeyRef`; `automountServiceAccountToken=false`; ServiceAccount riêng mỗi service |
+| `INT-ENV-07` | NetworkPolicy trước workload | Không có lời gọi tạo Deployment nào đứng trước default-deny |
+| `INT-ENV-08` | Xoá Environment | Xoá K8s Namespace `lt-env-<id>`; không xoá từng resource lẻ |
+| `INT-ENV-09` | Reconciler **không** ghi readiness vào PG | Sau apply, `tbl_namespaces.status` chưa sang READY nếu Watcher chưa chạy |
+| `INT-ENV-10` | `deploy.image` dùng `:latest` ở profile prod | Bị từ chối ở validate |
+
+**Vòng Reconciler → Watcher.** Case sự cố của Watcher là `WATCH-01..06` (§2.3.1); dưới đây là case functional:
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-LOOP-01` | Apply namespace không `data_source`; fake K8s báo Deployment `Available`, Ingress, NetworkPolicy đủ | `APPLYING→READY`, `ready_for_loadtest=true`, `blocking_reasons` rỗng, `tbl_component_status` đủ dòng; **sau đó** `POST /loadtests` thành công |
+| `INT-LOOP-02` 🔜 | Có `data_source`: Cluster Ready → restore Job đang chạy | `APPLYING→DATA_LOADING`; gate loadtest vẫn 409; Job `Complete` + verify → `READY` |
+| `INT-LOOP-03` 🔜 | Restore Job `Failed` / quá `activeDeadlineSeconds` | `DATA_LOADING→INVALID`, `blocking_reasons` có `restore_job_failed` / `restore_timeout` |
+| `INT-LOOP-04` | Deployment `ProgressDeadlineExceeded` khi APPLYING | `→INVALID`/`DEGRADED` theo aggregator; reason `crash_loop`/`image_pull_backoff` |
+| `INT-LOOP-05` | READY, một Deployment rớt dưới `replicas` > grace 60s (fake clock) | `READY→DEGRADED`, `ready_for_loadtest=false`; ổn định > stable 60s → `READY` |
+| `INT-LOOP-06` | Quá `apply_deadline` ở APPLYING/DATA_LOADING | `DEGRADED`, reason `apply_deadline_exceeded` |
+| `INT-LOOP-07` | Sửa spec khi READY (`desired_generation` tăng) | Component cũ chỉ `PROGRESSING` đến khi `observed_generation` khớp; `/readiness` không báo READY sớm (`WATCH-03`) |
+| `INT-LOOP-08` | `network_policy`: thiếu một policy / `spec_hash` lệch (drift) | Phase `FAILED`/`PROGRESSING` + reason, namespace không READY |
+| `INT-LOOP-09` | Xoá Environment | `READY→DELETING`; K8s Namespace biến mất → Watcher ghi `DELETED` |
+| `INT-LOOP-10` | 4 transition bổ sung của migration 0011 (`APPLYING→READY`, `APPLYING→DEGRADED`, `DATA_LOADING→INVALID`, `DEGRADED→READY`) | Mỗi cái được đi qua ít nhất một lần (bổ sung cho `INT-MATRIX-02`) |
+| `INT-LOOP-11` | Watcher ghi `status_observed_at` mỗi lần reconcile/resync | Heartbeat tăng; dừng Watcher → xem `WATCH-05` / `INT-LT-03` |
+| `INT-LOOP-12` | Event của GVR thuộc namespace khác (label khác `managed-by`) | Bị bỏ qua, không enqueue |
+
+### 11.6 Ánh xạ trùng lặp giữa harness và `INT-*`
+
+| `INT-*` | Harness tương ứng | Giữ ở đâu |
+|---|---|---|
+| `INT-NS-03/04` | `API-IDEM-01/02` | Harness là nguồn chính; `INT-*` chỉ khoá contract response |
+| `INT-NS-07` | `API-CONC-01` | Harness |
+| `INT-ADM-15`, `INT-MATRIX-01` | `API-AUTHZ-01..04` | `INT-MATRIX-01` mở rộng sang toàn bộ route |
+| `INT-SCR-07` | `STATE-QUEUE-01` | Harness |
+| `INT-LT-03`, `INT-LOOP-11` | `WATCH-05` | Harness |
+| `INT-LT-22/24/25/26` | `RUN-STOP-01`, `RUN-TIMEOUT-01`, `RUN-LEAK-01`, `RUN-CRASH-01` | Harness (fault) / `INT-*` (happy path của lifecycle) |
+| `INT-NGX-01/07` | `NGX-01/02` | §12.1 triển khai thật trên compose |
+| `INT-K8S-04` | `RUN-NET-02` | K8s harness |
+
+## 12. Integration ngoài process: Nginx, K8s thật, E2E, Perf, Migration
+
+### 12.1 Nginx / trust boundary (`tests/nginx/`)
+Dựng `docker compose`: nginx (`conf/nginx`) + controller + postgres + một OIDC provider giả (JWKS tĩnh, token ký sẵn). Đây là nơi duy nhất kiểm **header injection thật** — các tầng khác chỉ giả lập header.
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-NGX-01` | Client gửi `X-Tenant-Id`/`X-User-Id`/`X-User-Role: admin` giả kèm token hợp lệ của user thường | Controller nhận header **do nginx set**, không phải giá trị giả; không có quyền admin |
+| `INT-NGX-02` | Bearer JWT hợp lệ | 200; `X-Tenant-Id`, `X-User-Id` đúng; `X-User-Role` theo claim |
+| `INT-NGX-03` | JWT hết hạn / sai chữ ký / sai issuer | 401 tại nginx, request không tới controller |
+| `INT-NGX-04` | Bearer `abt_` (introspect qua controller) | 200; `X-User-Id` từ introspection; sau revoke: tối đa sau TTL cache (~60s) mới 401 — test dùng cache TTL ngắn |
+| `INT-NGX-05` | **Role propagation gap** (đã biết): `abt_` và OIDC session không set `X-User-Role` | **Khóa hành vi hiện tại**: admin vẫn được chuẩn hoá từ DB (`tbl_user_roles`), user thường không thành admin; khi nginx được căn chỉnh thì cập nhật test (`NGX-03`) |
+| `INT-NGX-06` | `/api/admin/v1/tenant/*`, `/token/introspect` từ client bên ngoài | Không truy cập được từ kênh public (chỉ kênh trusted nginx) |
+| `INT-NGX-07` | Upstream controller chậm/chết khi nginx gọi auth-config/introspect | Fail an toàn (không cho vào ẩn danh); cache có TTL |
+| `INT-NGX-08` | `auth-config` cache 600s; rotate secret | Hành vi đúng sau khi cache hết hạn |
+| `INT-NGX-09` | Method allowlist | `DELETE`/`OPTIONS` hoạt động cho route cần; method lạ bị chặn |
+
+### 12.2 K8s harness (`//go:build harness_k8s`, kind/colima)
+Giữ ở `tests/harness/k8s/`; ngoài `WATCH-01..06` và `RUN-NET-02`, thêm case functional trên cluster thật:
+
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-K8S-01` | SSA apply thật: Namespace, Deployment, Service, Ingress, NetworkPolicy | Idempotent khi apply lại; managed fields đúng `loadtest-controller` |
+| `INT-K8S-02` | CNPG `Cluster` CR | Cần operator + CRD cài sẵn; Watcher đọc condition `Ready` đúng |
+| `INT-K8S-03` | Informer thật: xoá Deployment bằng tay (drift) | Watcher phát hiện, namespace → `DEGRADED` sau grace |
+| `INT-K8S-04` | Default-deny + per-service policy | Pod runner không tới được đích ngoài danh sách (`RUN-NET-02`); SUT gọi được dependency khai báo |
+| `INT-K8S-05` 🔜 | `TestRun` k6-operator thật | Cần K8s runner (hiện `newRunner()` luôn trả Local); `status.stage` → `fn_loadtest_transition` |
+| `INT-K8S-06` | RBAC ServiceAccount controller | Mọi verb trong bảng RBAC `k8s-orchestration.md` §6 hoạt động; verb ngoài bảng bị từ chối |
+
+### 12.3 E2E smoke (`scripts/e2e-smoke.sh`)
+Hiện đã PASS: seed → namespace → service → validate → apply → script → loadtest → events.
+
+| ID | Kịch bản | Môi trường |
+|---|---|---|
+| `E2E-01` | Luồng chính như trên (legacy mode, Local runner) | `docker compose` |
+| `E2E-02` | Luồng chính + phủ định: namespace chưa READY → loadtest 409; script INVALID → 409 | `docker compose` |
+| `E2E-03` | Đi qua nginx với `abt_` token (issue → dùng → revoke → bị chặn) | compose + nginx |
+| `E2E-04` 🔜 | K8s mode trên kind: apply thật → READY (Watcher) → run qua K8s runner | kind, sau khi có K8s runner |
+
+### 12.4 Perf (`tests/perf/`)
+Ngưỡng đã định nghĩa: `control-plane.js` (40 rps đọc, p95 < 100ms), `admin.js` (80 rps introspect). **Chưa chạy lần nào** vì k6 chưa cài (`mvp-status.md` §7.2).
+
+| ID | Việc cần làm |
+|---|---|
+| `PERF-01` | Cài k6, chạy cả hai script trên stack compose, **ghi baseline vào README** (p50/p95/p99, error rate, máy chạy) |
+| `PERF-02` | Thêm script cho `/readiness` (projection-backed) và gate `POST /loadtests` để bắt hồi quy truy vấn JOIN |
+| `PERF-03` | Gắn vào CI/nightly với ngưỡng = baseline × hệ số dung sai đã chốt |
+
+### 12.5 Migration (thuộc `pkgs/store`)
+| ID | Kịch bản | Expected |
+|---|---|---|
+| `INT-MIG-01` | Migrate từ DB rỗng 0001→0011 | Thành công; `tbl_schema_migrations` đủ bản ghi, đúng thứ tự |
+| `INT-MIG-02` | Chạy lại runner trên DB đã migrate | No-op, không lỗi |
+| `INT-MIG-03` | Nâng cấp từ snapshot cũ có dữ liệu (trước 0007) | Secrets bị strip, dữ liệu khác nguyên vẹn; token cũ vẫn introspect được |
+| `INT-MIG-04` | Hai instance chạy migration đồng thời | Chỉ một thắng (advisory lock), không áp trùng |
+| `INT-MIG-05` | File migration đã áp bị sửa nội dung (checksum lệch) | Runner từ chối, báo rõ |
+
+## 13. Chạy test & CI
+
+```bash
+# Unit + integration + harness (cần Postgres 16)
+docker compose up -d postgres
+export TEST_DATABASE_DSN='postgres://…'
+go test -race ./...                         # integration tự skip nếu không có DSN (CI=true thì fail)
+
+# SQL
+for t in tests/sql/*_test.sql; do psql "$TEST_DATABASE_DSN" -v ON_ERROR_STOP=1 -f "$t"; done
+
+# Một kịch bản theo ID
+go test -race ./... -run 'TestINT_LT_03'
+
+# K8s harness (cần kind/colima + CRD)
+go test -tags harness_k8s ./tests/harness/k8s/...
+
+# E2E
+docker compose up -d --build && ./scripts/e2e-smoke.sh
+```
+
+| CI job | Chạy | Ghi chú |
+|---|---|---|
+| `lint` | golangci-lint v2 | |
+| `test` | unit + integration (`INT-*`) + harness (fake K8s), `-race`, Postgres service | `CI=true` ⇒ không được skip |
+| `sql-migrations` | migrate từ rỗng + `tests/sql/*` | |
+| `build` | image | |
+| `watcher-harness` | `harness_k8s` trên kind | |
+| *(đề xuất)* `nginx-integration` | `tests/nginx/` trên compose | PR đụng `conf/nginx` bắt buộc |
+| *(đề xuất)* `e2e` | `scripts/e2e-smoke.sh` | |
+| *(đề xuất, nightly)* `perf`, `k6-real` | k6 perf + Local runner với k6 thật | |
+
+## 14. Khoảng trống đã biết & theo dõi coverage
+
+| Khoảng trống | Ảnh hưởng test | Hành động |
+|---|---|---|
+| K8s runner chưa có (`newRunner()` luôn Local) | `INT-K8S-05`, `E2E-04` | Viết cùng plan K8s runner |
+| k6 perf chưa chạy lần nào | `PERF-01..03` | Cài k6, chạy, ghi baseline |
+| Outbox worker chưa có dispatcher | `API-OUTBOX-01/02` | Viết cùng worker |
+| Quota gate 429 chưa wire vào loadtest | `INT-LT-12`, `DB-TXN-07` phía app | Viết cùng tính năng |
+| mock-service endpoint còn stub | `INT-DB-04`, mock readiness, `MOCK-*` | Viết khi contract chốt |
+| Dataset/restore chưa implement | `INT-DS-*`, `INT-DB-02`, `INT-LOOP-02/03` | Viết cùng tính năng |
+| Role propagation nginx chưa đồng nhất | `INT-NGX-05` chỉ khóa hành vi hiện tại | Cập nhật khi chỉnh `conf/nginx` |
+| Hành vi biên chưa chốt (namespace rỗng, dependency vòng, stop run đã terminal, tạo lại tên sau `DELETED`, status khi thiếu `Idempotency-Key`) | Các case "khóa bằng test" ở §11 | Chốt quyết định, ghi vào doc API tương ứng, rồi đổi kỳ vọng thành giá trị cụ thể |
+
+### 14.1 Theo dõi ID đã có test
+Catalogue này chưa đối chiếu với các test file hiện có. Cách đồng bộ rẻ nhất:
+
+1. Đặt tên test theo `TestINT_<DOMAIN>_<NN>_…` (§9.6); test cũ thì đổi tên hoặc thêm comment `// covers: INT-NS-06`.
+2. Thêm `scripts/test-coverage-map.sh`: `grep` các ID trong `docs/harness-testing.md` và trong `*_test.go`, in ID **chưa có test** và ID **mồ côi** (có trong code nhưng không có trong doc).
+3. Chạy trong CI ở chế độ cảnh báo; chuyển thành fail khi catalogue được phủ phần lớn.
