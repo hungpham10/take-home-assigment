@@ -197,3 +197,203 @@ Mock runtime (`cmds/mock-service`, phase sau theo `mock-service-api.md`) là **d
 - Drift report UI (so observed managed fields vs desired).
 - TTL tự động xoá Environment/Namespace (hiện reaper chạy cho run; env TTL đang open item trong `architecture.md` §3.3).
 - ResourceQuota/LimitRange profile per tenant.
+
+## 10. High Availability (HA) — Leader Election & Sharding
+
+**Current MVP limitation:** The `loadtest-controller` runs as a **single replica**. Both the Env Reconciler (Loop 1) and Status Watcher (Loop 2) are simple goroutine loops with **no coordination** between instances.
+
+### Problems with Multiple Replicas (No HA)
+
+| Component | Issue |
+|-----------|-------|
+| **Env Reconciler** | - Concurrent SSA applies with same field manager (`loadtest-controller`) → field ownership conflicts<br>- Prune thrash: Pod A applies, Pod B prunes (different desired set snapshot)<br>- Double work: All pods apply same manifests<br>- `DeleteEnv` races: Multiple pods delete same K8s namespace |
+| **Status Watcher** | - Concurrent `tbl_component_status` upserts → lost updates<br>- Concurrent `fn_namespace_transition` calls → transition conflicts<br>- Multiple watchers watching same K8s resources → duplicate events |
+
+### Required for HA (Post-MVP)
+
+#### Option A: Per-Namespace Leader Election (Recommended)
+
+Use K8s `coordination.k8s.io/v1` **Lease** per namespace:
+
+```go
+// One Lease per namespace: loadtest-reconciler-<namespace_id>
+// One Lease per namespace: loadtest-watcher-<namespace_id>
+
+lock := &resourcelock.LeaseLock{
+    LeaseMeta: metav1.ObjectMeta{
+        Name:      "loadtest-reconciler-" + namespaceID,
+        Namespace: "loadtest-system",
+    },
+    Client: client.CoreV1(),
+    LockConfig: resourcelock.ResourceLockConfig{Identity: podName},
+}
+
+election, _ := leaderelection.NewLeaderElector(leaderelection.LeaderElectionConfig{
+    Lock:            lock,
+    LeaseDuration:   15 * time.Second,
+    RenewDeadline:   10 * time.Second,
+    RetryPeriod:     2 * time.Second,
+    Callbacks: leaderelection.LeaderCallbacks{
+        OnStartedLeading: func(ctx context.Context) { runReconcileLoop(ctx) },
+        OnStoppedLeading: func() { /* resign */ },
+    },
+})
+election.Run(ctx)
+```
+
+**Properties:**
+- Only leader reconciles that namespace
+- Automatic failover on pod death (lease expires)
+- No sharding complexity
+
+#### Option B: Consistent-Hash Sharding
+
+Each pod handles a subset of namespaces:
+
+```go
+func shouldReconcile(namespaceID string, replicaCount, replicaIndex int) bool {
+    h := fnv.New32a()
+    h.Write([]byte(namespaceID))
+    return int(h.Sum32())%replicaCount == replicaIndex
+}
+```
+
+**Properties:**
+- All pods active (no standby)
+- Need stable `replicaCount` (Deployment spec) + `replicaIndex` (pod ordinal via `statefulset` or downward API)
+- On pod churn, some namespaces briefly un-reconciled until rebalance
+
+### Shared SSA Field Manager
+
+If multiple pods apply, **field manager must be unique per pod** OR use leader election:
+
+```go
+// Option 1: Unique field manager per pod (with leader election)
+fieldManager := "loadtest-controller-" + podName
+
+// Option 2: Same field manager ONLY if leader election ensures single writer
+// Current: const FieldManager = "loadtest-controller" (single writer assumed)
+```
+
+### Watcher HA
+
+Same pattern — per-namespace Lease for watcher:
+- Only one watcher writes `tbl_component_status` + calls `fn_namespace_transition` per namespace
+- Watch events still delivered to all pods, but only leader processes
+
+### Implementation Locations
+
+| Component | File | Change Needed |
+|-----------|------|---------------|
+| Env Reconciler | `pkgs/envreconciler/reconciler.go` | Add `LeaderElection` config to `Start()` |
+| Status Watcher | `pkgs/statuswatcher/watcher.go` | Add `LeaderElection` config to `Start()` |
+| Orchestration wiring | `cmds/loadtest-controller/orchestration.go` | Initialize election locks per namespace |
+| Deployment | `conf/k8s/deployment.yaml` | Single replica for MVP; HA = add Lease RBAC + config |
+
+### RBAC for Leases
+
+```yaml
+# Additional rules for loadtest-controller ServiceAccount
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  resourceNames: ["loadtest-reconciler-*", "loadtest-watcher-*"]
+```
+
+### MVP Decision
+
+| Environment | Reconciler Replicas | Watcher Replicas | Mechanism |
+|-------------|---------------------|------------------|-----------|
+| **MVP (current)** | 1 | 1 | Single instance, no HA |
+| **Post-MVP HA** | N (with leader election) | N (with leader election) | Per-namespace Lease |
+
+This is documented as **Open Item #10** in `architecture.md` and tracked for post-MVP implementation.
+
+## 11. Future Refactor: Composite Component Pattern for ApplyTree
+
+**Current implementation** (`pkgs/envreconciler/tree.go`) uses a custom `Applier` interface with three concrete types (`objectApplier`, `groupApplier`, `namespaceApplier`). The `BuildApplyTree()` function is a monolithic builder that hardcodes the apply order and component types.
+
+**Proposed refactor** — **Composite Pattern** with a `Component` interface:
+
+```go
+type Component interface {
+    Kind() string
+    Name() string
+    Render(env *Env) []*unstructured.Unstructured
+    Apply(ctx context.Context, client k8s.Client, env *Env) error
+    Children() []Component
+    SpecHash() string
+    DesiredGeneration() int64
+    Labels() map[string]string
+}
+```
+
+### Component Hierarchy
+
+```
+EnvironmentComponent (root composite)
+├── NetworkPolicyComponent (leaf)
+├── DatabaseComponent (leaf, polymorphic: CNPG/ECK)
+├── ServiceComponent (composite) ← "svc-order"
+│   ├── ConfigMapComponent (leaf) ← "svc-order-config"
+│   ├── SecretComponent (leaf) ← "svc-order-secret"
+│   ├── ServiceAccountComponent (leaf) ← "svc-order"
+│   ├── DeploymentComponent (leaf) ← "svc-order"
+│   ├── K8sServiceComponent (leaf) ← "svc-order"
+│   └── HPAComponent (leaf, optional) ← "svc-order"
+├── IngressComponent (leaf)
+└── MockBindingComponent (leaf)
+```
+
+### Benefits
+
+| Aspect | Current | Composite Pattern |
+|--------|---------|-------------------|
+| **New component type** | Modify `BuildApplyTree()` + `tree.go` | Add factory to registry |
+| **Service sub-resources** | Hardcoded sequence in `BuildApplyTree` | Natural children of `ServiceComponent` |
+| **Mock bindings** | Separate `BindingsFunc` hook | Just another component in tree |
+| **Render vs Apply** | Coupled in builder | Separated: `Render()` pure, `Apply()` default |
+| **Testability** | Need full tree + fake client | Test `Render()` in isolation |
+| **Extensibility** | Low | High (plugin-style registry) |
+
+### Migration Plan
+
+1. Add `component.go` with `Component` interface + `LeafComponent`/`CompositeComponent` base types
+2. Extract each component's render logic from `render.go` into dedicated files:
+   - `component_networkpolicy.go`
+   - `component_database.go` (CNPG/ECK polymorphic)
+   - `component_service.go` (composite with sub-components)
+   - `component_ingress.go`
+   - `component_mockbinding.go`
+   - `component_environment.go` (root)
+3. Create `registry.go` for component factories
+4. Replace `BuildApplyTree()` with `BuildComponentTree(env *Env) Component`
+5. Replace `ApplyTree()` with simple DFS `applyDFS()`
+6. Delete `Applier` implementations and `tree.go`
+
+### Example: Adding ServiceMeshComponent
+
+```go
+// New file: component_servicemesh.go
+func NewServiceMeshComponent(env *Env, spec ServiceMeshSpec) Component {
+    return &LeafComponent{
+        kind: "ServiceMeshPolicy",
+        name: spec.Name,
+        renderFn: func(env *Env) []*unstructured.Unstructured {
+            return []*unstructured.Unstructured{renderServiceMesh(env, spec)}
+        },
+        specHash: spec.SpecHash,
+        desiredGeneration: env.Generation,
+        labels: withComponent(baseLabels(env), spec.Name),
+    }
+}
+
+// Register in init()
+func init() { registry["servicemesh"] = NewServiceMeshComponent }
+```
+
+**Zero changes to apply logic** — just works.
+
+### Tracking
+
+This is a post-MVP refactor tracked as **Open Item** in `architecture.md`.

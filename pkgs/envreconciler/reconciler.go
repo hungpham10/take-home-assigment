@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
@@ -30,9 +29,6 @@ type Reconciler struct {
 	// RenderFunc renders the desired objects (default Render). mockcontrol
 	// overrides it to inject MOCK_* env into SUT deployments.
 	RenderFunc func(env *Env) []*unstructured.Unstructured
-	// BindingsFunc renders extra binding objects (mock binding ConfigMaps +
-	// ExternalName Services, apply step 5); nil = none.
-	BindingsFunc func(env *Env) []*unstructured.Unstructured
 }
 
 // New wires a Reconciler over any k8s.Client (real or Fake).
@@ -43,9 +39,9 @@ func New(c k8s.Client, opts Options) *Reconciler {
 	return &Reconciler{client: c, interval: opts.Interval}
 }
 
-// Attach configures the mock-wiring hooks (called by mockcontrol).
-func (r *Reconciler) Attach(render, bindings func(env *Env) []*unstructured.Unstructured) {
-	r.RenderFunc, r.BindingsFunc = render, bindings
+// Attach configures the render override hook (called by mockcontrol).
+func (r *Reconciler) Attach(render func(env *Env) []*unstructured.Unstructured) {
+	r.RenderFunc = render
 }
 
 func (r *Reconciler) render(env *Env) []*unstructured.Unstructured {
@@ -68,32 +64,13 @@ func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
 	if err := ValidateDatabaseOperators(env); err != nil {
 		return err
 	}
-	// Hierarchical apply (plans/26): ngoài→trong qua Applier tree — namespace
-	// tự áp trước rồi gọi Apply() của con. Flat Render list chỉ còn phục vụ
-	// prune.
+	// Hierarchical apply: Component tree (BuildComponentTree), áp DFS ngoài→trong.
+	// Mock binding giờ là một Component trong cây (MockBindingComponent), không
+	// còn hook BindingsFunc riêng.
 	if err := ApplyTree(ctx, r.client, env); err != nil {
 		return err
 	}
-	// Mockcontrol bindings (ConfigMap + ExternalName Service) — apply step 5.
-	var bound []*unstructured.Unstructured
-	if r.BindingsFunc != nil {
-		bound = r.BindingsFunc(env)
-	}
-	for _, obj := range bound {
-		if env.Generation > 0 {
-			ann := obj.GetAnnotations()
-			if ann == nil {
-				ann = map[string]string{}
-			}
-			ann[k8s.AnnotationDesiredGeneration] = strconv.FormatInt(env.Generation, 10)
-			obj.SetAnnotations(ann)
-		}
-		if err := r.client.Apply(ctx, obj); err != nil {
-			return fmt.Errorf("envreconciler: apply %s/%s: %w", obj.GetKind(), obj.GetName(), err)
-		}
-	}
 	desired := r.render(env)
-	desired = append(desired, bound...)
 	return r.prune(ctx, env, desired)
 }
 

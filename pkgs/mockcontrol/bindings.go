@@ -204,7 +204,10 @@ func toUnstructured(obj map[string]any, group, version, kind string) *unstructur
 }
 
 // Attach wires the mock hooks onto the reconciler: SUT env injection +
-// binding objects (apply step 5, docs/k8s-orchestration.md §4.1).
+// binding objects (apply step 5, docs/k8s-orchestration.md §4.1). RenderFunc
+// injects MOCK_* env; MockBindingComponent render func (set via setter) adds
+// mock binding ConfigMap/Service as a normal tree node.
 func Attach(rc *envreconciler.Reconciler) {
-	rc.Attach(InjectMockEnv, RenderBindings)
+	rc.RenderFunc = InjectMockEnv
+	envreconciler.SetMockBindingRenderFunc(RenderBindings)
 }

@@ -163,84 +163,15 @@ func toUnstructured(obj map[string]any, group, version, kind string) *unstructur
 // Cluster → restore Job → mock bindings → Deployments+Services → Ingress.
 // The restore-Job and mock-binding steps are added by later PRs (mockcontrol,
 // plan 21 PR D); today they are absent for envs without those features.
+//
+// Render đi qua cây Component (BuildComponentTree + RenderAll) thay vì tự
+// hardcode thứ tự — giữ nguyên thứ tự apply đã khóa.
 func Render(env *Env) []*unstructured.Unstructured {
-	var objs []*unstructured.Unstructured
-	envNS := envNamespaceName(env.NamespaceID)
-
-	// 1. Environment namespace with ownership labels.
-	objs = append(objs, toUnstructured(map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Namespace",
-		"metadata":   map[string]any{"name": envNS, "labels": baseLabels(env)},
-	}, "", "v1", "Namespace"))
-
-	// 2. NetworkPolicy: default-deny in/out with an allow-list for declared
-	// ingress traffic; egress allow-list comes from the resolved dependency
-	// spec. K8s has no status subresource here — the watcher infers "applied"
-	// from existence + spec_hash.
-	np := toUnstructured(map[string]any{
-		"apiVersion": "networking.k8s.io/v1",
-		"kind":       "NetworkPolicy",
-		"metadata": map[string]any{
-			"name":      "default-deny",
-			"namespace": envNS,
-			"labels":    baseLabels(env),
-		},
-		"spec": defaultDenySpec(env),
-	}, "networking.k8s.io", "v1", "NetworkPolicy")
-	annotate(np, HashSpec(env.Policy))
-	objs = append(objs, np)
-
-	// 3. Operator CR per database — chosen by the operator column
-	// (cloudnative-pg | elastic/ECK); unknown operator fails closed upstream
-	// (ValidateDatabaseOperators) and is skipped defensively here.
-	for _, db := range env.Databases {
-		u, err := renderDatabaseCR(envNS, env, db)
-		if err != nil {
-			continue // ValidateDatabaseOperators already failed the apply
-		}
-		annotate(u, db.SpecHash)
-		objs = append(objs, u)
+	tree, err := BuildComponentTree(env)
+	if err != nil {
+		return nil
 	}
-
-	// 6. Per service: ConfigMap → Secret → ServiceAccount → Deployment
-	// (mounts/envFrom/secretKeyRef) → Service → HPA.
-	for _, svc := range env.Services {
-		if len(svc.ConfigMap) > 0 {
-			cm := toUnstructured(configMap(envNS, env, svc), "", "v1", "ConfigMap")
-			annotate(cm, svc.SpecHash)
-			objs = append(objs, cm)
-		}
-		if len(svc.Secrets) > 0 {
-			sec := toUnstructured(secret(envNS, env, svc), "", "v1", "Secret")
-			annotate(sec, svc.SpecHash)
-			objs = append(objs, sec)
-		}
-		if svc.ServiceAccount {
-			sa := toUnstructured(serviceAccount(envNS, env, svc), "", "v1", "ServiceAccount")
-			annotate(sa, svc.SpecHash)
-			objs = append(objs, sa)
-		}
-		dep := toUnstructured(deployment(envNS, env, svc), "apps", "v1", "Deployment")
-		annotate(dep, svc.SpecHash)
-		objs = append(objs, dep)
-		sv := toUnstructured(service(envNS, env, svc), "", "v1", "Service")
-		annotate(sv, svc.SpecHash)
-		objs = append(objs, sv)
-		if svc.HPA != nil {
-			hpa := toUnstructured(hpa(envNS, env, svc), "autoscaling", "v2", "HorizontalPodAutoscaler")
-			annotate(hpa, svc.SpecHash)
-			objs = append(objs, hpa)
-		}
-	}
-
-	// 7. Ingress per ingress spec.
-	for _, ing := range env.Ingresses {
-		u := toUnstructured(ingress(envNS, env, ing), "networking.k8s.io", "v1", "Ingress")
-		annotate(u, ing.SpecHash)
-		objs = append(objs, u)
-	}
-	return objs
+	return RenderAll(tree, env)
 }
 
 // defaultDenyNP là manifest default-deny dùng chung bởi Render (prune) và
