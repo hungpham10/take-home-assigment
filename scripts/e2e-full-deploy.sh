@@ -12,7 +12,8 @@ set -e
 BASE=${BASE:-http://localhost:18080}
 PG_PORT=${PG_PORT:-55433}
 CLUSTER=${CLUSTER:-ltp-full-deploy}
-CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.25/releases/cnpg-1.25.yaml"
+CNPG_MANIFEST=$(curl -fsSL https://api.github.com/repos/cloudnative-pg/cloudnative-pg/releases/latest \
+  | python3 -c "import sys,json;print([a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if a['name'].endswith('.yaml') and a['name'].startswith('cnpg-')][0])")
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }

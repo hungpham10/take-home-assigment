@@ -245,6 +245,8 @@ func TestWATCH08WatchEventsTriggerReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
+	// SSA không nhận object có managedFields sẵn (từ Get) — strip trước apply.
+	dep.SetManagedFields(nil)
 	_ = unstructured.SetNestedField(dep.Object, int64(2), "spec", "replicas")
 	if err := client.Apply(ctx, dep); err != nil {
 		t.Fatalf("scale deployment: %v", err)
