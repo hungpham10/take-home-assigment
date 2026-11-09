@@ -7,6 +7,9 @@
 # Yêu cầu: docker, kind (hoặc KUBECONFIG trỏ sẵn), kubectl, curl, python3.
 # Env: KEEP_CLUSTER=1 giữ lại kind cluster sau khi chạy; SKIP_BOOTSTRAP=1 dùng
 # cluster hiện có (đã cài CNPG).
+# NetworkPolicy enforcement: kindnetd default CNI does NOT enforce
+# NetworkPolicies. Calico is installed automatically when bootstrapping to
+# make RUN-NET-02 / INT-K8S-04 enforcement real.
 set -e
 
 BASE=${BASE:-http://localhost:18080}
@@ -34,6 +37,11 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   docker pull ealen/echo-server:latest >/dev/null 2>&1 || true
   docker pull ghcr.io/cloudnative-pg/postgresql:16 >/dev/null 2>&1 || true
   kind load docker-image ealen/echo-server:latest ghcr.io/cloudnative-pg/postgresql:16 --name "$CLUSTER" 2>/dev/null || true
+
+  # Install Calico so NetworkPolicy is actually enforced (kindnetd does not).
+  say "install Calico CNI (NetworkPolicy enforcement)"
+  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml >/dev/null
+  kubectl -n calico-system rollout status daemonset/calico-node --timeout=180s
 fi
 [ -n "${KUBECONFIG:-}" ] || KUBECONFIG="$HOME/.kube/config"
 export KUBECONFIG
@@ -155,6 +163,45 @@ if [ "$READY" != "true" ]; then
   fail "namespace did not reach READY"
 fi
 echo "   namespace READY ✅"
+
+# --- 4b. verify NetworkPolicy objects exist (default-deny + per-service + per-db)
+say "verify NetworkPolicy objects"
+ENVNS="lt-env-$NS"
+kubectl get networkpolicy -n "$ENVNS"
+for np in default-deny echo-policy demo-db-policy; do
+  kubectl get networkpolicy -n "$ENVNS" "$np" >/dev/null 2>&1 || fail "NetworkPolicy $np not found in $ENVNS"
+done
+# default-deny must NOT have allow-all ingress (ingress:[{}] was removed).
+DD_INGRESS=$(kubectl get networkpolicy -n "$ENVNS" default-deny -o jsonpath='{.spec.ingress}' 2>/dev/null || echo "null")
+if [ "$DD_INGRESS" = "[]" ] || [ "$DD_INGRESS" = "[{}]" ]; then
+  fail "default-deny still allows all ingress (expected platform allowances only)"
+fi
+echo "   NetworkPolicies present: default-deny, echo-policy, demo-db-policy ✅"
+
+# --- 4c. simple egress enforcement probe (RUN-NET-02 subset)
+say "egress enforcement probe"
+PROBE_POD="netprobe-$(date +%s)"
+kubectl run "$PROBE_POD" --image=ealen/echo-server:latest --restart=Never -n "$ENVNS" >/dev/null 2>&1 || true
+for i in $(seq 1 15); do
+  STATUS=$(kubectl get pod "$PROBE_POD" -n "$ENVNS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+  [ "$STATUS" = "Running" ] && break
+  sleep 1
+done
+# Probe pod egress to K8s API should be allowed (default-deny opens node CIDR :6443).
+API_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- sh -c 'wget -qO- --timeout=5 https://kubernetes.default.svc:443/version 2>/dev/null | head -c 1' 2>/dev/null || echo "")
+if [ -z "$API_REACHABLE" ]; then
+  kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
+  fail "probe pod cannot reach K8s API — Calico may not be enforcing or DNS broken"
+fi
+# Probe pod egress to echo service should be DENIED (not a declared dependency;
+# default-deny egress only allows DNS + kube-apiserver + declared deps).
+ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- sh -c 'wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1' 2>/dev/null || echo "")
+if [ -n "$ECHO_REACHABLE" ]; then
+  kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
+  fail "probe pod reached echo service without declared dependency — default-deny egress not enforced"
+fi
+kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
+echo "   egress enforcement verified: API ✅, undeclared echo ❌ ✅"
 
 # --- 5. verify cluster thật -----------------------------------------------------
 say "verify cluster state"

@@ -223,6 +223,7 @@ Ingress rules must target valid `service_id`/ports in the namespace.
 - Dependencies are declared on services and validated (known targets, allowed graph/policy constraints).
 - **NetworkPolicy is derived from dependencies** for each service (least privilege). Allow only declared dependency traffic + required platform allowances (DNS/metrics/control as needed) + load-test runner access required for targeted runs.
 - Dependent services must be linkable/communicable under the selected namespace model.
+- Runner policy: for load-test runs, render an additional egress policy (runner → resolved target) and ingress policy (target ← runner) selected by label `loadtest.io/run-id`. NetworkPolicy is L3/L4 only (`service` + `port`); `operation_id`/`path` are validated and audited here but not enforced by NetworkPolicy. Full spec: [`docs/network-policy.md`](network-policy.md).
 
 | Method | Path | Purpose |
 |---|---|---|

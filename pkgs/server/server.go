@@ -15,6 +15,7 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/adminapi"
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
+	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
 	"github.com/hungpham/loadtest-platform/pkgs/namespace"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
@@ -32,6 +33,7 @@ type Deps struct {
 	ScriptsDir string           // staging dir for k6 scripts
 	ScriptQ    *script.Queue    // async validation queue (nil → sync in tests)
 	Runner     runner.Runner    // load-test execution backend (local/k8s)
+	K8s        k8s.Client       // cluster client for run-scoped NetworkPolicy (nil in legacy/local mode)
 	K8S        bool             // cluster wired → async apply (plans/21); false = legacy sync
 	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
 	// ApplyNow (plans/26): hierarchical apply ngay trong request path sau khi
@@ -83,7 +85,7 @@ func NewRouter(d Deps) http.Handler {
 		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
-		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8S: d.K8S, StaleAfter: d.StaleAfter})
+		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8s: d.K8s, K8S: d.K8S, StaleAfter: d.StaleAfter})
 	})
 	// Script content reader for the runner (staged files).
 	loadtest.ScriptContentOf = func(ref string) ([]byte, error) {

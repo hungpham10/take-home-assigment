@@ -17,6 +17,8 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
 	"github.com/hungpham/loadtest-platform/pkgs/idempotency"
+	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
+	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
@@ -26,6 +28,10 @@ type Deps struct {
 	DB     *gorm.DB
 	Runner runner.Runner
 	Now    func() time.Time
+	// K8s is the cluster client for run-scoped NetworkPolicy (nil in
+	// legacy/local mode). When non-nil, run policies are applied before
+	// Provision so enforcement exists when runner pods start.
+	K8s k8s.Client
 	// K8S enables the fail-closed STATUS_STALE gate (plans/21, WATCH-05):
 	// with a cluster wired, POST /loadtests returns 409 NAMESPACE_NOT_READY
 	// when the watcher heartbeat (status_observed_at) is missing or older
@@ -134,6 +140,26 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	}
 	d.audit(ctx, r, p, "loadtest.create", lt.ID)
 
+	// Run-scoped NetworkPolicy: applied before Provision so enforcement
+	// exists when runner pods start. No-op when K8s client is nil
+	// (legacy/local mode).
+	if d.K8s != nil {
+		envNS := envreconciler.EnvNamespaceName(ns.ID)
+		runObjs, err := envreconciler.RunNetworkPolicies(envNS, &envreconciler.Env{
+			NamespaceID: ns.ID, TenantID: ns.TenantID,
+		}, lt.ID, targets)
+		if err != nil {
+			httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "run policy build failed: "+err.Error())
+			return
+		}
+		for _, obj := range runObjs {
+			if err := d.K8s.Apply(ctx, obj); err != nil {
+				httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "run policy apply failed: "+err.Error())
+				return
+			}
+		}
+	}
+
 	// Provision synchronously; the reconciler advances PROVISIONING→RUNNING.
 	spec := runner.Spec{
 		ID: lt.ID, Script: scriptContent(ctx, d.DB, sc), VUs: intOf(cfg["vusers"], 1),
@@ -189,6 +215,9 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 }
 
 // collectTargets aggregates targets[] from all services' parsed summaries.
+// Each target is augmented with service_id (from tbl_services.service_id)
+// and port (from tbl_services.deploy) so the run-scoped NetworkPolicy can
+// resolve (pod selector, port) per target.
 func (d Deps) collectTargets(ctx context.Context, nsID string) ([]map[string]any, error) {
 	var services []store.Service
 	if err := d.DB.WithContext(ctx).Where("namespace_id = ?", nsID).Find(&services).Error; err != nil {
@@ -199,11 +228,35 @@ func (d Deps) collectTargets(ctx context.Context, nsID string) ([]map[string]any
 		var summary struct {
 			Targets []map[string]any `json:"targets"`
 		}
-		if len(svc.ParsedSummary) > 0 && json.Unmarshal(svc.ParsedSummary, &summary) == nil {
-			targets = append(targets, summary.Targets...)
+		if len(svc.ParsedSummary) == 0 || json.Unmarshal(svc.ParsedSummary, &summary) != nil {
+			continue
+		}
+		// Resolve port from deploy JSONB (default 8080).
+		var deploy struct {
+			Port int32 `json:"port"`
+		}
+		port := int32(8080)
+		if json.Unmarshal(svc.Deploy, &deploy) == nil && deploy.Port > 0 {
+			port = deploy.Port
+		}
+		for _, t := range summary.Targets {
+			if t == nil {
+				continue
+			}
+			t["service_id"] = derefStr(svc.ServiceID)
+			t["port"] = port
+			targets = append(targets, t)
 		}
 	}
 	return targets, nil
+}
+
+// derefStr returns the string value of *string, or "" if nil.
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // defaultLoadConfig fills documented defaults for missing fields.

@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -95,9 +96,24 @@ func (d Deps) applyDesired(ctx context.Context, ns store.Namespace, _ string) er
 		}
 		spec := map[string]any{"egress": []map[string]any{}}
 		for _, dep := range deps {
-			spec["egress"] = append(spec["egress"].([]map[string]any), map[string]any{
+			entry := map[string]any{
 				"type": dep.Type, "ref_id": dep.RefID,
-			})
+			}
+			// Optional per-dependency ports: Config holds {"ports":[8080, 5432]}.
+			// L4 enforcement uses these ports; empty/absent ⇒ all ports.
+			if len(dep.Config) > 0 {
+				var cfg struct {
+					Ports []int32 `json:"ports"`
+				}
+				if json.Unmarshal(dep.Config, &cfg) == nil && len(cfg.Ports) > 0 {
+					var p []any
+					for _, port := range cfg.Ports {
+						p = append(p, float64(port))
+					}
+					entry["ports"] = p
+				}
+			}
+			spec["egress"] = append(spec["egress"].([]map[string]any), entry)
 		}
 		// ObservedGeneration stays 0 until the watcher confirms the applied
 		// generation — the constant 1 here was the MVP shortcut, removed.

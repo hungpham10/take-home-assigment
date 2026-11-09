@@ -112,6 +112,7 @@ Mock metadata is validated against the service OpenAPI and platform guardrails. 
 - Dependencies are validated during namespace validate/apply. Missing/invalid dependencies block readiness.
 - **NetworkPolicy is derived from dependencies** for each service (least privilege): allow declared dependency traffic + required platform allowances + load-test runner access needed for targeted runs.
 - Dependent services/mocks must be linkable/communicable under the namespace deployment model.
+- Runner policy: for load-test runs targeting this service, render an additional egress policy (runner → resolved target pod + port) and ingress policy (target ← runner) selected by label `loadtest.io/run-id`. NetworkPolicy is L3/L4 only (`service` + `port`); `operation_id`/`path` are validated and audited here but not enforced by NetworkPolicy. Full spec: [`docs/network-policy.md`](network-policy.md).
 
 ## 8. Relationship to load tests
 

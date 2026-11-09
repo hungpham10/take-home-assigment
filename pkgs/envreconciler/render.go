@@ -111,9 +111,12 @@ type PolicySpec struct {
 }
 
 // EgressRule is one dependency-derived egress allow entry.
+// Ports, when non-empty, restricts the allow rule to those destination ports
+// (NetworkPolicy is L3/L4 only — see docs/network-policy.md).
 type EgressRule struct {
 	Type  string `json:"type"`
 	RefID string `json:"ref_id"`
+	Ports []int32 `json:"ports,omitempty"`
 }
 
 // envNamespaceName maps a namespace_id to its 1:1 K8s environment namespace
@@ -189,10 +192,18 @@ func defaultDenyNP(envNS string, env *Env) map[string]any {
 	}
 }
 
-// defaultDenySpec: deny in/out, ingress cho phép in-namespace; egress baseline
-// phải mở DNS (kube-system:53) + kube-apiserver (:443) — nếu không, CNPG
-// initdb và mọi pod cần API server đều chết vì i/o timeout (docs open item
-// #2 "NetworkPolicy baseline merge"). Thêm egress allow-list từ dependencies.
+// defaultDenySpec: deny in/out by default, then open only the baseline
+// allowances (docs/network-policy.md §1):
+//
+//   egress: DNS (kube-system:53), kube-apiserver (node CIDR :443/:6443),
+//           declared dependencies (renderEgress).
+//   ingress: ingress-nginx → env workloads, cnpg-system → database clusters.
+//             Everything else is denied — including intra-namespace traffic
+//             that isn't covered by a declared dependency.
+//
+// NOTE: ingress-nginx / cnpg-system namespace labels are the standard
+// `kubernetes.io/metadata.name`. If your cluster provisions them under other
+// names, adjust these selectors here.
 func defaultDenySpec(env *Env) map[string]any {
 	egress := []map[string]any{
 		{
@@ -223,26 +234,61 @@ func defaultDenySpec(env *Env) map[string]any {
 	return map[string]any{
 		"podSelector": map[string]any{},
 		"policyTypes": []string{"Ingress", "Egress"},
-		"ingress":     []any{map[string]any{}},
-		"egress":      egress,
+		// Deny-all ingress baseline; only platform allowances below are open.
+		// Declared service→service / service→DB traffic arrives via the
+		// per-service ingress policies (component_servicepolicy.go /
+		// component_databasepolicy.go), not via default-deny.
+		"ingress": []any{
+			map[string]any{"from": []any{map[string]any{"namespaceSelector": map[string]any{
+				"matchLabels": map[string]string{"kubernetes.io/metadata.name": "ingress-nginx"},
+			}}}},
+			map[string]any{"from": []any{map[string]any{"namespaceSelector": map[string]any{
+				"matchLabels": map[string]string{"kubernetes.io/metadata.name": "cnpg-system"},
+			}}}},
+		},
+		"egress": egress,
 	}
 }
 
 // renderEgress builds the egress allow-list; DNS resolution is always allowed
 // so ExternalName-style mock wiring resolves.
+//
+// - type == "mock": the mock-service data plane lives OUTSIDE the env
+//   namespace, so allow by namespaceSelector (label kubernetes.io/metadata.name
+//   = mock-service) instead of podSelector.
+// - Ports (when set on the EgressRule) restrict the allow rule to those
+//   destination ports; empty = all ports (backward compatible).
 func renderEgress(env *Env) []map[string]any {
 	if env.Policy == nil {
 		return nil
 	}
 	var rules []map[string]any
 	for _, e := range env.Policy.Egress {
-		rules = append(rules, map[string]any{
-			"to": []map[string]any{{
-				"podSelector": map[string]any{
-					"matchLabels": map[string]string{k8s.LabelComponentID: e.RefID},
-				},
-			}},
-		})
+		// Mock-service wiring: cross-namespace, select by namespace.
+		if e.Type == "mock" {
+			rules = append(rules, map[string]any{
+				"to": []map[string]any{{
+					"namespaceSelector": map[string]any{
+						"matchLabels": map[string]string{"kubernetes.io/metadata.name": "mock-service"},
+					},
+				}},
+			})
+			continue
+		}
+		to := []map[string]any{{
+			"podSelector": map[string]any{
+				"matchLabels": map[string]string{k8s.LabelComponentID: e.RefID},
+			},
+		}}
+		rule := map[string]any{"to": to}
+		if len(e.Ports) > 0 {
+			var ports []map[string]any
+			for _, p := range e.Ports {
+				ports = append(ports, map[string]any{"protocol": "TCP", "port": int64(p)})
+			}
+			rule["ports"] = ports
+		}
+		rules = append(rules, rule)
 	}
 	return rules
 }

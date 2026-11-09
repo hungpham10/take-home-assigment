@@ -397,7 +397,7 @@ flowchart LR
   class EXT risk;
 ```
 
-Status sources: today the `LocalRunner` is reconciled by polling (2s). With the K8s runner, `TestRun.status.stage` arrives through the Watcher.
+Status sources: today the `LocalRunner` is reconciled by polling (2s). With the K8s runner, `TestRun.status.stage` arrives through the Watcher. The run-scoped NetworkPolicy that enforces runner egress/ingress is specified in [`docs/network-policy.md`](network-policy.md) §3.
 
 ### 3.8 Review checklist
 
@@ -613,7 +613,7 @@ Base `/api/loadtest/v1` (details in `bff-loadtest-api-spec.md`): namespaces (+ r
 
 ### Open
 1. Active-run behavior when mutating an Environment (block vs generation snapshot).
-2. NetworkPolicy baseline merge with cluster DNS/metrics rules (CNI specifics).
+2. NetworkPolicy baseline merge with cluster DNS/metrics rules (CNI specifics); CNI enforcement check and Calico/Cilium install prerequisite at [`docs/network-policy.md`](network-policy.md) §7.
 3. Concrete quotas/limits (OpenAPI/script size, vusers/duration/TTL, env TTL, validation Job limits).
 4. Operation identifier format (`operationId` vs `method+path`).
 5. Dataset/restore details (credential model, PII scan, retention/owner handoff, restore Job egress).
@@ -623,3 +623,4 @@ Base `/api/loadtest/v1` (details in `bff-loadtest-api-spec.md`): namespaces (+ r
 9. Environment TTL (reaper currently covers runs only).
 10. **Controller HA / single active writer.** Today correctness relies on exactly one pod. Multiple active pods cause prune thrash, apply/teardown races and duplicate status writes (§2.2.1); a leader election limited to the background loops would still miss `ApplyNow` on the request path. Decide between: (a) PostgreSQL advisory-lock active/standby (§2.2.3, proposed — covers every writer, no new RBAC, needs a non-pooled connection) and (b) K8s `Lease` leader election (equivalent for loops only; needs `ApplyNow` gating plus `coordination.k8s.io/leases` RBAC). In either case keep the stable SSA field manager and the generation check before prune (§2.2.4). Per-Environment locking or sharding is a later scale-out step (§2.2.5). Details in `k8s-orchestration.md` §10.
 11. **Composite `Component` refactor for the apply tree.** Staged as refactor 5 in §5.4 with its trigger, scope and invariants in §5.4.1 (registry deferred, generation stays on the Environment). Open question: whether the Watcher should consume `Render()` for its expected-resource checks in the same change or a follow-up. Details in `k8s-orchestration.md` §11.
+12. **Event retention / audit log cleanup.** All `tbl_*_events` tables (`tbl_namespace_events`, `tbl_loadtest_events`, `tbl_script_events`, `tbl_dataset_events`) and `tbl_audit_log` are append-only with `REVOKE UPDATE, DELETE` — no retention policy or cleanup job exists. MVP scope excludes this; post-MVP needs: (a) retention window (e.g., 90 days), (b) cleanup mechanism (pg_cron + partition drop or background job), (c) compliance/audit requirements driving retention period. Related: `tbl_idempotency_keys` has documented 24h cleanup but no implementation.

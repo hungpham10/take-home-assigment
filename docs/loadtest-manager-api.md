@@ -42,7 +42,7 @@ Authz: tenant isolation; owner-only; `admin` cross-owner within tenant. Immutabl
 4. Validate **JS script** (presence, size/type/allowed form, guardrails).
 5. Apply guardrails (vusers/duration/TTL/concurrency/quotas).
 6. Persist run (`PROVISIONING`/`QUEUED`, `namespace_id`, `targets`, script ref/hash, `expires_at`).
-7. Provision async: bind execution to namespace context; ensure **runner NetworkPolicy/egress** allows only resolved `targets[]`/approved deps + required platform endpoints (do not rely on advisory `targets[]`); create script source (run-scoped name, e.g., `<test_id>-script`; set owner references/cleanup on failure; respect ConfigMap size limits); create k6 `TestRun`; store `k8s_refs`. Runner must have no platform/K8s credentials.
+7. Provision async: bind execution to namespace context; ensure **runner NetworkPolicy/egress** allows only resolved `targets[]`/approved deps + required platform endpoints (do not rely on advisory `targets[]`); create script source (run-scoped name, e.g., `<test_id>-script`; set owner references/cleanup on failure; respect ConfigMap size limits); create k6 `TestRun`; store `k8s_refs`. Runner must have no platform/K8s credentials. The run-scoped NetworkPolicy (egress runner → target + ingress target ← runner, selected by label `loadtest.io/run-id`) is specified in [`docs/network-policy.md`](network-policy.md) §3; NetworkPolicy is L3/L4 only (`service` + `port`).
 8. Return `202` + `status_url`; reconcile to canonical statuses per `docs/bff-loadtest-api-spec.md` (MVP: use `STOPPED` for stop/cancel outcomes; `CANCELED` reserved unless explicitly distinguished).
 
 ## 5. Target API and script (clarity)
@@ -85,6 +85,6 @@ Remote/registered scripts should be validated before dispatching load:
 - **k6-operator version:** pin tested `k6.io` API version (e.g., `v1alpha1`) and operator compatibility.
 
 ## 7. Decisions / open items
-- **Locked (MVP):** 1 platform Environment = 1 Kubernetes Namespace. Runner execution uses network-enforced egress (NetworkPolicy from resolved `targets[]`/approved deps/mocks + DNS). POC uses OIDC/nginx auth; nginx reflects permissions from OIDC/claims into trusted headers, Go middleware normalizes principal/enforces RBAC; `abt_` is service-account token for CLI/automation; `tenant_id` scopes org/multi-domain boundary.
-- Target strictness: targets must match what the script exercises (advisory/metadata) vs enforceable mapping (limited).
+- **Locked (MVP):** 1 platform Environment = 1 Kubernetes Namespace. Runner execution uses network-enforced egress (NetworkPolicy from resolved `targets[]`/approved deps/mocks + DNS). The run-scoped policy (egress + ingress per run, label `loadtest.io/run-id`) and the L3/L4 limit are specified in [`docs/network-policy.md`](network-policy.md). POC uses OIDC/nginx auth; nginx reflects permissions from OIDC/claims into trusted headers, Go middleware normalizes principal/enforces RBAC; `abt_` is service-account token for CLI/automation; `tenant_id` scopes org/multi-domain boundary.
+- Target strictness: targets must match what the script exercises (advisory/metadata) vs enforceable mapping (limited). `operation_id`/`path` cannot be enforced by NetworkPolicy (L3/L4 only); L7 enforcement is post-MVP.
 - Script forms allowed in MVP and storage (inline vs object storage/ref).

@@ -44,7 +44,7 @@ func TestINT_ENV_01_RenderOrderAndLabels(t *testing.T) {
 	if len(objs) == 0 {
 		t.Fatal("no objects rendered")
 	}
-	wantOrder := []string{"Namespace", "NetworkPolicy", "Cluster", "Deployment", "Service", "Ingress"}
+	wantOrder := []string{"Namespace", "NetworkPolicy", "NetworkPolicy", "NetworkPolicy", "Cluster", "Deployment", "Service", "Ingress"}
 	var gotOrder []string
 	for _, o := range objs {
 		gotOrder = append(gotOrder, o.GetKind())

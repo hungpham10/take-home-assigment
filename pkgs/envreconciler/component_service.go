@@ -41,7 +41,7 @@ func (s ServiceComponent) Children() []Component {
 }
 
 // Render returns nil — ServiceComponent has no self object, only children.
-func (s ServiceComponent) Render(env *Env) []*unstructured.Unstructured {
+func (s ServiceComponent) Render(_ *Env) []*unstructured.Unstructured {
 	// ServiceComponent không có object "self"; tất cả objects nằm ở các con.
 	return nil
 }

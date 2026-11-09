@@ -15,14 +15,17 @@ import (
 //
 //	Environment (Namespace)
 //	├── NetworkPolicy (default-deny)
+//	├── Service policies (per-service ingress allow)
+//	├── Database policies (per-database ingress allow)
 //	├── Database operator CRs (CNPG Cluster | ECK Elasticsearch)
 //	├── Service (composite): ConfigMap → Secret → ServiceAccount → Deployment
 //	│                          → Service → HPA
 //	├── Ingress
 //	└── MockBinding
 //
-// Render giữ nguyên pure (không I/O); stamp desired_generation chỉ xảy ra ở
-// apply time qua applyComponent (WATCH-03 generation fencing).
+// Policies apply before workloads so there is no unenforced window.
+// Render stays pure (no I/O); desired_generation is stamped at apply time
+// via applyComponent (WATCH-03 generation fencing).
 func BuildComponentTree(env *Env) (Component, error) {
 	envNS := envNamespaceName(env.NamespaceID)
 
@@ -35,7 +38,25 @@ func BuildComponentTree(env *Env) (Component, error) {
 		specHash: HashSpec(env.Policy),
 	})
 
-	// 3. Database operator CRs (CNPG | ECK).
+	// 3. Per-service ingress policies (allow same-namespace → service port).
+	for _, svc := range env.Services {
+		children = append(children, ServicePolicyComponent{
+			envNS: envNS,
+			env:   env,
+			svc:   svc,
+		})
+	}
+
+	// 4. Per-database ingress policies (allow same-namespace → engine port).
+	for _, db := range env.Databases {
+		children = append(children, DatabasePolicyComponent{
+			envNS: envNS,
+			env:   env,
+			db:    db,
+		})
+	}
+
+	// 5. Database operator CRs (CNPG | ECK).
 	for _, db := range env.Databases {
 		children = append(children, DatabaseComponent{
 			envNS: envNS,

@@ -497,7 +497,34 @@ Hiện đã PASS: seed → namespace → service → validate → apply → scri
 | `E2E-03` | Đi qua nginx với `abt_` token (issue → dùng → revoke → bị chặn) | compose + nginx |
 | `E2E-04` 🔜 | K8s mode trên kind: apply thật → READY (Watcher) → run qua K8s runner | kind, sau khi có K8s runner |
 
-### 12.4 Perf (`tests/perf/`)
+### 12.4 E2E full deploy (`tests/e2e-full-deploy.sh`)
+End-to-end **K8s-mode** flow with real cluster (kind), CNPG operator, and Env Reconciler + Status Watcher loops. Verifies full production path.
+
+| ID | Kịch bản | Môi trường |
+|---|---|---|
+| `E2E-FD-01` | **Full K8s deploy**: kind cluster → CNPG operator install → control-plane Postgres → controller (K8S_ENABLED=true) → namespace with database (CNPG) + service (echo-server) → validate → apply (202) → Env Reconciler applies → Status Watcher projects → READY → port-forward curl echo-server → delete namespace → verify K8s ns gone | kind + CNPG |
+| `E2E-FD-02` | **Negative**: invalid spec → validate returns 422 | kind |
+| `E2E-FD-03` | **HA simulation**: controller pod kill mid-apply → verify convergence on resync | kind |
+
+**Prerequisites**: `kind`, `kubectl`, `docker`, `curl`, `python3`. Uses `KEEP_CLUSTER=1` to retain cluster for debugging.
+
+**Flow** (from script):
+1. Bootstrap kind cluster + pre-load images (CNPG postgres, echo-server)
+2. Install CNPG operator (`kubectl apply --server-side`)
+3. Start control-plane Postgres (Docker) + run migrations (`sql/*.sql`)
+4. Build & start `loadtest-controller` with `K8S_ENABLED=true`, `K8S_API_URL` pointing to kind
+5. Seed tenant/user fixture in PG
+6. Create namespace with full spec (database: CNPG postgres:16 + service: echo-server)
+7. `POST /validate` → `POST /apply` (202, async hand-off)
+8. Poll `/readiness` (up to 12m — CNPG bootstrap)
+9. Verify: CNPG Cluster Ready, Deployment Available, `tbl_component_status` projection
+10. Port-forward `echo` service → curl returns JSON
+11. `DELETE /namespaces/{id}` → 202 DELETING
+12. Env Reconciler deletes K8s namespace `lt-env-<id>` → verify gone
+
+**Run**: `./tests/e2e-full-deploy.sh` (or `KEEP_CLUSTER=1 ./tests/e2e-full-deploy.sh` to keep kind cluster)
+
+### 12.5 Perf (`tests/perf/`)
 Ngưỡng đã định nghĩa: `control-plane.js` (40 rps đọc, p95 < 100ms), `admin.js` (80 rps introspect). **Chưa chạy lần nào** vì k6 chưa cài (`mvp-status.md` §7.2).
 
 | ID | Việc cần làm |
@@ -506,7 +533,7 @@ Ngưỡng đã định nghĩa: `control-plane.js` (40 rps đọc, p95 < 100ms), 
 | `PERF-02` | Thêm script cho `/readiness` (projection-backed) và gate `POST /loadtests` để bắt hồi quy truy vấn JOIN |
 | `PERF-03` | Gắn vào CI/nightly với ngưỡng = baseline × hệ số dung sai đã chốt |
 
-### 12.5 Migration (thuộc `pkgs/store`)
+### 12.6 Migration (thuộc `pkgs/store`)
 | ID | Kịch bản | Expected |
 |---|---|---|
 | `INT-MIG-01` | Migrate từ DB rỗng 0001→0011 | Thành công; `tbl_schema_migrations` đủ bản ghi, đúng thứ tự |
@@ -515,7 +542,7 @@ Ngưỡng đã định nghĩa: `control-plane.js` (40 rps đọc, p95 < 100ms), 
 | `INT-MIG-04` | Hai instance chạy migration đồng thời | Chỉ một thắng (advisory lock), không áp trùng |
 | `INT-MIG-05` | File migration đã áp bị sửa nội dung (checksum lệch) | Runner từ chối, báo rõ |
 
-## 13. Chạy test & CI
+## 14. Chạy test & CI
 
 ```bash
 # Unit + integration + harness (cần Postgres 16)
@@ -547,7 +574,7 @@ docker compose up -d --build && ./tests/e2e-smoke.sh
 | *(đề xuất)* `e2e` | `tests/e2e-smoke.sh` | |
 | *(đề xuất, nightly)* `perf`, `k6-real` | k6 perf + Local runner với k6 thật | |
 
-## 14. Khoảng trống đã biết & theo dõi coverage
+## 15. Khoảng trống đã biết & theo dõi coverage
 
 | Khoảng trống | Ảnh hưởng test | Hành động |
 |---|---|---|
@@ -560,7 +587,7 @@ docker compose up -d --build && ./tests/e2e-smoke.sh
 | Role propagation nginx chưa đồng nhất | `INT-NGX-05` chỉ khóa hành vi hiện tại | Cập nhật khi chỉnh `conf/nginx` |
 | Hành vi biên chưa chốt (namespace rỗng, dependency vòng, stop run đã terminal, tạo lại tên sau `DELETED`, status khi thiếu `Idempotency-Key`) | Các case "khóa bằng test" ở §11 | Chốt quyết định, ghi vào doc API tương ứng, rồi đổi kỳ vọng thành giá trị cụ thể |
 
-### 14.1 Theo dõi ID đã có test
+### 15.1 Theo dõi ID đã có test
 Catalogue này chưa đối chiếu với các test file hiện có. Cách đồng bộ rẻ nhất:
 
 1. Đặt tên test theo `TestINT_<DOMAIN>_<NN>_…` (§9.6); test cũ thì đổi tên hoặc thêm comment `// covers: INT-NS-06`.
