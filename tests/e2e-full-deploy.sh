@@ -313,9 +313,14 @@ done
   fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
 }
 # run-policy labels + egress port 80 + target selector = service name (echo)
-NP_LABELS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.metadata.labels}')
-echo "$NP_LABELS" | grep -q 'loadtest.io/component-kind=run-policy' || fail "egress NP missing component-kind=run-policy"
-echo "$NP_LABELS" | grep -q "loadtest.io/run-id=$LT_ID" || fail "egress NP missing run-id=$LT_ID"
+# kubectl -o jsonpath='{.metadata.labels}' prints Go map syntax (map[k:v ...]),
+# not k=v pairs → extract each label via its own jsonpath query.
+NP_KIND=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
+  -o jsonpath='{.metadata.labels.loadtest\.io/component-kind}')
+NP_RUN=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
+  -o jsonpath='{.metadata.labels.loadtest\.io/run-id}')
+[ "$NP_KIND" = "run-policy" ] || fail "egress NP component-kind=$NP_KIND (want run-policy)"
+[ "$NP_RUN" = "$LT_ID" ] || fail "egress NP run-id=$NP_RUN (want $LT_ID)"
 EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)]}')
 [ -n "$EGRESS_PORTS" ] || fail "egress NP missing port 80 rule"
 EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)].to[0].podSelector.matchLabels."loadtest\.io/component-id"}')

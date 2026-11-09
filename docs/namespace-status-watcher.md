@@ -106,6 +106,7 @@ DELETING     → K8s Namespace gone               → DELETED
 ```
 
 - **Required:** every component type including mock/ingress (locked decision — their failure also blocks READY). Future optional components would only contribute `blocking_reasons`, not block.
+- **Vacuous namespaces:** a namespace with **zero required components** (no services, no databases, no declared dependencies) never becomes READY — `allReady` requires `requiredCount > 0`. Optional component rows (data_load/ingress/policy) existing alone cannot drive READY (fail-closed).
 - **Hysteresis:** rolling updates / pod restarts make `availableReplicas` fluctuate; without grace/stable windows the namespace flaps READY↔DEGRADED and load tests get blocked spuriously (`WATCH-06`).
 - **Atomic write:** `status`, `version`, `ready_for_loadtest`, `blocking_reasons` and the event are written in **one transaction** via `fn_namespace_transition` (`sql/0003_namespace_component.sql`) — matches DB-TXN-01/02. An illegal transition raises; the watcher logs it and recomputes on the next pass (no crash loop).
 - **DEGRADED → READY vs DEGRADED → VALIDATING:** both paths are valid — back to READY for transient failures (stable window); `VALIDATING` when the spec was edited (path already in the seed).

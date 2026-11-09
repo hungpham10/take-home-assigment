@@ -522,11 +522,13 @@ func (w *Watcher) persistProjection(ctx context.Context, ns *store.Namespace, ro
 // next pass — no crash loop.
 func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []store.ComponentStatus, stale bool) error {
 	var anyFailed, anyPending bool
+	var requiredCount int
 	var blocking []string
 	for _, r := range rows {
 		if !r.Required {
 			continue
 		}
+		requiredCount++
 		switch r.Phase {
 		case phaseReady:
 		case phaseFailed:
@@ -537,10 +539,11 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 			blocking = append(blocking, fmt.Sprintf("%s/%s: %s", r.ComponentType, r.ComponentID, derefOr(r.Reason, "pending")))
 		}
 	}
-	// All required components ready = no failure AND nothing pending (a
-	// vacuous namespace with no required components is NOT ready — fail
-	// closed when the projection is empty).
-	allReady := len(rows) > 0 && !anyFailed && !anyPending
+	// All required components ready = no failure AND nothing pending.
+	// A namespace with zero required components (vacuous) is NOT ready —
+	// fail-closed even though optional rows (data_load/ingress/policy)
+	// may all be READY.
+	allReady := requiredCount > 0 && !anyFailed && !anyPending
 	if stale {
 		allReady = false
 		blocking = append(blocking, "status heartbeat stale (STATUS_STALE)")

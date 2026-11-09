@@ -538,12 +538,18 @@ func TestINT_ENV_09_AggregationAllChildrenReady(t *testing.T) {
 }
 
 // WATCH-E1: Vacuous namespace (no required components at all) must never be
-// READY — fail-closed (allReady requires len(rows) > 0).
+// READY — fail-closed (allReady requires at least one required component).
 func TestWatcherVacuousNamespaceNeverReady(t *testing.T) {
 	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
 	w.nsID = seedNamespace(t, w.db, "APPLYING")
 	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
-	// No service rows, no cluster objects → zero required components.
+	// Truly vacuous: delete the service row seeded by seedNamespace so the
+	// namespace has zero required components (no services, no databases, no
+	// dependencies). Optional rows (data_load/ingress/policy) may still be
+	// persisted but must not drive READY.
+	if err := w.db.Exec(`DELETE FROM tbl_services WHERE namespace_id = ?`, w.nsID).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -552,12 +558,14 @@ func TestWatcherVacuousNamespaceNeverReady(t *testing.T) {
 	if ns.Status == "READY" || ns.ReadyForLoadtest {
 		t.Fatalf("vacuous namespace READY: status=%s ready=%v (fail-closed violated)", ns.Status, ns.ReadyForLoadtest)
 	}
-	var rows []store.ComponentStatus
-	if err := w.db.Where("namespace_id = ?", w.nsID).Find(&rows).Error; err != nil {
+	// Optional rows (data_load/ingress/policy) may exist; what matters is
+	// zero required components → never READY.
+	var required []store.ComponentStatus
+	if err := w.db.Where("namespace_id = ? AND required = true", w.nsID).Find(&required).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("expected no component rows for vacuous ns, got %d", len(rows))
+	if len(required) != 0 {
+		t.Fatalf("vacuous ns has %d required rows (want 0)", len(required))
 	}
 }
 
@@ -595,7 +603,7 @@ func TestWatcherSeededStateNoEventStuckApplying(t *testing.T) {
 // WATCH-E3: cluster error → component UNKNOWN phase → namespace blocked
 // forever (anyPending=true, no deadline path for UNKNOWN).
 func TestWatcherUnknownComponentBlocksReadyForever(t *testing.T) {
-	ff := &FaultyFake{GetErr: k8s.ErrNotFound}
+	ff := &FaultyFake{Fake: k8s.NewFake(), GetErr: k8s.ErrNotFound}
 	w := &world{db: gormDB(t), client: ff.Fake, envNS: ""}
 	w.nsID = seedNamespace(t, w.db, "APPLYING")
 	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
