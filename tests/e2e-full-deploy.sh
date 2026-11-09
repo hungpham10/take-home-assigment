@@ -154,9 +154,9 @@ APPLY=$(curl -s -o /tmp/fd-apply.json -w "%{http_code}" -X POST "$BASE/api/loadt
 echo "   apply → 202 $(cat /tmp/fd-apply.json)"
 
 # --- 4. đợi READY qua projection ----------------------------------------------
-say "poll readiness (deadline 25m — CNPG bootstrap, images pre-loaded)"
+say "poll readiness (deadline 30m — CNPG bootstrap, images pre-loaded)"
 READY=false
-for i in $(seq 1 750); do
+for i in $(seq 1 900); do
   READINESS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H 2>/dev/null || echo '{}')
   STATUS=$(printf '%s' "$READINESS" | jqget "['status']" 2>/dev/null || echo "?")
   READYF=$(printf '%s' "$READINESS" | jqget "['ready_for_loadtest']" 2>/dev/null || echo "false")
