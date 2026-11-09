@@ -3,6 +3,7 @@ package statuswatcher_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -25,7 +26,7 @@ import (
 // world bundles the test DB, a fake cluster and the ids under test.
 type world struct {
 	db     *gorm.DB
-	client *k8s.Fake
+	client k8s.Client
 	nsID   string
 	envNS  string
 }
@@ -68,6 +69,7 @@ func seedNamespace(t *testing.T, db *gorm.DB, status string) string {
 	// Dọn namespace sau test — shared DB tích lũy hàng nghìn ns cũ làm Tick
 	// backlog serialize vô hạn (root cause của flake trước plans/26).
 	t.Cleanup(func() {
+		_ = db.Exec(`DELETE FROM tbl_namespace_events WHERE object_id = ?`, nsID).Error
 		_ = db.Exec(`DELETE FROM tbl_namespaces WHERE id = ?`, nsID).Error
 	})
 	return nsID
@@ -603,8 +605,8 @@ func TestWatcherSeededStateNoEventStuckApplying(t *testing.T) {
 // WATCH-E3: cluster error → component UNKNOWN phase → namespace blocked
 // forever (anyPending=true, no deadline path for UNKNOWN).
 func TestWatcherUnknownComponentBlocksReadyForever(t *testing.T) {
-	ff := &FaultyFake{Fake: k8s.NewFake(), GetErr: k8s.ErrNotFound}
-	w := &world{db: gormDB(t), client: ff.Fake, envNS: ""}
+	ff := &FaultyFake{Fake: k8s.NewFake(), GetErr: errors.New("cluster unavailable")}
+	w := &world{db: gormDB(t), client: ff, envNS: ""}
 	w.nsID = seedNamespace(t, w.db, "APPLYING")
 	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
 	applyEnv(t, w, 1)

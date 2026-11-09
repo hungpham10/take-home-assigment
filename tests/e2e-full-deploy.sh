@@ -323,7 +323,7 @@ NP_RUN=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
 [ "$NP_RUN" = "$LT_ID" ] || fail "egress NP run-id=$NP_RUN (want $LT_ID)"
 EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)]}')
 [ -n "$EGRESS_PORTS" ] || fail "egress NP missing port 80 rule"
-EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)].to[0].podSelector.matchLabels."loadtest\.io/component-id"}')
+EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)].to[0].podSelector.matchLabels.loadtest\.io/component-id}')
 [ "$EGRESS_TARGET" = "echo" ] || fail "egress NP target selector = $EGRESS_TARGET (want echo)"
 # 6565 API ingress rule present
 API_6565=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-api-$LT_ID -o jsonpath='{.spec.ingress[?(@.ports[0].port==6565)]}')
