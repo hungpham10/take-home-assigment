@@ -87,6 +87,10 @@ type Watcher struct {
 	hyMutex       sync.Mutex
 	degradedSince map[string]time.Time
 	readySince    map[string]time.Time
+	// per-namespace reconcile lock serializes concurrent ReconcileStatus calls
+	// for the same namespace (4 workers + resync ticker can all target one ns).
+	nsMu    sync.Mutex
+	nsLocks map[string]*sync.Mutex
 }
 
 // New wires a Watcher.
@@ -99,6 +103,7 @@ func New(c k8s.Client, db *gorm.DB, cfg Config) *Watcher {
 		now:           func() time.Time { return time.Now().UTC() },
 		degradedSince: map[string]time.Time{},
 		readySince:    map[string]time.Time{},
+		nsLocks:       map[string]*sync.Mutex{},
 	}
 }
 
@@ -112,9 +117,26 @@ var (
 	cnpgGVK   = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Cluster"}
 )
 
+// nsLock returns (creating if needed) the per-namespace mutex for namespaceID.
+func (w *Watcher) nsLock(namespaceID string) *sync.Mutex {
+	w.nsMu.Lock()
+	defer w.nsMu.Unlock()
+	m, ok := w.nsLocks[namespaceID]
+	if !ok {
+		m = &sync.Mutex{}
+		w.nsLocks[namespaceID] = m
+	}
+	return m
+}
+
 // ReconcileStatus recomputes EVERYTHING for one namespace from the current
 // cluster + DB state (level-triggered: event payloads are never trusted).
+// Per-namespace lock serializes concurrent reconciles (4 workers + resync
+// ticker can all target one ns) so transitions + hysteresis never interleave.
 func (w *Watcher) ReconcileStatus(ctx context.Context, namespaceID string) error {
+	w.nsLock(namespaceID).Lock()
+	defer w.nsLock(namespaceID).Unlock()
+
 	var ns store.Namespace
 	if err := w.db.WithContext(ctx).Where("id = ?", namespaceID).First(&ns).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -372,11 +394,15 @@ func (e *evalContext) evalNetworkPolicy(desired int64) store.ComponentStatus {
 		NamespaceID: e.ns.ID, ComponentType: compNetworkPolicy, ComponentID: "default-deny",
 		Required: true, DesiredGeneration: desired, ObservedAt: e.w.now(),
 	}
-	var policy store.NetworkPolicy
+	var policies []store.NetworkPolicy
 	var depRows int64
 	_ = e.w.db.WithContext(e.ctx).Model(&store.Dependency{}).
 		Where("namespace_id = ?", e.ns.ID).Count(&depRows).Error
-	if err := e.w.db.WithContext(e.ctx).Where("namespace_id = ?", e.ns.ID).First(&policy).Error; err != nil {
+	if err := e.w.db.WithContext(e.ctx).Where("namespace_id = ?", e.ns.ID).Limit(1).Find(&policies).Error; err != nil {
+		row.Phase, row.Reason = phaseUnknown, ptrOf("cluster_error")
+		return row
+	}
+	if len(policies) == 0 {
 		// No resolved policy: required only when legacy tbl_dependencies rows
 		// exist (same semantics as the legacy readinessGates) — pre-apply
 		// namespaces with no dependencies are not blocked by it.
@@ -388,6 +414,7 @@ func (e *evalContext) evalNetworkPolicy(desired int64) store.ComponentStatus {
 		row.Phase, row.Reason = phasePending, ptrOf("no_resolved_policy")
 		return row
 	}
+	policy := policies[0]
 	obj, err := e.w.client.Get(e.ctx, npGVK, e.envNS(), "default-deny")
 	switch {
 	case err == k8s.ErrNotFound:
@@ -449,8 +476,9 @@ func (w *Watcher) persistProjection(ctx context.Context, ns *store.Namespace, ro
 				row.Reason = &r
 			}
 			var last store.ComponentStatus
-			if err := tx.Where("namespace_id = ? AND component_type = ? AND component_id = ?",
-				row.NamespaceID, row.ComponentType, row.ComponentID).First(&last).Error; err == nil {
+			err := tx.Where("namespace_id = ? AND component_type = ? AND component_id = ?",
+				row.NamespaceID, row.ComponentType, row.ComponentID).Limit(1).Find(&last).Error
+			if err == nil && last.ID != 0 {
 				if last.Phase != row.Phase {
 					row.LastTransitionAt = &now
 				} else {
@@ -517,9 +545,9 @@ func (w *Watcher) aggregate(ctx context.Context, ns *store.Namespace, rows []sto
 		allReady = false
 		blocking = append(blocking, "status heartbeat stale (STATUS_STALE)")
 	}
-	readyForLoadtest := allReady && !anyFailed && ns.Status == "READY"
-
 	next := ""
+
+	readyForLoadtest := allReady && !anyFailed && (ns.Status == "READY" || next == store.NamespaceStatusReady)
 	applyDeadlineExceeded := ns.Status == "APPLYING" || ns.Status == "DATA_LOADING"
 	if applyDeadlineExceeded {
 		applyDeadlineExceeded = !allReady && w.pastApplyDeadline(ctx, ns)

@@ -140,7 +140,7 @@ jobs:
   full-deploy-e2e:
     name: Full Deploy E2E (kind + CNPG)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

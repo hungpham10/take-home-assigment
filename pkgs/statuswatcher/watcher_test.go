@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
@@ -533,4 +535,227 @@ func TestINT_ENV_09_AggregationAllChildrenReady(t *testing.T) {
 	if svcPhase == "READY" {
 		t.Fatal("service READY although deployment missing (evaluator bug)")
 	}
+}
+
+// WATCH-E1: Vacuous namespace (no required components at all) must never be
+// READY — fail-closed (allReady requires len(rows) > 0).
+func TestWatcherVacuousNamespaceNeverReady(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	// No service rows, no cluster objects → zero required components.
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status == "READY" || ns.ReadyForLoadtest {
+		t.Fatalf("vacuous namespace READY: status=%s ready=%v (fail-closed violated)", ns.Status, ns.ReadyForLoadtest)
+	}
+	var rows []store.ComponentStatus
+	if err := w.db.Where("namespace_id = ?", w.nsID).Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected no component rows for vacuous ns, got %d", len(rows))
+	}
+}
+
+// WATCH-E2: Seeded APPLYING namespace with NO transition event AND zero
+// UpdatedAt → pastApplyDeadline returns false → stuck APPLYING forever,
+// never READY, never DEGRADED.
+func TestWatcherSeededStateNoEventStuckApplying(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	// Strip updated_at to zero so pastApplyDeadline falls through to false.
+	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("updated_at", (*time.Time)(nil)).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := statuswatcher.DefaultConfig()
+	cfg.ApplyDeadline = 1 * time.Second
+	watcher := newWatcher(w, cfg)
+	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	// Even repeated reconcile passes should not flip it to DEGRADED/READY
+	// because there's no deadline anchor.
+	if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "APPLYING" {
+		t.Fatalf("stuck APPLYING drifted to %s (deadline not enforced without event anchor)", ns.Status)
+	}
+}
+
+// WATCH-E3: cluster error → component UNKNOWN phase → namespace blocked
+// forever (anyPending=true, no deadline path for UNKNOWN).
+func TestWatcherUnknownComponentBlocksReadyForever(t *testing.T) {
+	ff := &FaultyFake{GetErr: k8s.ErrNotFound}
+	w := &world{db: gormDB(t), client: ff.Fake, envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	applyEnv(t, w, 1)
+	// Deployment exists but Get returns an error → UNKNOWN phase.
+	// The watcher should not reach READY.
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var row store.ComponentStatus
+	_ = w.db.Where("namespace_id = ? AND component_type = 'service'", w.nsID).First(&row)
+	if row.Phase != "UNKNOWN" {
+		t.Fatalf("service phase %s, want UNKNOWN", row.Phase)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status == "READY" || ns.ReadyForLoadtest {
+		t.Fatalf("namespace READY despite UNKNOWN component: status=%s ready=%v", ns.Status, ns.ReadyForLoadtest)
+	}
+}
+
+// WATCH-E4: DRAFT namespace is out of watcher's remit — terminal, no-op.
+func TestWatcherDraftNamespaceNoOp(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "DRAFT")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "DRAFT" {
+		t.Fatalf("DRAFT namespace changed to %s (watcher must no-op on terminal states)", ns.Status)
+	}
+}
+
+// WATCH-E5: INVALID namespace is terminal — watcher no-ops.
+func TestWatcherInvalidNamespaceNoOp(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "INVALID")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "INVALID" {
+		t.Fatalf("INVALID namespace changed to %s (watcher must no-op on terminal states)", ns.Status)
+	}
+}
+
+// WATCH-R1: Race — two concurrent ReconcileStatus on the same namespace
+// must not corrupt state. Both see READY components; both should converge
+// to READY without duplicate-transition errors.
+func TestWatcherConcurrentReconcileConverges(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	applyEnv(t, w, 1)
+	markDeploymentReady(t, w)
+
+	watcher := newWatcher(w, statuswatcher.DefaultConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 4 {
+				if err := watcher.ReconcileStatus(ctx, w.nsID); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent reconcile error: %v", err)
+		}
+	}
+
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "READY" || !ns.ReadyForLoadtest {
+		t.Fatalf("after concurrent reconcile: status=%s ready=%v, want READY/true", ns.Status, ns.ReadyForLoadtest)
+	}
+}
+
+// WATCH-R2: ready_for_loadtest is set as a separate UPDATE after
+// fn_namespace_transition sets status=READY. Between those two calls there
+// is a window where status=READY but ready_for_loadtest=false. A concurrent
+// reader (e.g. POST /loadtests gate) could observe the inconsistent state.
+func TestWatcherReadyForLoadtestSetWithStatus(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "APPLYING")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	applyEnv(t, w, 1)
+	markDeploymentReady(t, w)
+
+	if err := newWatcher(w, statuswatcher.DefaultConfig()).ReconcileStatus(context.Background(), w.nsID); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	// After aggregate(), status=READY AND ready_for_loadtest must be true
+	// in the same pass.
+	if ns.Status != "READY" {
+		t.Fatalf("status %s, want READY", ns.Status)
+	}
+	if !ns.ReadyForLoadtest {
+		t.Fatal("ready_for_loadtest false immediately after READY transition (race window)")
+	}
+}
+
+// WATCH-R3: Grace window armed on pass 1, then cleared on pass 2 before
+// grace elapses → no DEGRADED. Concurrent clearHysteresis interleaving
+// must not break the hysteresis state machine.
+func TestWatcherGraceWindowInterleavedClear(t *testing.T) {
+	w := &world{db: gormDB(t), client: k8s.NewFake(), envNS: ""}
+	w.nsID = seedNamespace(t, w.db, "READY")
+	w.envNS = envreconciler.EnvNamespaceName(w.nsID)
+	if err := w.db.Model(&store.Namespace{}).Where("id = ?", w.nsID).
+		Update("ready_for_loadtest", true).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := statuswatcher.DefaultConfig()
+	cfg.Grace = 1 * time.Hour // grace far in future
+	watcher := newWatcher(w, cfg)
+	// Multiple concurrent reconciles — clearHysteresis runs on each pass
+	// because allReady=true (no degradation condition triggered).
+	for i := 0; i < 5; i++ {
+		if err := watcher.ReconcileStatus(context.Background(), w.nsID); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+	}
+	var ns store.Namespace
+	_ = w.db.Where("id = ?", w.nsID).First(&ns)
+	if ns.Status != "READY" {
+		t.Fatalf("status %s after interleaved clearHysteresis, want READY", ns.Status)
+	}
+}
+
+// FaultyFake wraps k8s.Fake with per-operation fault injection.
+type FaultyFake struct {
+	*k8s.Fake
+	GetErr error
+}
+
+func (f *FaultyFake) Get(_ context.Context, gvk schema.GroupVersionKind, ns, name string) (*unstructured.Unstructured, error) {
+	if f.GetErr != nil {
+		return nil, f.GetErr
+	}
+	return f.Fake.Get(context.Background(), gvk, ns, name)
 }

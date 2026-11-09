@@ -20,7 +20,7 @@ CNPG_MANIFEST=$(curl -fsSL https://api.github.com/repos/cloudnative-pg/cloudnati
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
-jqget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)"; }
+jqget() { python3 -c "import sys,json;d=json.load(sys.stdin);v=d$1;print('' if v is None else ('true' if v is True else ('false' if v is False else str(v))))"; }
 
 # --- 0. tooling ---------------------------------------------------------------
 command -v kubectl >/dev/null || fail "kubectl not installed"
@@ -154,17 +154,24 @@ APPLY=$(curl -s -o /tmp/fd-apply.json -w "%{http_code}" -X POST "$BASE/api/loadt
 echo "   apply → 202 $(cat /tmp/fd-apply.json)"
 
 # --- 4. đợi READY qua projection ----------------------------------------------
-say "poll readiness (deadline 30m — CNPG bootstrap, images pre-loaded)"
+say "poll readiness (deadline 10m — namespace CNPG + services converge)"
 READY=false
-for i in $(seq 1 900); do
+for i in $(seq 1 300); do
   READINESS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H 2>/dev/null || echo '{}')
-  STATUS=$(printf '%s' "$READINESS" | jqget "['status']" 2>/dev/null || echo "?")
-  READYF=$(printf '%s' "$READINESS" | jqget "['ready_for_loadtest']" 2>/dev/null || echo "false")
   # K8S mode: applyDesired sets ready_for_loadtest=false; the Status Watcher
   # sets it true only when it transitions the namespace to READY. The loadtest
   # create gate requires ready_for_loadtest=true, so wait for that column (not
-  # just the projection's ready flag).
-  if [ "$STATUS" = "READY" ] && [ "$READYF" = "true" ]; then READY=true; break; fi
+  # just the projection's ready flag). Check in Python so JSON booleans map
+  # correctly (True→true, None→"") — so sánh chuỗi "true" sẽ sai vì Python in
+  # boolean là "True"/"False".
+  if printf '%s' "$READINESS" | python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if d.get('status')=='READY' and d.get('ready_for_loadtest') is True and d.get('ready') is True else 1)
+" 2>/dev/null; then READY=true; break; fi
   sleep 2
 done
 if [ "$READY" != "true" ]; then

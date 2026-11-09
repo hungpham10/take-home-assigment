@@ -121,7 +121,8 @@ func (d Deps) applyDesired(ctx context.Context, ns store.Namespace, _ string) er
 			NamespaceID: ns.ID, ResolvedFromDeps: true, Spec: store.JSONBytes(spec),
 		}
 		var existing store.NetworkPolicy
-		if err := tx.Where("namespace_id = ?", ns.ID).First(&existing).Error; err == nil {
+		err := tx.Where("namespace_id = ?", ns.ID).Limit(1).Find(&existing).Error
+		if err == nil && existing.ID != "" {
 			policy.ID = existing.ID
 			if err := tx.Save(&policy).Error; err != nil {
 				return err
@@ -177,7 +178,8 @@ func (d Deps) applyLegacy(ctx context.Context, ns store.Namespace, actor string)
 			Spec: store.JSONBytes(spec), ObservedGeneration: 1,
 		}
 		var existing store.NetworkPolicy
-		if err := tx.Where("namespace_id = ?", ns.ID).First(&existing).Error; err == nil {
+		err := tx.Where("namespace_id = ?", ns.ID).Limit(1).Find(&existing).Error
+		if err == nil && existing.ID != "" {
 			policy.ID = existing.ID
 			if err := tx.Save(&policy).Error; err != nil {
 				return err
