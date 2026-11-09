@@ -303,7 +303,13 @@ for i in $(seq 1 20); do
   if kubectl get networkpolicy -n "$ENVNS" "$INGRESS_NP" >/dev/null 2>&1; then INGRESS_OK=1; break; fi
   sleep 1
 done
-[ -n "$INGRESS_OK" ] || fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
+[ -n "$INGRESS_OK" ] || {
+  echo "--- all networkpolicies in $ENVNS ---"
+  kubectl get networkpolicy -n "$ENVNS" 2>&1 || true
+  echo "--- loadtest targets ---"
+  curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | python3 -m json.tool 2>/dev/null || true
+  fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
+}
 # run-policy labels + egress port 80 + target selector = service name (echo)
 NP_LABELS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.metadata.labels}')
 echo "$NP_LABELS" | grep -q 'loadtest.io/component-kind=run-policy' || fail "egress NP missing component-kind=run-policy"
