@@ -17,8 +17,8 @@ import (
 // TestRunGVR is the GroupVersionResource for k6-operator TestRun CRs
 // (k6.io/v1alpha1). See docs/k6-operator-go-client.md.
 var TestRunGVR = schema.GroupVersionResource{
-	Group:   "k6.io",
-	Version: "v1alpha1",
+	Group:    "k6.io",
+	Version:  "v1alpha1",
 	Resource: "testruns",
 }
 
@@ -105,8 +105,8 @@ func (r *K8sTestRunRunner) Provision(_ context.Context, spec Spec) (string, erro
 			"name":      spec.ID + "-script",
 			"namespace": spec.Namespace,
 			"labels": map[string]any{
-				"loadtest.io/run-id":       spec.ID,
-				"loadtest.io/managed-by":   "loadtest-controller",
+				"loadtest.io/run-id":     spec.ID,
+				"loadtest.io/managed-by": "loadtest-controller",
 			},
 		},
 		"data": map[string]any{
@@ -141,10 +141,10 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 			"name":      ref,
 			"namespace": spec.Namespace,
 			"labels": map[string]any{
-				"loadtest.io/run-id":       ref,
-				"app":                      "k6",
-				"k6_cr":                    ref,
-				"loadtest.io/managed-by":   "loadtest-controller",
+				"loadtest.io/run-id":     ref,
+				"app":                    "k6",
+				"k6_cr":                  ref,
+				"loadtest.io/managed-by": "loadtest-controller",
 			},
 		},
 		"spec": map[string]any{
@@ -156,6 +156,41 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 				},
 			},
 			"args": args,
+			// Stamp run-id on runner/initializer/starter so k6-operator
+			// propagates it to the pods they spawn. The run-scoped
+			// NetworkPolicies select pods by loadtest.io/run-id, so without
+			// these labels the policies match nothing and the run stalls.
+			"runner": map[string]any{
+				"metadata": map[string]any{
+					"labels": map[string]any{
+						"loadtest.io/run-id":     ref,
+						"app":                    "k6",
+						"k6_cr":                  ref,
+						"runner":                 "true",
+						"loadtest.io/managed-by": "loadtest-controller",
+					},
+				},
+			},
+			"initializer": map[string]any{
+				"metadata": map[string]any{
+					"labels": map[string]any{
+						"loadtest.io/run-id":     ref,
+						"app":                    "k6",
+						"k6_cr":                  ref,
+						"loadtest.io/managed-by": "loadtest-controller",
+					},
+				},
+			},
+			"starter": map[string]any{
+				"metadata": map[string]any{
+					"labels": map[string]any{
+						"loadtest.io/run-id":     ref,
+						"app":                    "k6",
+						"k6_cr":                  ref,
+						"loadtest.io/managed-by": "loadtest-controller",
+					},
+				},
+			},
 		},
 	}, "k6.io", "v1alpha1", "TestRun")
 	if err := r.Client.Apply(context.Background(), tr); err != nil {
@@ -165,12 +200,13 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 }
 
 // Status reads the TestRun and maps status.stage to the shared RunStatus:
-//   initialization / initialized / created → PROVISIONING
-//   started → RUNNING
-//   finished → COMPLETED
-//   stopped → STOPPED
-//   error → FAILED
-//   missing → STOPPED with Missing=true (reconciler treats as runner-lost)
+//
+//	initialization / initialized / created → PROVISIONING
+//	started → RUNNING
+//	finished → COMPLETED
+//	stopped → STOPPED
+//	error → FAILED
+//	missing → STOPPED with Missing=true (reconciler treats as runner-lost)
 func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error) {
 	tr, err := r.Client.Get(context.Background(), testRunKind, r.nsFor(ref), ref)
 	if err != nil {

@@ -84,6 +84,17 @@ func TestK8sTestRunRunnerStartCreatesTestRun(t *testing.T) {
 	if lbls["k6_cr"] != "run-123" {
 		t.Fatalf("TestRun k6_cr label = %q", lbls)
 	}
+	// run-id must be stamped on runner/initializer/starter metadata so
+	// k6-operator propagates it to the pods the run policies select.
+	for _, comp := range []string{"runner", "initializer", "starter"} {
+		l, _, _ := unstructured.NestedMap(tr.Object, "spec", comp, "metadata", "labels")
+		if l["loadtest.io/run-id"] != "run-123" {
+			t.Fatalf("TestRun spec.%s.metadata.labels run-id = %v, want run-123", comp, l)
+		}
+	}
+	if l, _, _ := unstructured.NestedMap(tr.Object, "spec", "runner", "metadata", "labels"); l["runner"] != "true" {
+		t.Fatalf("TestRun spec.runner.metadata.labels runner = %v, want true", l)
+	}
 	script, _, _ := unstructured.NestedMap(tr.Object, "spec", "script")
 	cm, _, _ := unstructured.NestedString(script, "configMap", "name")
 	if cm != "run-123-script" {
