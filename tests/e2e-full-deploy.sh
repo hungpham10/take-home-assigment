@@ -159,8 +159,12 @@ READY=false
 for i in $(seq 1 360); do
   READINESS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/readiness" $H 2>/dev/null || echo '{}')
   STATUS=$(printf '%s' "$READINESS" | jqget "['status']" 2>/dev/null || echo "?")
-  READYF=$(printf '%s' "$READINESS" | jqget "['ready']" 2>/dev/null || echo "false")
-  if [ "$STATUS" = "READY" ] && { [ "$READYF" = "true" ] || [ "$READYF" = "True" ]; }; then READY=true; break; fi
+  READYF=$(printf '%s' "$READINESS" | jqget "['ready_for_loadtest']" 2>/dev/null || echo "false")
+  # K8S mode: applyDesired sets ready_for_loadtest=false; the Status Watcher
+  # sets it true only when it transitions the namespace to READY. The loadtest
+  # create gate requires ready_for_loadtest=true, so wait for that column (not
+  # just the projection's ready flag).
+  if [ "$STATUS" = "READY" ] && [ "$READYF" = "true" ]; then READY=true; break; fi
   sleep 2
 done
 if [ "$READY" != "true" ]; then
