@@ -156,6 +156,60 @@ func TestK8sTestRunRunnerStatusMapsStages(t *testing.T) {
 	}
 }
 
+// TestK8sTestRunRunnerStatusFallsBackToRunnerPod — k6-operator may not advance
+// TestRun.status.stage past "created" even after spawning runner pods. When a
+// runner pod labeled loadtest.io/run-id=ref is Running, Status must return
+// RUNNING so the reconciler can advance PROVISIONING→RUNNING.
+func TestK8sTestRunRunnerStatusFallsBackToRunnerPod(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-y", Namespace: testNS})
+
+	// Plant a TestRun stuck at stage "created".
+	tr := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "k6.io/v1alpha1",
+			"kind":       "TestRun",
+			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"status": map[string]any{
+				"stage": "created",
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatalf("plant TestRun: %v", err)
+	}
+
+	// Plant a runner pod labeled loadtest.io/run-id=ref, phase Running.
+	pod := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name":      ref + "-runner",
+				"namespace": testNS,
+				"labels": map[string]any{
+					"loadtest.io/run-id": ref,
+				},
+			},
+			"status": map[string]any{
+				"phase": "Running",
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, pod); err != nil {
+		t.Fatalf("plant Pod: %v", err)
+	}
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != "RUNNING" {
+		t.Fatalf("stage=created + runner pod Running → state %q, want RUNNING", st.State)
+	}
+}
+
 func TestK8sTestRunRunnerStatusMissingIsNotTerminal(t *testing.T) {
 	r := newK8sRunner(t)
 	st, err := r.Status(context.Background(), "does-not-exist")

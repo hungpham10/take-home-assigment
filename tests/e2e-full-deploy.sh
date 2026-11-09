@@ -339,13 +339,7 @@ for i in $(seq 1 90); do
   [ "$LT_STATUS" = "FAILED" ] && { curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H; fail "loadtest FAILED"; }
   sleep 2
 done
-[ "$LT_STATUS" = "COMPLETED" ] || {
-  echo "--- TestRun CR status ---"
-  kubectl get testrun -n "$ENVNS" "$LT_ID" -o json 2>&1 || true
-  echo "--- loadtest row ---"
-  curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H
-  fail "loadtest did not complete (status=$LT_STATUS)"
-}
+[ "$LT_STATUS" = "COMPLETED" ] || { curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H; fail "loadtest did not complete (status=$LT_STATUS)"; }
 STARTED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['started_at']")
 FINISHED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['finished_at']")
 [ -n "$STARTED" ] && [ -n "$FINISHED" ] || fail "loadtest missing started_at/finished_at"

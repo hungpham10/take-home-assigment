@@ -14,21 +14,28 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 )
 
-// TestRunGVR is the GroupVersionResource for k6-operator TestRun CRs
-// (k6.io/v1alpha1). See docs/k6-operator-go-client.md.
-var TestRunGVR = schema.GroupVersionResource{
-	Group:    "k6.io",
-	Version:  "v1alpha1",
-	Resource: "testruns",
-}
+var (
+	// TestRunGVR is the GroupVersionResource for k6-operator TestRun CRs
+	// (k6.io/v1alpha1). See docs/k6-operator-go-client.md.
+	TestRunGVR = schema.GroupVersionResource{
+		Group:    "k6.io",
+		Version:  "v1alpha1",
+		Resource: "testruns",
+	}
 
-// testRunKind is the GroupVersionKind for TestRun objects rendered as
-// unstructured (the dynamic client works on GVKs).
-var testRunKind = schema.GroupVersionKind{
-	Group:   "k6.io",
-	Version: "v1alpha1",
-	Kind:    "TestRun",
-}
+	// testRunKind is the GroupVersionKind for TestRun objects rendered as
+	// unstructured (the dynamic client works on GVKs).
+	testRunKind = schema.GroupVersionKind{
+		Group:   "k6.io",
+		Version: "v1alpha1",
+		Kind:    "TestRun",
+	}
+
+	// podGVK is used by Status() to fall back to runner-pod readiness when
+	// k6-operator does not advance TestRun.status.stage past "created" (seen
+	// in CI: stage stays "created" while the runner pod is already Running).
+	podGVK = schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
+)
 
 // toUnstructured wraps a rendered manifest map with its GVK. The JSON
 // round-trip normalizes Go-native maps (e.g. map[string]string labels) into
@@ -201,12 +208,17 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 
 // Status reads the TestRun and maps status.stage to the shared RunStatus:
 //
-//	initialization / initialized / created → PROVISIONING
+//	initialization / initialized → PROVISIONING
 //	started → RUNNING
 //	finished → COMPLETED
 //	stopped → STOPPED
 //	error → FAILED
 //	missing → STOPPED with Missing=true (reconciler treats as runner-lost)
+//
+// Fallback: k6-operator may not advance TestRun.status.stage past "created"
+// even after spawning runner pods. When stage is "created"/"initialization"/
+// "initialized"/"" and a pod labeled loadtest.io/run-id=<ref> is Running, treat
+// the run as RUNNING so the reconciler can advance PROVISIONING→RUNNING.
 func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error) {
 	tr, err := r.Client.Get(context.Background(), testRunKind, r.nsFor(ref), ref)
 	if err != nil {
@@ -217,8 +229,6 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 	}
 	stage, _, _ := unstructured.NestedString(tr.Object, "status", "stage")
 	switch stage {
-	case "initialization", "initialized", "created", "":
-		return Status{State: "PROVISIONING"}, nil
 	case "started":
 		return Status{State: "RUNNING"}, nil
 	case "finished":
@@ -227,9 +237,21 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 		return Status{State: "STOPPED"}, nil
 	case "error":
 		return Status{State: "FAILED", Msg: "testrun stage error"}, nil
-	default:
-		return Status{State: "PROVISIONING", Msg: "unknown stage " + stage}, nil
 	}
+	// stage is "created"/"initialization"/"initialized"/"" — fall back to
+	// runner-pod readiness.
+	pods, err := r.Client.List(context.Background(), podGVK, r.nsFor(ref),
+		labels.Set{"loadtest.io/run-id": ref})
+	if err != nil {
+		return Status{}, err
+	}
+	for _, p := range pods {
+		phase, _, _ := unstructured.NestedString(p.Object, "status", "phase")
+		if phase == "Running" {
+			return Status{State: "RUNNING"}, nil
+		}
+	}
+	return Status{State: "PROVISIONING"}, nil
 }
 
 // Stop deletes the TestRun CR. Idempotent: deleting an already-gone run is
