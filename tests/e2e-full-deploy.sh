@@ -40,14 +40,15 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
 
   # Install Calico so NetworkPolicy is actually enforced (kindnetd does not).
   # kind's default CNI (kindnetd) does NOT enforce NetworkPolicies.
+  # The standard calico.yaml manifest installs calico-node daemonset in kube-system.
   say "install Calico CNI (NetworkPolicy enforcement)"
   kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.1/manifests/calico.yaml
-  # Wait for calico-system namespace + daemonset to be ready.
+  # Wait for calico-node daemonset (in kube-system) to be ready.
   for i in $(seq 1 30); do
-    if kubectl get ns calico-system >/dev/null 2>&1; then break; fi
+    if kubectl get daemonset -n kube-system calico-node >/dev/null 2>&1; then break; fi
     sleep 2
   done
-  kubectl -n calico-system rollout status daemonset/calico-node --timeout=180s
+  kubectl -n kube-system rollout status daemonset/calico-node --timeout=180s
 fi
 [ -n "${KUBECONFIG:-}" ] || KUBECONFIG="$HOME/.kube/config"
 export KUBECONFIG
