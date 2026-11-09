@@ -305,9 +305,9 @@ for i in $(seq 1 20); do
 done
 [ -n "$INGRESS_OK" ] || {
   echo "--- all networkpolicies in $ENVNS ---"
-  kubectl get networkpolicy -A --no-headers -o custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace 2>&1 | grep "$ENVNS" || echo "kubectl list networkpolicies returned nothing"
+  kubectl get networkpolicy -n "$ENVNS" -o name 2>&1 || echo "kubectl list networkpolicies failed: $?"
   echo "--- run-policy labeled networkpolicies ---"
-  kubectl get networkpolicy -n "$ENVNS" -l loadtest.io/component-kind=run-policy --no-headers -o custom-columns=NAME:.metadata.name 2>&1 || echo "kubectl list run-policy failed"
+  kubectl get networkpolicy -n "$ENVNS" -l loadtest.io/component-kind=run-policy -o name 2>&1 || echo "kubectl list run-policy failed: $?"
   echo "--- loadtest targets ---"
   curl -s -w "\nHTTP_CODE:%{http_code}" "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H 2>&1 || echo "curl loadtest failed"
   fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
