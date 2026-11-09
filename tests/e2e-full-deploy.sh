@@ -305,9 +305,11 @@ for i in $(seq 1 20); do
 done
 [ -n "$INGRESS_OK" ] || {
   echo "--- all networkpolicies in $ENVNS ---"
-  kubectl get networkpolicy -n "$ENVNS" 2>&1 || true
+  kubectl get networkpolicy -A --no-headers -o custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace 2>&1 | grep "$ENVNS" || echo "kubectl list networkpolicies returned nothing"
+  echo "--- run-policy labeled networkpolicies ---"
+  kubectl get networkpolicy -n "$ENVNS" -l loadtest.io/component-kind=run-policy --no-headers -o custom-columns=NAME:.metadata.name 2>&1 || echo "kubectl list run-policy failed"
   echo "--- loadtest targets ---"
-  curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | python3 -m json.tool 2>/dev/null || true
+  curl -s -w "\nHTTP_CODE:%{http_code}" "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H 2>&1 || echo "curl loadtest failed"
   fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
 }
 # run-policy labels + egress port 80 + target selector = service name (echo)
