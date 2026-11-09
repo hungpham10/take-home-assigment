@@ -188,21 +188,22 @@ echo "   NetworkPolicies present: default-deny, echo-policy, demo-db-policy ✅"
 # --- 4c. simple egress enforcement probe (RUN-NET-02 subset)
 say "egress enforcement probe"
 PROBE_POD="netprobe-$(date +%s)"
-kubectl run "$PROBE_POD" --image=ealen/echo-server:latest --restart=Never -n "$ENVNS" >/dev/null 2>&1 || true
-for i in $(seq 1 15); do
+kubectl run "$PROBE_POD" --image=busybox:latest --restart=Never -n "$ENVNS" -- sleep 300 >/dev/null 2>&1 || true
+for i in $(seq 1 60); do
   STATUS=$(kubectl get pod "$PROBE_POD" -n "$ENVNS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
   [ "$STATUS" = "Running" ] && break
   sleep 1
 done
+[ "$STATUS" = "Running" ] || fail "probe pod did not reach Running state"
 # Probe pod egress to K8s API should be allowed (default-deny opens node CIDR :6443).
-API_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- sh -c 'wget -qO- --timeout=5 https://kubernetes.default.svc:443/version 2>/dev/null | head -c 1' 2>/dev/null || echo "")
+API_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 https://kubernetes.default.svc:443/version 2>/dev/null | head -c 1 || echo "")
 if [ -z "$API_REACHABLE" ]; then
   kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
   fail "probe pod cannot reach K8s API — Calico may not be enforcing or DNS broken"
 fi
 # Probe pod egress to echo service should be DENIED (not a declared dependency;
 # default-deny egress only allows DNS + kube-apiserver + declared deps).
-ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- sh -c 'wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1' 2>/dev/null || echo "")
+ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
 if [ -n "$ECHO_REACHABLE" ]; then
   kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
   fail "probe pod reached echo service without declared dependency — default-deny egress not enforced"
