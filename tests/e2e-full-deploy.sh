@@ -36,7 +36,8 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   # mỗi lần (5-7m → ~1-2m, ổn định CI).
   docker pull ealen/echo-server:latest >/dev/null 2>&1 || true
   docker pull ghcr.io/cloudnative-pg/postgresql:16 >/dev/null 2>&1 || true
-  kind load docker-image ealen/echo-server:latest ghcr.io/cloudnative-pg/postgresql:16 --name "$CLUSTER" 2>/dev/null || true
+  docker pull grafana/k6:latest >/dev/null 2>&1 || true
+  kind load docker-image ealen/echo-server:latest ghcr.io/cloudnative-pg/postgresql:16 grafana/k6:latest --name "$CLUSTER" 2>/dev/null || true
 
   # Install Calico so NetworkPolicy is actually enforced (kindnetd does not).
   # kind's default CNI (kindnetd) does NOT enforce NetworkPolicies.
@@ -60,6 +61,24 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
 fi
 kubectl get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 || fail "CNPG CRD not present"
 
+# Install k6-operator so load tests run as TestRun CRs inside the env
+# namespace (subject to NetworkPolicy). bundle.yaml is self-contained
+# (namespace + CRDs + RBAC + controller), no cert-manager needed.
+if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  K6_OPERATOR_BUNDLE="$SCRIPT_DIR/../sources/k6-operator/bundle.yaml"
+  [ -f "$K6_OPERATOR_BUNDLE" ] || fail "k6-operator bundle not found: $K6_OPERATOR_BUNDLE"
+  say "install k6-operator"
+  kubectl apply -f "$K6_OPERATOR_BUNDLE"
+  # Wait for TestRun CRD to be established.
+  for i in $(seq 1 30); do
+    if kubectl get crd testruns.k6.io >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
+  kubectl get crd testruns.k6.io >/dev/null 2>&1 || fail "k6-operator TestRun CRD not established"
+  kubectl -n k6-operator-system rollout status deployment/k6-operator-controller-manager --timeout=180s || true
+fi
+
 # --- 2. control-plane postgres + controller -----------------------------------
 say "control-plane postgres (:$PG_PORT)"
 docker rm -f ltp-full-deploy-pg >/dev/null 2>&1 || true
@@ -79,7 +98,7 @@ say "build + start controller (K8S_ENABLED=true)"
 SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 go build -o bin/loadtest-controller ./cmds/loadtest-controller
 DATABASE_DSN="postgres://ltp:ltp@127.0.0.1:$PG_PORT/ltp?sslmode=disable" \
-SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=${BASE#http://localhost} K8S_ENABLED=true K8S_API_URL="$SERVER" KUBECONFIG="$HOME/.kube/config" \
+SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=${BASE#http://localhost} K8S_ENABLED=true RUNNER_MODE=k8s K8S_API_URL="$SERVER" KUBECONFIG="$HOME/.kube/config" \
   ./bin/loadtest-controller > /tmp/ltp-full-deploy-controller.log 2>&1 &
 CTRL_PID=$!
 trap 'kill $CTRL_PID 2>/dev/null; docker rm -f ltp-full-deploy-pg >/dev/null 2>&1' EXIT
@@ -236,6 +255,102 @@ kill $PF_PID 2>/dev/null || true
 [ -n "$ECHO_BODY" ] || { echo "--- port-forward log ---"; tail -20 /tmp/ltp-full-deploy-pf.log >&2 || true; fail "echo-server did not respond"; }
 echo "   echo response: $(echo "$ECHO_BODY" | head -c 120)"
 
+# --- 8. upload k6 script + poll VALIDATED -----------------------------------------
+say "upload + validate k6 script"
+SCRIPT_CONTENT='import http from "k6/http"; export default function() { http.get("http://echo:80/"); }'
+SCRIPT=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces/$NS/scripts" -H "Idempotency-Key: fd-script-$(date +%s)" \
+  $H -H 'Content-Type: application/json' \
+  -d "{\"name\":\"echo-test\",\"content\":$(printf '%s' "$SCRIPT_CONTENT" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}")
+SCRIPT_ID=$(printf '%s' "$SCRIPT" | jqget "['id']")
+[ -n "$SCRIPT_ID" ] || fail "script upload: $SCRIPT"
+SCRIPT_STATUS=""
+for i in $(seq 1 30); do
+  SCRIPT_STATUS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/scripts/$SCRIPT_ID" $H | jqget "['status']")
+  [ "$SCRIPT_STATUS" = "VALIDATED" ] && break
+  [ "$SCRIPT_STATUS" = "INVALID" ] && fail "script validation INVALID"
+  sleep 2
+done
+[ "$SCRIPT_STATUS" = "VALIDATED" ] || fail "script did not validate (status=$SCRIPT_STATUS)"
+echo "   script VALIDATED ($SCRIPT_ID) ✅"
+
+# --- 9. create loadtest ------------------------------------------------------------
+say "create loadtest"
+LT_RESP=$(curl -s -o /tmp/fd-lt.json -w "%{http_code}" -X POST "$BASE/api/loadtest/v1/namespaces/$NS/loadtests" \
+  -H "Idempotency-Key: fd-lt-$(date +%s)" $H -H 'Content-Type: application/json' \
+  -d "{\"name\":\"echo-load\",\"script_id\":\"$SCRIPT_ID\",\"load_config\":{\"vusers\":5,\"duration\":\"20s\",\"timeout_minutes\":5}}")
+[ "$LT_RESP" = "201" ] || fail "create loadtest: $LT_RESP $(cat /tmp/fd-lt.json 2>/dev/null || true)"
+LT_ID=$(jqget "['id']" < /tmp/fd-lt.json)
+echo "   loadtest $LT_ID created ✅"
+
+# --- 10. assert run-scoped NetworkPolicies exist ------------------------------------
+say "assert run-scoped NetworkPolicies"
+for np in loadtest-run-egress-$LT_ID loadtest-run-api-$LT_ID; do
+  kubectl get networkpolicy -n "$ENVNS" "$np" >/dev/null 2>&1 || fail "run NetworkPolicy $np not found in $ENVNS"
+done
+# ingress policy is per-target: loadtest-run-ingress-<id>-echo
+INGRESS_NP="loadtest-run-ingress-$LT_ID-echo"
+kubectl get networkpolicy -n "$ENVNS" "$INGRESS_NP" >/dev/null 2>&1 || fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
+# run-policy labels + egress port 80 + target selector = service name (echo)
+NP_LABELS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.metadata.labels}')
+echo "$NP_LABELS" | grep -q 'loadtest.io/component-kind=run-policy' || fail "egress NP missing component-kind=run-policy"
+echo "$NP_LABELS" | grep -q "loadtest.io/run-id=$LT_ID" || fail "egress NP missing run-id=$LT_ID"
+EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)]}')
+[ -n "$EGRESS_PORTS" ] || fail "egress NP missing port 80 rule"
+EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)].to[0].podSelector.matchLabels."loadtest\.io/component-id"}')
+[ "$EGRESS_TARGET" = "echo" ] || fail "egress NP target selector = $EGRESS_TARGET (want echo)"
+# 6565 API ingress rule present
+API_6565=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-api-$LT_ID -o jsonpath='{.spec.ingress[?(@.ports[0].port==6565)]}')
+[ -n "$API_6565" ] || fail "api NP missing 6565 ingress rule"
+echo "   run-scoped NetworkPolicies: egress/ingress/api present, port 80 scoped, target=echo, 6565 ✅"
+
+# --- 11. wait for loadtest COMPLETED -----------------------------------------------
+say "wait for loadtest completion (deadline 3m)"
+LT_STATUS=""
+for i in $(seq 1 90); do
+  LT_STATUS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['status']")
+  [ "$LT_STATUS" = "COMPLETED" ] && break
+  [ "$LT_STATUS" = "FAILED" ] && { curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H; fail "loadtest FAILED"; }
+  sleep 2
+done
+[ "$LT_STATUS" = "COMPLETED" ] || { curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H; fail "loadtest did not complete (status=$LT_STATUS)"; }
+STARTED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['started_at']")
+FINISHED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['finished_at']")
+[ -n "$STARTED" ] && [ -n "$FINISHED" ] || fail "loadtest missing started_at/finished_at"
+echo "   loadtest COMPLETED ✅ (started=$STARTED finished=$FINISHED)"
+
+# --- 12. events + unreliable ---------------------------------------------------------
+say "loadtest events + unreliable"
+EVENTS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID/events" $H)
+echo "$EVENTS" | python3 -c "import json,sys;d=json.load(sys.stdin);print('events:',len(d.get('events',[])),'unreliable:',d.get('unreliable'))" >/dev/null || fail "events payload unreadable: $EVENTS"
+echo "   events + unreliable present ✅"
+
+# --- 13. L3/L4 probes from busybox runner-like pod ----------------------------------
+say "L3/L4 NetworkPolicy probes"
+PROBE_POD="netprobe-$LT_ID"
+kubectl run "$PROBE_POD" --image=busybox:latest --restart=Never -n "$ENVNS" \
+  --labels="loadtest.io/run-id=$LT_ID" -- sleep 300 >/dev/null 2>&1 || true
+for i in $(seq 1 60); do
+  PSTATUS=$(kubectl get pod "$PROBE_POD" -n "$ENVNS" -o jsonpath='{.status.phase}' 2>/dev/null || echo Pending)
+  [ "$PSTATUS" = "Running" ] && break
+  sleep 1
+done
+[ "$PSTATUS" = "Running" ] || fail "probe pod did not reach Running"
+
+# 13a. runner → echo (port 80) MUST be allowed (declared target)
+ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
+[ -n "$ECHO_PROBE" ] || fail "runner→echo:80 denied (declared target should be allowed)"
+# 13b. runner → demo-db (5432) MUST be denied (not a target)
+DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
+[ -z "$DB_PROBE" ] || fail "runner→demo-db:5432 allowed (should be denied — not a target)"
+# 13c. echo pod (component-id=echo, not bound to DB) → demo-db:5432 MUST be denied
+ECHO_POD=$(kubectl get pod -n "$ENVNS" -l loadtest.io/component-id=echo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -n "$ECHO_POD" ]; then
+  ECHO_DB_PROBE=$(kubectl exec "$ECHO_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
+  [ -z "$ECHO_DB_PROBE" ] || fail "echo→demo-db:5432 allowed (echo not bound to DB — should be denied)"
+fi
+kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
+echo "   L3/L4 probes: runner→echo ✅, runner→demo-db ❌, echo→demo-db ❌ ✅"
+
 # --- 7. projection dump ----------------------------------------------------------
 say "projection"
 psql -c "SELECT component_type, component_id, phase, desired_generation, observed_generation
@@ -256,6 +371,14 @@ for i in $(seq 1 90); do
 done
 [ "$NS_GONE" = "true" ] || { kubectl get ns "$ENVNS" -o yaml 2>&1 | head -40 || true; fail "env namespace $ENVNS still present after delete"; }
 echo "   env namespace $ENVNS deleted ✅"
+
+# Run-scoped NetworkPolicies are garbage-collected with the namespace.
+for np in loadtest-run-egress-$LT_ID loadtest-run-ingress-$LT_ID-echo loadtest-run-api-$LT_ID; do
+  if kubectl get networkpolicy -n "$ENVNS" "$np" >/dev/null 2>&1; then
+    fail "run NetworkPolicy $np still present after namespace delete"
+  fi
+done
+echo "   run-scoped NetworkPolicies garbage-collected ✅"
 
 echo "FULL-DEPLOY E2E PASS (namespace=$NS)"
 if [ "${KEEP_CLUSTER:-0}" != "1" ] && [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
