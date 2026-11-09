@@ -16,7 +16,8 @@ import (
 //	Environment (Namespace)
 //	├── NetworkPolicy (default-deny)
 //	├── Service policies (per-service ingress allow)
-//	├── Database policies (per-database ingress allow)
+//	├── Service egress policies (per-service egress allow, declared deps only)
+//	├── Database policies (per-database ingress allow, bound services only)
 //	├── Database operator CRs (CNPG Cluster | ECK Elasticsearch)
 //	├── Service (composite): ConfigMap → Secret → ServiceAccount → Deployment
 //	│                          → Service → HPA
@@ -47,7 +48,16 @@ func BuildComponentTree(env *Env) (Component, error) {
 		})
 	}
 
-	// 4. Per-database ingress policies (allow same-namespace → engine port).
+	// 4. Per-service egress policies (allow service → declared deps only).
+	for _, svc := range env.Services {
+		children = append(children, ServiceEgressPolicyComponent{
+			envNS: envNS,
+			env:   env,
+			svc:   svc,
+		})
+	}
+
+	// 5. Per-database ingress policies (allow bound services → engine port).
 	for _, db := range env.Databases {
 		children = append(children, DatabasePolicyComponent{
 			envNS: envNS,

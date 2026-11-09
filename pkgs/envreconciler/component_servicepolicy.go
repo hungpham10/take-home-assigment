@@ -11,9 +11,10 @@ import (
 // service port. Egress is governed by default-deny's declared-dependency
 // allow-list, so a service can only reach targets it declared.
 //
-// NOTE: strict per-service egress (source service → target service) requires
-// a source_service_id column on tbl_dependencies; today's model resolves all
-// deps at namespace level (renderEgress). See docs/network-policy.md §3.
+// NOTE: strict per-service egress (source service → target service) is now
+// rendered per-service from svc.Dependencies / svc.DatabaseBindings
+// (component_service_egress_policy.go), so each service can only reach its
+// own declared targets. See docs/network-policy.md §2.
 type ServicePolicyComponent struct {
 	envNS string
 	env   *Env

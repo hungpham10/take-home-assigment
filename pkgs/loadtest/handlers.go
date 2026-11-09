@@ -161,11 +161,19 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Provision synchronously; the reconciler advances PROVISIONING→RUNNING.
+	// Provision/Start use a detached context (context.Background) so a spawned
+	// k6 process / TestRun outlives this HTTP request — the request ctx is
+	// cancelled when the handler returns, which would kill a Local runner's
+	// child process via exec.CommandContext. The reconciler polls Status and
+	// Stop uses its own ctx (plans/27, request-context bug).
+	runCtx := context.Background()
 	spec := runner.Spec{
-		ID: lt.ID, Script: scriptContent(ctx, d.DB, sc), VUs: intOf(cfg["vusers"], 1),
-		Duration: strOf(cfg["duration"], "1m"), TargetsJSON: lt.Targets,
+		ID:        lt.ID,
+		Namespace: envreconciler.EnvNamespaceName(ns.ID),
+		Script:    scriptContent(ctx, d.DB, sc), VUs: intOf(cfg["vusers"], 1),
+		Duration:   strOf(cfg["duration"], "1m"), TargetsJSON: lt.Targets,
 	}
-	ref, err := d.Runner.Provision(ctx, spec)
+	ref, err := d.Runner.Provision(runCtx, spec)
 	if err != nil {
 		_ = store.LTToFailed(ctx, d.DB, lt.ID,
 			store.ActorJSON(p.TenantID, p.UserID, p.Role), "provision failed: "+err.Error())
@@ -197,7 +205,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 
 	// Launch the run only after the transaction committed. Start failure is
 	// terminal FAILED (otherwise the reconciler polls a dead ref forever).
-	if err := d.Runner.Start(ctx, ref, spec); err != nil {
+	if err := d.Runner.Start(runCtx, ref, spec); err != nil {
 		_ = store.LTToFailed(ctx, d.DB, lt.ID,
 			actor, "runner start failed: "+err.Error())
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "runner start failed")

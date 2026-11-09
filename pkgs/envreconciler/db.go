@@ -41,6 +41,35 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 			if err := db.WithContext(ctx).Where("namespace_id = ?", ns.ID).Find(&services).Error; err != nil {
 				return nil, err
 			}
+			// service id -> {name, port} so dependency service_id refs can be
+			// resolved to the pod label (loadtest.io/component-id=<name>) used
+			// by per-service egress policies.
+			svcByID := map[string]struct{ name string; port int32 }{}
+			for _, svc := range services {
+				port := int32(8080)
+				var deploy struct {
+					Port int32 `json:"port"`
+				}
+				if json.Unmarshal(svc.Deploy, &deploy) == nil && deploy.Port > 0 {
+					port = deploy.Port
+				}
+				id := derefStr(svc.ServiceID)
+				svcByID[id] = struct{ name string; port int32 }{svc.Name, port}
+			}
+			var dbs []store.Database
+			if err := db.WithContext(ctx).Where("namespace_id = ?", ns.ID).Find(&dbs).Error; err != nil {
+				return nil, err
+			}
+			// database id -> {name, port} for resolving database_bindings.
+			dbByID := map[string]struct{ name string; port int32 }{}
+			// database id -> set of service names bound to it (for per-DB
+			// ingress policy).
+			dbBoundServices := map[string]map[string]bool{}
+			for _, dbRow := range dbs {
+				dbSpec := DatabaseSpec{Name: dbRow.Name, Operator: dbRow.Operator}
+				dbByID[dbRow.ID] = struct{ name string; port int32 }{dbRow.Name, dbPort(dbSpec)}
+				dbBoundServices[dbRow.ID] = map[string]bool{}
+			}
 			for _, svc := range services {
 				spec := ServiceSpec{Name: svc.Name, SpecHash: derefStr(svc.SpecHash), Mock: svc.Mock}
 				var d struct {
@@ -66,11 +95,44 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 						spec.Port = 8080
 					}
 				}
+				// Resolve this service's declared dependencies (services +
+				// databases) into egress rules keyed by the target's pod label.
+				if len(svc.Dependencies) > 0 {
+					var deps []struct{ ServiceID string `json:"service_id"` }
+					if json.Unmarshal(svc.Dependencies, &deps) == nil {
+						for _, dep := range deps {
+							if t, ok := svcByID[dep.ServiceID]; ok && t.name != "" {
+								spec.Dependencies = append(spec.Dependencies, EgressRule{
+									Type:  "service",
+									RefID: t.name,
+									Ports: []int32{t.port},
+								})
+							}
+						}
+					}
+				}
+				if len(svc.DatabaseBindings) > 0 {
+					var bindings []struct{ DatabaseID string `json:"database_id"` }
+					if json.Unmarshal(svc.DatabaseBindings, &bindings) == nil {
+						for _, b := range bindings {
+							db, ok := dbByID[b.DatabaseID]
+							if !ok || db.name == "" {
+								continue
+							}
+							spec.Dependencies = append(spec.Dependencies, EgressRule{
+								Type:  "database",
+								RefID: db.name,
+								Ports: []int32{db.port},
+							})
+							// Record this service as bound to this DB so the
+							// DB ingress policy allows only bound services.
+							if bound, exists := dbBoundServices[b.DatabaseID]; exists {
+								bound[svc.Name] = true
+							}
+						}
+					}
+				}
 				env.Services = append(env.Services, spec)
-			}
-			var dbs []store.Database
-			if err := db.WithContext(ctx).Where("namespace_id = ?", ns.ID).Find(&dbs).Error; err != nil {
-				return nil, err
 			}
 			for _, dbRow := range dbs {
 				spec := DatabaseSpec{Name: dbRow.Name, Operator: dbRow.Operator}
@@ -102,6 +164,11 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 				}
 				if spec.Operator == "" {
 					spec.Operator = "cloudnative-pg" // default operator (0003/0010)
+				}
+				boundSet := dbBoundServices[dbRow.ID]
+				spec.BoundServices = make([]string, 0, len(boundSet))
+				for name := range boundSet {
+					spec.BoundServices = append(spec.BoundServices, name)
 				}
 				env.Databases = append(env.Databases, spec)
 			}

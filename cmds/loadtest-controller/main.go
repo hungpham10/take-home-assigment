@@ -60,9 +60,24 @@ func run() error {
 	// Async script validation workers (k6 inspect local; K8s Job plugs later).
 	scriptQ := script.NewQueue(ctx, db, cfg.ScriptsDir, 4, 256)
 
-	run := newRunner(cfg.RunnerMode, "")
+	// k8s client is required for the k8s runner (RUNNER_MODE=k8s) and for
+	// run-scoped NetworkPolicy / HA. Build it before picking the runner so
+	// k8s mode is fail-closed (no silent local fallback in a cluster).
+	var k8sClient k8s.Client
+	if cfg.K8SEnabled {
+		var err error
+		k8sClient, err = k8s.NewClientFromEnv(cfg.K8SAPIURL)
+		if err != nil {
+			return fmt.Errorf("controller: build k8s client: %w", err)
+		}
+	}
+
+	run, err := newRunner(cfg.RunnerMode, "", k8sClient)
+	if err != nil {
+		return err
+	}
 	// Reconciler: poll Runner status → advance DB state machine.
-	go loadtest.Reconciler{DB: db, Runner: run, Every: 2 * time.Second}.Start(ctx)
+	go loadtest.Reconciler{DB: db, Runner: run, K8s: k8sClient, Every: 2 * time.Second}.Start(ctx)
 
 	// HA leader election (docs/k8s-orchestration.md §10): single lease,
 	// leader writes, standby no-ops. Created before the router so ApplyNow
@@ -85,15 +100,6 @@ func run() error {
 				slog.Warn("controller: leader election stopped", "err", err)
 			}
 		}()
-	}
-
-	var k8sClient k8s.Client
-	if cfg.K8SEnabled {
-		var err error
-		k8sClient, err = k8s.NewClientFromEnv(cfg.K8SAPIURL)
-		if err != nil {
-			return fmt.Errorf("controller: build k8s client: %w", err)
-		}
 	}
 
 	srv := &http.Server{

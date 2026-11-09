@@ -505,22 +505,31 @@ End-to-end **K8s-mode** flow with real cluster (kind), CNPG operator, and Env Re
 | `E2E-FD-01` | **Full K8s deploy**: kind cluster → CNPG operator install → control-plane Postgres → controller (K8S_ENABLED=true) → namespace with database (CNPG) + service (echo-server) → validate → apply (202) → Env Reconciler applies → Status Watcher projects → READY → port-forward curl echo-server → delete namespace → verify K8s ns gone | kind + CNPG |
 | `E2E-FD-02` | **Negative**: invalid spec → validate returns 422 | kind |
 | `E2E-FD-03` | **HA simulation**: controller pod kill mid-apply → verify convergence on resync | kind |
+| `E2E-FD-04` | **Full load-test lifecycle**: namespace READY → upload k6 script → poll `VALIDATED` → `POST /loadtests` (201) → assert run-scoped NetworkPolicy (`loadtest-run-{egress,ingress}-<id>`, `component-kind=run-policy`, egress `ports:[80]`, target selector = service name, 6565 rule) → poll `COMPLETED` → `started_at`/`finished_at` + events + `unreliable` | kind + CNPG + k6-operator |
+| `E2E-FD-05` | **L3/L4 probe**: busybox pod gắn `loadtest.io/run-id=<id>`: runner→echo (port 80) ✅; runner→demo-db (5432) ❌; undeclared internet/metadata ❌ | kind + Calico |
+| `E2E-FD-06` | **L3/L4 probe negative**: other-service→demo-db (5432) ❌ (không `database_bindings`); bound-service→demo-db ✅ (có binding) | kind + Calico |
+| `E2E-FD-07` | **Cleanup**: `DELETE /namespaces/{id}` → 202 DELETING → K8s ns gone → run-scoped NetworkPolicy + ConfigMap gone | kind + CNPG |
+| `E2E-FD-08` | **Script gate**: `POST /loadtests` với script chưa VALIDATED → 409 `SCRIPT_NOT_VALIDATED` | kind |
 
-**Prerequisites**: `kind`, `kubectl`, `docker`, `curl`, `python3`. Uses `KEEP_CLUSTER=1` to retain cluster for debugging.
+**Prerequisites**: `kind`, `kubectl`, `docker`, `curl`, `python3`. **k6-operator** (`bundle.yaml`, pinned tag) + `grafana/k6` image phải có sẵn trong kind (script cài trong `tests/e2e-full-deploy.sh`). Controller chạy với `RUNNER_MODE=k8s` cho các case 04–07. Uses `KEEP_CLUSTER=1` to retain cluster for debugging.
 
 **Flow** (from script):
-1. Bootstrap kind cluster + pre-load images (CNPG postgres, echo-server)
+1. Bootstrap kind cluster + pre-load images (CNPG postgres, echo-server, `grafana/k6`)
 2. Install CNPG operator (`kubectl apply --server-side`)
-3. Start control-plane Postgres (Docker) + run migrations (`sql/*.sql`)
-4. Build & start `loadtest-controller` with `K8S_ENABLED=true`, `K8S_API_URL` pointing to kind
-5. Seed tenant/user fixture in PG
-6. Create namespace with full spec (database: CNPG postgres:16 + service: echo-server)
-7. `POST /validate` → `POST /apply` (202, async hand-off)
-8. Poll `/readiness` (up to 12m — CNPG bootstrap)
-9. Verify: CNPG Cluster Ready, Deployment Available, `tbl_component_status` projection
-10. Port-forward `echo` service → curl returns JSON
-11. `DELETE /namespaces/{id}` → 202 DELETING
-12. Env Reconciler deletes K8s namespace `lt-env-<id>` → verify gone
+3. Install k6-operator (`bundle.yaml`); chờ CRD established + `k6-operator-controller-manager` ready
+4. Start control-plane Postgres (Docker) + run migrations (`sql/*.sql`)
+5. Build & start `loadtest-controller` with `K8S_ENABLED=true`, `RUNNER_MODE=k8s`, `K8S_API_URL` pointing to kind
+6. Seed tenant/user fixture in PG
+7. Create namespace with full spec (database: CNPG postgres:16 + service: echo-server)
+8. `POST /validate` → `POST /apply` (202, async hand-off)
+9. Poll `/readiness` (up to 12m — CNPG bootstrap)
+10. Verify: CNPG Cluster Ready, Deployment Available, `tbl_component_status` projection
+11. Port-forward `echo` service → curl returns JSON
+12. Upload k6 script → poll `VALIDATED` → `POST /loadtests` → assert run-scoped NetworkPolicy
+13. Poll loadtest `COMPLETED` → `started_at`/`finished_at` + events + `unreliable`
+14. L3/L4 probes (runner→echo ✅, runner→DB ❌, other-service→DB ❌, bound-service→DB ✅)
+15. `DELETE /namespaces/{id}` → 202 DELETING
+16. Env Reconciler deletes K8s namespace `lt-env-<id>` → verify gone + run policies gone
 
 **Run**: `./tests/e2e-full-deploy.sh` (or `KEEP_CLUSTER=1 ./tests/e2e-full-deploy.sh` to keep kind cluster)
 

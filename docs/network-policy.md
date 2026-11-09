@@ -22,8 +22,8 @@ NetworkPolicy is a **Kubernetes L3/L4** construct: it matches on pod/namespace s
 
 | Source (desired state) | Field(s) used | Policy rendered | Direction | Selector / target |
 |---|---|---|---|---|
-| `services[].dependencies[]` (`tbl_dependencies`) | `service_id`, `ports`, `required` | one policy per service | **egress** (SUT → dependency) | dependency pod selector + ports |
-| `database_bindings[]` | `database_id`, `binding` | service → DB egress + DB ingress | **egress** (service → DB pod) / **ingress** (DB pod ← service) | DB pod selector + engine port |
+| `services[].dependencies[]` (`tbl_dependencies`) | `service_id`, `ports`, `required` | one egress policy **per service** (its own dependencies only) | **egress** (SUT → dependency) | dependency pod selector + ports |
+| `database_bindings[]` | `database_id`, `binding` | service → DB egress + DB ingress | **egress** (service → DB pod) / **ingress** (DB pod ← **bound services only**) | DB pod selector + engine port |
 | Platform allowances | DNS (kube-system:53), mock-service, ingress-nginx → SUT | per-namespace baseline | egress / ingress | `kube-system` label, mock-service label, ingress-nginx CIDR |
 | **Run-scoped** (`targets[]`, §3) | `service_id`, `ports`, `via` | one egress + one ingress per run | **egress** (runner → target) / **ingress** (target ← runner) | runner label `run-id` / target pod selector + port |
 
@@ -54,9 +54,9 @@ For each load-test run (`testrun-<id>` in namespace `lt-env-<namespace_id>`):
    - everything else denied (default-deny baseline of the namespace still applies).
 
 2. **Target ingress** — `loadtest-run-ingress-<run-id>`:
-   - podSelector: target service pods (label `loadtest.io/component-id=<service_id>`).
+   - podSelector: target service pods (label `loadtest.io/component-id=<service_name>`, rendered from service **name**, not `service_id`).
    - ingress allow: from runner pods (`loadtest.io/run-id=<run-id>`) on `targets[].ports`.
-   - Required because the namespace `default-deny-all` denies ingress by default; without it the runner cannot reach the SUT even when egress is allowed.
+   - One ingress rule per target (service + port); required because the namespace `default-deny-all` denies ingress by default; without it the runner cannot reach the SUT even when egress is allowed.
 
 ### 3.3 Labeling and lifecycle (prune safety)
 
@@ -71,7 +71,7 @@ Run policies use a label set **distinct** from the Env Reconciler / Watcher mana
 
 Lifecycle:
 1. Platform renders both policies **before** creating the `TestRun` (so enforcement exists when runner pods start).
-2. The reaper deletes both policies as part of run cleanup (after `TestRun` deletion).
+2. The run-scoped policies + run-scoped script ConfigMap are deleted when the run reaches a **terminal status** (COMPLETED/FAILED/STOPPED/TIMED_OUT), not only when the TestRun object is deleted — the loadtest reconciler owns this cleanup on its `finish`/timeout paths.
 3. On namespace teardown, run policies are garbage-collected with the namespace (1 Environment = 1 K8s Namespace, cascade).
 
 ## 4. Database policy detail

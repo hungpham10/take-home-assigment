@@ -17,6 +17,7 @@ import (
 // Spec is one executable load test.
 type Spec struct {
 	ID          string
+	Namespace   string // environment namespace (lt-env-<namespace_id>) for k8s-scoped objects
 	ScriptPath  string // staged k6 script (local) / content ref (k8s)
 	Script      []byte // script content
 	VUs         int    // virtual users

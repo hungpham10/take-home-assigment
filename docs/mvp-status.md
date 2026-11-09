@@ -15,7 +15,7 @@ nginx (conf/nginx — có sẵn, chưa đụng)
                              ├─ pkgs/serviceopenapi kin-openapi validate + targets[] index
                              ├─ pkgs/script         upload ≤1MiB + async validation workers (k6 inspect/structural)
                              ├─ pkgs/loadtest       gates 409/422 + lifecycle + reconciler (2s poll)
-                             ├─ pkgs/runner         Runner interface: Local (k6 binary) | K8s (cắm sau)
+                             ├─ pkgs/runner         Runner interface: Local (k6 binary) | K8s (k6-operator TestRun qua Go client, RUNNER_MODE=k8s)
                              ├─ pkgs/secrets        SOPS env resolver + AES-256-GCM field-level
                              └─ pkgs/store          GORM models + migration runner + Transition (Raw duy nhất)
                                     ▼
@@ -109,7 +109,7 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 
 ## 7. Gap / việc còn lại
 
-1. **K8s runner thật** — `runner.Runner` interface sẵn, `newRunner()` vẫn luôn trả Local; cần client tạo `k6.io/v1alpha1 TestRun` (sample: `docs/k6-operator-go-client.md`) + integration test với kind cluster
+1. **K8s runner thật** — `runner.Runner` interface sẵn, `newRunner()` chọn `K8sTestRunRunner` khi `RUNNER_MODE=k8s` (tạo `k6.io/v1alpha1 TestRun` qua Go client, script qua ConfigMap). Integration test qua `tests/e2e-full-deploy.sh` (kind + k6-operator) ✅ trong plan 27.
 2. **k6 perf gate chưa chạy** — cần cài k6 và chạy `tests/perf/*` ít nhất 1 lần, ghi số liệu vào README
 3. **mock-service** — phase sau (biên riêng, không dùng pkgs/controller); endpoint mock-status/mock-pools còn stub
 4. **Outbox worker** — bảng + ghi outbox đã có, chưa có dispatcher loop

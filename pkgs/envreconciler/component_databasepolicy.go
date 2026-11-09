@@ -7,10 +7,13 @@ import (
 )
 
 // DatabasePolicyComponent render the per-database NetworkPolicy (ingress
-// side): allow traffic into the database pod from same-namespace pods on the
-// engine port (postgres 5432, ECK 9200). Egress from a service to the DB is
-// governed by default-deny's declared-dependency allow-list, so only services
-// that declared a database_binding can reach it.
+// side): allow traffic into the database pod from the same-namespace pods of
+// **bound services only** on the engine port (postgres 5432, ECK 9200). Egress
+// from a service to the DB is governed by that service's per-service egress
+// policy (component_service_egress_policy.go).
+//
+// A service is bound when it declared database_bindings referencing this DB.
+// Without a binding, the service cannot reach the DB (L4 deny).
 //
 // Intra-cluster replication and operator→cluster traffic are operator-managed
 // and intentionally out of scope here.
@@ -18,6 +21,11 @@ type DatabasePolicyComponent struct {
 	envNS string
 	env   *Env
 	db    DatabaseSpec
+}
+
+// NewDatabasePolicyComponent builds a DatabasePolicyComponent.
+func NewDatabasePolicyComponent(envNS string, env *Env, db DatabaseSpec) DatabasePolicyComponent {
+	return DatabasePolicyComponent{envNS: envNS, env: env, db: db}
 }
 
 // Kind returns the Kubernetes kind of the component object.
@@ -46,8 +54,21 @@ func dbPort(db DatabaseSpec) int32 {
 }
 
 // Render renders a NetworkPolicy that allows ingress to the database pod from
-// same-namespace pods on the engine port.
+// bound services' pods only, on the engine port. If no services are bound,
+// the ingress rule list is empty (deny-all).
 func (d DatabasePolicyComponent) Render(_ *Env) []*unstructured.Unstructured {
+	ingressRules := []any{}
+	for _, bound := range d.db.BoundServices {
+		ingressRules = append(ingressRules, map[string]any{
+			"from": []any{map[string]any{
+				"podSelector": map[string]any{
+					"matchLabels": map[string]string{k8s.LabelComponentID: bound},
+				},
+			}},
+			"ports": []map[string]any{{"protocol": "TCP", "port": int64(dbPort(d.db))}},
+		})
+	}
+
 	u := toUnstructured(map[string]any{
 		"apiVersion": "networking.k8s.io/v1",
 		"kind":       "NetworkPolicy",
@@ -61,12 +82,7 @@ func (d DatabasePolicyComponent) Render(_ *Env) []*unstructured.Unstructured {
 				"matchLabels": map[string]string{k8s.LabelComponentID: d.db.Name},
 			},
 			"policyTypes": []string{"Ingress"},
-			"ingress": []any{
-				map[string]any{
-					"from":  []any{map[string]any{"podSelector": map[string]any{}}},
-					"ports": []map[string]any{{"protocol": "TCP", "port": int64(dbPort(d.db))}},
-				},
-			},
+			"ingress":     ingressRules,
 		},
 	}, "networking.k8s.io", "v1", "NetworkPolicy")
 	annotate(u, d.db.SpecHash)

@@ -67,6 +67,11 @@ type ServiceSpec struct {
 	// Mock is the raw tbl_services.mock JSONB; mockcontrol (controller-side
 	// mock wiring) decodes it — envreconciler stays mock-runtime agnostic.
 	Mock json.RawMessage `json:"mock,omitempty"`
+	// Dependencies: this service's declared egress targets (services + databases),
+	// resolved from tbl_services.dependencies + tbl_services.database_bindings.
+	// One egress rule per dependency: RefID = target pod label
+	// (loadtest.io/component-id=<target name>), Ports = target listen port.
+	Dependencies []EgressRule `json:"dependencies"`
 }
 
 // HealthProbe renders into container liveness/readiness probes.
@@ -87,6 +92,10 @@ type DatabaseSpec struct {
 	// ExtraConfig carries operator-specific fields (CNPG: imageName/storage;
 	// ECK: version/nodeCount/storage).
 	ExtraConfig map[string]any `json:"-"`
+	// BoundServices: service names that declared a database_binding to this DB.
+	// Their pods are the only ones allowed ingress to the DB pod (L4, engine
+	// port) via component_databasepolicy.go.
+	BoundServices []string `json:"bound_services"`
 }
 
 // IngressSpec mirrors tbl_ingress.
@@ -192,19 +201,18 @@ func defaultDenyNP(envNS string, env *Env) map[string]any {
 	}
 }
 
-// defaultDenySpec: deny in/out by default, then open only the baseline
-// allowances (docs/network-policy.md §1):
+// defaultDenySpec: deny in/out by default, then open only the platform
+// baseline allowances (docs/network-policy.md §1):
 //
-//   egress: DNS (kube-system:53), kube-apiserver (node CIDR :443/:6443),
-//           declared dependencies (renderEgress).
+//   egress: DNS (kube-system:53), kube-apiserver (node CIDR :443/:6443).
+//           Declared service→dependency traffic is NOT here — each service
+//           gets its own per-service egress policy
+//           (component_service_egress_policy.go) so "service A → DB allowed,
+//           other-service → DB denied" is enforceable at L4.
 //   ingress: ingress-nginx → env workloads, cnpg-system → database clusters.
 //             Everything else is denied — including intra-namespace traffic
-//             that isn't covered by a declared dependency.
-//
-// NOTE: ingress-nginx / cnpg-system namespace labels are the standard
-// `kubernetes.io/metadata.name`. If your cluster provisions them under other
-// names, adjust these selectors here.
-func defaultDenySpec(env *Env) map[string]any {
+//             not covered by a declared dependency or a run-scoped policy.
+func defaultDenySpec(_ *Env) map[string]any {
 	egress := []map[string]any{
 		{
 			// DNS: kube-dns/kube-system UDP+TCP 53
@@ -230,14 +238,10 @@ func defaultDenySpec(env *Env) map[string]any {
 			},
 		},
 	}
-	egress = append(egress, renderEgress(env)...)
 	return map[string]any{
 		"podSelector": map[string]any{},
 		"policyTypes": []string{"Ingress", "Egress"},
 		// Deny-all ingress baseline; only platform allowances below are open.
-		// Declared service→service / service→DB traffic arrives via the
-		// per-service ingress policies (component_servicepolicy.go /
-		// component_databasepolicy.go), not via default-deny.
 		"ingress": []any{
 			map[string]any{"from": []any{map[string]any{"namespaceSelector": map[string]any{
 				"matchLabels": map[string]string{"kubernetes.io/metadata.name": "ingress-nginx"},
@@ -250,48 +254,11 @@ func defaultDenySpec(env *Env) map[string]any {
 	}
 }
 
-// renderEgress builds the egress allow-list; DNS resolution is always allowed
-// so ExternalName-style mock wiring resolves.
-//
-// - type == "mock": the mock-service data plane lives OUTSIDE the env
-//   namespace, so allow by namespaceSelector (label kubernetes.io/metadata.name
-//   = mock-service) instead of podSelector.
-// - Ports (when set on the EgressRule) restrict the allow rule to those
-//   destination ports; empty = all ports (backward compatible).
-func renderEgress(env *Env) []map[string]any {
-	if env.Policy == nil {
-		return nil
-	}
-	var rules []map[string]any
-	for _, e := range env.Policy.Egress {
-		// Mock-service wiring: cross-namespace, select by namespace.
-		if e.Type == "mock" {
-			rules = append(rules, map[string]any{
-				"to": []map[string]any{{
-					"namespaceSelector": map[string]any{
-						"matchLabels": map[string]string{"kubernetes.io/metadata.name": "mock-service"},
-					},
-				}},
-			})
-			continue
-		}
-		to := []map[string]any{{
-			"podSelector": map[string]any{
-				"matchLabels": map[string]string{k8s.LabelComponentID: e.RefID},
-			},
-		}}
-		rule := map[string]any{"to": to}
-		if len(e.Ports) > 0 {
-			var ports []map[string]any
-			for _, p := range e.Ports {
-				ports = append(ports, map[string]any{"protocol": "TCP", "port": int64(p)})
-			}
-			rule["ports"] = ports
-		}
-		rules = append(rules, rule)
-	}
-	return rules
-}
+// renderEgress was removed: declared-dependency egress is now rendered
+// per-service (component_service_egress_policy.go) rather than namespace-wide
+// in default-deny, so "service A → DB allowed, other-service → DB denied" is
+// enforceable at L4. Mock-service cross-namespace egress for runs is handled
+// by the run-scoped policy (component_runnerpolicy.go).
 
 func cnpgCluster(envNS string, env *Env, db DatabaseSpec) map[string]any {
 	spec := map[string]any{

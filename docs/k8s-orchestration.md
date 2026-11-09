@@ -100,7 +100,7 @@ Xem §8. Điểm chính: mock **không có public ingress**; SUT gọi mock qua 
 ### 3.5 NetworkPolicy
 - Render từ dependency graph đã resolve ở API layer (`GET .../network-policies`): mỗi service được phép egress tới `dependencies[]` và `database_bindings[]`; mọi traffic khác bị deny.
 - Bộ: 1 `default-deny-all` cho namespace + 1 policy per service (labels theo §1) + platform allowances (kube-dns, mock-service, ingress-nginx backend).
-- **Runner policy:** cho load-test run, render thêm 2 policy per run (egress runner → target + ingress target ← runner) chọn bởi label `loadtest.io/run-id`; spec đầy đủ tại [`docs/network-policy.md`](network-policy.md) §3.
+- **Runner policy:** cho load-test run, render thêm 2 policy per run (egress runner → target + ingress target ← runner) chọn bởi label `loadtest.io/run-id`; spec đầy đủ tại [`docs/network-policy.md`](network-policy.md) §3. K8s runner (`RUNNER_MODE=k8s`) tạo `TestRun` (k6.io/v1alpha1) qua Go Kubernetes API (`docs/k6-operator-go-client.md`), không dùng `kubectl`.
 - **Chi tiết DB / k6-operator / nguyên hạn của NetworkPolicy:** [`docs/network-policy.md`](network-policy.md) §4–§6.
 - **Thứ tự:** NetworkPolicy apply trước workload (bước 2 trong §4) để không có cửa sổ traffic không bị chặn.
 

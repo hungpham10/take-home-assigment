@@ -88,3 +88,17 @@ Remote/registered scripts should be validated before dispatching load:
 - **Locked (MVP):** 1 platform Environment = 1 Kubernetes Namespace. Runner execution uses network-enforced egress (NetworkPolicy from resolved `targets[]`/approved deps/mocks + DNS). The run-scoped policy (egress + ingress per run, label `loadtest.io/run-id`) and the L3/L4 limit are specified in [`docs/network-policy.md`](network-policy.md). POC uses OIDC/nginx auth; nginx reflects permissions from OIDC/claims into trusted headers, Go middleware normalizes principal/enforces RBAC; `abt_` is service-account token for CLI/automation; `tenant_id` scopes org/multi-domain boundary.
 - Target strictness: targets must match what the script exercises (advisory/metadata) vs enforceable mapping (limited). `operation_id`/`path` cannot be enforced by NetworkPolicy (L3/L4 only); L7 enforcement is post-MVP.
 - Script forms allowed in MVP and storage (inline vs object storage/ref).
+
+## 8. Runner mode + result surface (MVP)
+
+`RUNNER_MODE` chọn backend thực thi (`local` mặc định dev; `k8s` trên cluster):
+
+- `local`: `pkgs/runner.Local` chạy `k6` binary trên host controller. Dùng cho dev/CI-local; **không** cần cluster. Mỗi run là một OS process; `Provision`/`Start`/`Stop`/`Status` ánh xạ trạng thái process sang model chung (`QUEUED`/`PROVISIONING`/`RUNNING`/`COMPLETED`/`FAILED`/`STOPPED`/`TIMED_OUT`).
+- `k8s`: `pkgs/runner.K8sTestRunRunner` tạo `TestRun` (k6.io/v1alpha1) qua Go Kubernetes API (không `kubectl`), script staged vào ConfigMap run-scoped (≤1 MiB), runner pod chạy trong `lt-env-<namespace_id>` và chịu `default-deny` + run-scoped NetworkPolicy (`docs/network-policy.md` §3).
+
+**Kết quả run (result surface, MVP):**
+- `GET /loadtests/{id}`: `status`, `runner_ref`, `started_at`, `finished_at`, `timeout_at`, `targets`, `unreliable`.
+- `GET /loadtests/{id}/events`: chuỗi transition (`from_status` → `to_status`) + `reason`, kèm `unreliable` flag (namespace `DEGRADED` sau khi run bắt đầu → `unreliable: true`, run vẫn tiếp tục).
+- **K6 metrics/summary** (pod log parse → `result_summary`, `thresholds_failed`, `result_collected_at`) là deferred sang benchmark plan (k6 OSS không có endpoint metrics mặc định; cần cài k6 + parse pod log).
+
+**Lưu ý:** `operation_id`/`method`/`path` trong `targets[]` chỉ validate/audit ở API layer — NetworkPolicy là L3/L4 (`service` + `port`) và không thể enforce L7.

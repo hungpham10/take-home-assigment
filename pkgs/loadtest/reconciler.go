@@ -7,6 +7,8 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
+	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
@@ -17,6 +19,10 @@ import (
 type Reconciler struct {
 	DB     *gorm.DB
 	Runner runner.Runner
+	// K8s is the cluster client for run-scoped NetworkPolicy + script
+	// ConfigMap cleanup when a run reaches a terminal status (nil in
+	// legacy/local mode).
+	K8s k8s.Client
 	Every  time.Duration
 	Now    func() time.Time
 }
@@ -93,6 +99,15 @@ func (rc Reconciler) finish(ctx context.Context, lt *store.LoadTest, to, actor, 
 	})
 	if err != nil {
 		slog.Warn("finish transition failed", "loadtest", lt.ID, "to", to, "err", err)
+		return
+	}
+	// Run reached a terminal status: delete run-scoped NetworkPolicies +
+	// script ConfigMap so they don't linger after the run (docs §3.3).
+	if rc.K8s != nil {
+		envNS := envreconciler.EnvNamespaceName(lt.NamespaceID)
+		if err := envreconciler.DeleteRunPolicies(ctx, rc.K8s, envNS, lt.ID); err != nil {
+			slog.Warn("delete run policies failed", "loadtest", lt.ID, "err", err)
+		}
 	}
 }
 
@@ -114,6 +129,14 @@ func (rc Reconciler) reapTimeouts(ctx context.Context) {
 			continue
 		}
 		_ = store.LTToTimeoutCleaned(ctx, rc.DB, lt.ID, actor, "cleaned after timeout")
+		// Run reached a terminal status: delete run-scoped NetworkPolicies +
+		// script ConfigMap (docs §3.3).
+		if rc.K8s != nil {
+			envNS := envreconciler.EnvNamespaceName(lt.NamespaceID)
+			if err := envreconciler.DeleteRunPolicies(ctx, rc.K8s, envNS, lt.ID); err != nil {
+				slog.Warn("delete run policies failed", "loadtest", lt.ID, "err", err)
+			}
+		}
 	}
 }
 
