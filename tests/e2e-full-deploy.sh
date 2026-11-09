@@ -298,7 +298,12 @@ for np in loadtest-run-egress-$LT_ID loadtest-run-api-$LT_ID; do
 done
 # ingress policy is per-target: loadtest-run-ingress-<id>-echo
 INGRESS_NP="loadtest-run-ingress-$LT_ID-echo"
-kubectl get networkpolicy -n "$ENVNS" "$INGRESS_NP" >/dev/null 2>&1 || fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
+INGRESS_OK=""
+for i in $(seq 1 20); do
+  if kubectl get networkpolicy -n "$ENVNS" "$INGRESS_NP" >/dev/null 2>&1; then INGRESS_OK=1; break; fi
+  sleep 1
+done
+[ -n "$INGRESS_OK" ] || fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
 # run-policy labels + egress port 80 + target selector = service name (echo)
 NP_LABELS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.metadata.labels}')
 echo "$NP_LABELS" | grep -q 'loadtest.io/component-kind=run-policy' || fail "egress NP missing component-kind=run-policy"
