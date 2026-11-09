@@ -137,3 +137,15 @@ func derefStr(s *string) string {
 	}
 	return *s
 }
+
+// LoadGeneration returns a loader that reads desired_generation for a
+// namespace from PG. Used by the reconciler's prune generation check
+// (§2.2.4 backstop).
+func LoadGeneration(db *gorm.DB) func(ctx context.Context, namespaceID string) (int64, error) {
+	return func(ctx context.Context, namespaceID string) (int64, error) {
+		var gen int64
+		err := db.WithContext(ctx).Model(&store.Namespace{}).
+			Where("id = ?", namespaceID).Pluck("desired_generation", &gen).Error
+		return gen, err
+	}
+}

@@ -18,6 +18,12 @@ import (
 type Options struct {
 	// Interval between level-triggered ticks (default 5s).
 	Interval time.Duration
+	// IsLeader gates writes when HA leader election is enabled. Nil = always
+	// leader (single-pod / non-HA mode, backward compatible).
+	IsLeader func() bool
+	// GenerationLoader reads desired_generation from PG for the prune
+	// generation check (§2.2.4 backstop). Nil = skip check.
+	GenerationLoader func(ctx context.Context, namespaceID string) (int64, error)
 }
 
 // Reconciler owns the desired → K8s direction. Given one Env it applies every
@@ -29,6 +35,10 @@ type Reconciler struct {
 	// RenderFunc renders the desired objects (default Render). mockcontrol
 	// overrides it to inject MOCK_* env into SUT deployments.
 	RenderFunc func(env *Env) []*unstructured.Unstructured
+	// IsLeader gates writes when HA leader election is enabled.
+	isLeader func() bool
+	// GenerationLoader reads desired_generation from PG for prune backstop.
+	genLoader func(ctx context.Context, namespaceID string) (int64, error)
 }
 
 // New wires a Reconciler over any k8s.Client (real or Fake).
@@ -36,7 +46,12 @@ func New(c k8s.Client, opts Options) *Reconciler {
 	if opts.Interval <= 0 {
 		opts.Interval = 5 * time.Second
 	}
-	return &Reconciler{client: c, interval: opts.Interval}
+	return &Reconciler{
+		client:   c,
+		interval: opts.Interval,
+		isLeader: opts.IsLeader,
+		genLoader: opts.GenerationLoader,
+	}
 }
 
 // Attach configures the render override hook (called by mockcontrol).
@@ -77,6 +92,18 @@ func (r *Reconciler) ApplyEnv(ctx context.Context, env *Env) error {
 // prune deletes managed objects in the env namespace whose kind+name are no
 // longer part of the desired set (docs/k8s-orchestration.md §4.1 prune).
 func (r *Reconciler) prune(ctx context.Context, env *Env, desired []*unstructured.Unstructured) error {
+	// Generation check before prune (§2.2.4 backstop): re-read desired_generation
+	// from PG; if it changed since we snapshotted env, skip prune to avoid
+	// prune thrash under overlapping writers.
+	if r.genLoader != nil {
+		cur, err := r.genLoader(ctx, env.NamespaceID)
+		if err != nil {
+			return fmt.Errorf("envreconciler: load generation before prune: %w", err)
+		}
+		if cur != env.Generation {
+			return nil
+		}
+	}
 	envNS := envNamespaceName(env.NamespaceID)
 	want := map[string]bool{}
 	for _, o := range desired {
@@ -148,6 +175,10 @@ func (r *Reconciler) Tick(ctx context.Context, load EnvLoader) error {
 			if err := r.DeleteEnv(ctx, env.NamespaceID); err != nil {
 				return err
 			}
+			continue
+		}
+		if r.isLeader != nil && !r.isLeader() {
+			// Standby: không áp, không prune, để leader xử lý.
 			continue
 		}
 		if err := r.ApplyEnv(ctx, env); err != nil {

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
@@ -437,4 +438,24 @@ func NewClientFromEnv(apiURL string) (Client, error) {
 		return newDynamicForConfig(cfg)
 	}
 	return NewDynamicClient(apiURL, FieldManager)
+}
+
+// NewClientsetFromEnv builds a kubernetes.Interface from the same env
+// resolution as NewClientFromEnv, used for K8s Lease leader election
+// (docs/k8s-orchestration.md §10).
+func NewClientsetFromEnv(apiURL string) (kubernetes.Interface, error) {
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			&clientcmd.ClientConfigLoadingRules{ExplicitPath: kc},
+			&clientcmd.ConfigOverrides{},
+		).ClientConfig()
+		if err == nil {
+			return kubernetes.NewForConfig(cfg)
+		}
+	}
+	if cfg, err := rest.InClusterConfig(); err == nil {
+		return kubernetes.NewForConfig(cfg)
+	}
+	cfg := &rest.Config{Host: apiURL}
+	return kubernetes.NewForConfig(cfg)
 }

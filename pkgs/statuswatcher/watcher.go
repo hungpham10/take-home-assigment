@@ -56,6 +56,10 @@ type Config struct {
 	ApplyDeadline time.Duration
 	// StalenessThreshold: heartbeat older than this → fail-closed (WATCH-05).
 	StalenessThreshold time.Duration
+	// IsLeader gates PG writes when HA leader election is enabled. Nil =
+	// always leader (single-pod / non-HA mode). All pods still watch K8s
+	// (warm cache), only the leader persists to PG.
+	IsLeader func() bool
 }
 
 // DefaultConfig mirrors the locked timing defaults (grace=60s, stable=60s,
@@ -706,6 +710,10 @@ func (w *Watcher) worker(ctx context.Context, q *Queue) {
 		key, ok := q.Pop(ctx)
 		if !ok || ctx.Err() != nil {
 			return
+		}
+		if w.cfg.IsLeader != nil && !w.cfg.IsLeader() {
+			// Standby: watch only (warm cache), do not write PG.
+			continue
 		}
 		if err := w.ReconcileStatus(ctx, key); err != nil {
 			slog.Warn("statuswatcher: reconcile", "namespace", key, "err", err)

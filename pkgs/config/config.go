@@ -36,6 +36,13 @@ type Config struct {
 	WatcherStableSeconds      int
 	WatcherApplyDeadlineMin   int
 	WatcherStalenessThreshold int
+
+	// HA enables K8s leader election for the control loops (docs/k8s-orchestration.md §10).
+	// Only effective when K8SEnabled=true. Default false (single-pod).
+	HAEnabled      bool
+	HAIdentity     string // unique per pod (default hostname / pod name)
+	HALeaseName    string // name of coordination Lease resource
+	HALeaseNamespace string // namespace holding the Lease
 }
 
 // FromEnv builds Config from environment variables with sane dev defaults.
@@ -48,6 +55,10 @@ func FromEnv() (Config, error) {
 		ScriptsDir:  envOr("SCRIPTS_DIR", "/tmp/ltp-scripts"),
 		K8SEnabled:  envOr("K8S_ENABLED", "false") == "true",
 		K8SAPIURL:   envOr("K8S_API_URL", "https://kubernetes.default.svc"),
+		HAEnabled:   envOr("HA_ENABLED", "false") == "true",
+		HAIdentity:  envOr("HA_IDENTITY", ""),
+		HALeaseName:     envOr("HA_LEASE_NAME", "loadtest-controller-leader"),
+		HALeaseNamespace: envOr("HA_LEASE_NAMESPACE", ""),
 	}
 	var err error
 	if c.WatcherResyncSeconds, err = envInt("WATCHER_RESYNC_PERIOD", 300); err != nil {
