@@ -251,6 +251,7 @@ func (d Deps) collectTargets(ctx context.Context, nsID string) ([]map[string]any
 			if t == nil {
 				continue
 			}
+			t["service_name"] = svc.Name
 			t["service_id"] = derefStr(svc.ServiceID)
 			t["port"] = port
 			targets = append(targets, t)

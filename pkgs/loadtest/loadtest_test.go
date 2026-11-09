@@ -180,6 +180,35 @@ func TestINT_LT_01_LoadTestGatesAndLifecycle(t *testing.T) {
 	}
 }
 
+// TestINT_LT_03_LoadTestTargetsCarryServiceName — regression: run-scoped
+// NetworkPolicy selects target pods by loadtest.io/component-id=<service name>,
+// so collectTargets must stamp service_name onto every target (service_id is
+// the server-generated "svc-<rand>" id and is NOT a pod label).
+func TestINT_LT_03_LoadTestTargetsCarryServiceName(t *testing.T) {
+	h, db, _ := testServer(t)
+	headers, nsID := readyFixture(t, db) // service Name = "svc"
+
+	rec := doLT(t, h, testutil.WithKey(headers, "k-svcname"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt-svcname", "script_id": headers["X-Script-Id"]})
+	if rec.Code != 201 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var lt store.LoadTest
+	if err := json.Unmarshal(rec.Body.Bytes(), &lt); err != nil {
+		t.Fatalf("decode loadtest: %v", err)
+	}
+	var targets []map[string]any
+	if err := json.Unmarshal(lt.Targets, &targets); err != nil || len(targets) == 0 {
+		t.Fatalf("targets = %s", lt.Targets)
+	}
+	for _, tgt := range targets {
+		name, ok := tgt["service_name"].(string)
+		if !ok || name != "svc" {
+			t.Fatalf("target %v missing service_name=svc (got %v)", tgt, name)
+		}
+	}
+}
+
 // testServerK8S — server composition with the cluster wired (plans/21 gates).
 func testServerK8S(t *testing.T, staleAfter time.Duration) (http.Handler, *gorm.DB) {
 	t.Helper()

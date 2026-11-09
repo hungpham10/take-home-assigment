@@ -1,6 +1,7 @@
 package envreconciler_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
@@ -185,6 +186,22 @@ func TestRunIngressPerTargetAnd6565(t *testing.T) {
 	}
 	if !apiFound {
 		t.Fatal("run api (6565) ingress policy not rendered")
+	}
+}
+
+// TestRunNetworkPoliciesFailsWithoutServiceName — fail-closed: a target with
+// only service_id (no service_name) must not render a policy selecting by the
+// non-pod-label id (which would match no pods and silently break enforcement).
+func TestRunNetworkPoliciesFailsWithoutServiceName(t *testing.T) {
+	targets := []map[string]any{
+		{"service_id": "svc-123", "port": int32(80)},
+	}
+	_, err := envreconciler.RunNetworkPolicies("lt-env-ns", &envreconciler.Env{}, "run-1", targets)
+	if err == nil {
+		t.Fatal("expected error for target without service_name")
+	}
+	if !strings.Contains(err.Error(), "service_name") {
+		t.Fatalf("error should mention service_name, got: %v", err)
 	}
 }
 

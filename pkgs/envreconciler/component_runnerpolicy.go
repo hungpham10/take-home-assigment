@@ -36,7 +36,9 @@ func RunNetworkPolicies(envNS string, env *Env, runID string, targets []map[stri
 	// Collect unique (service_name, port) pairs from targets. service_name is
 	// the pod label (loadtest.io/component-id=<service name>) rendered onto
 	// service pods; service_id is the server-generated "svc-<rand>" id and is
-	// NOT a pod label. Fall back to service_id when name is absent.
+	// NOT a pod label. A target without service_name is a contract violation —
+	// fail-closed: return an error rather than rendering a policy that selects
+	// by a non-pod-label id (which would match no pods).
 	type targetKey struct {
 		service string
 		port    int32
@@ -46,10 +48,7 @@ func RunNetworkPolicies(envNS string, env *Env, runID string, targets []map[stri
 	for _, t := range targets {
 		name, _ := t["service_name"].(string)
 		if name == "" {
-			name, _ = t["service_id"].(string)
-		}
-		if name == "" {
-			continue
+			return nil, fmt.Errorf("run policy: target missing service_name (selecting by service_id would match no pods)")
 		}
 		port := toPortInt32(t["port"])
 		key := targetKey{service: name, port: port}
@@ -119,10 +118,7 @@ func RunNetworkPolicies(envNS string, env *Env, runID string, targets []map[stri
 	for _, t := range targets {
 		name, _ := t["service_name"].(string)
 		if name == "" {
-			name, _ = t["service_id"].(string)
-		}
-		if name == "" {
-			continue
+			return nil, fmt.Errorf("run policy: target missing service_name (selecting by service_id would match no pods)")
 		}
 		port := toPortInt32(t["port"])
 		key := targetKey{service: name, port: port}

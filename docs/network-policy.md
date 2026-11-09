@@ -58,6 +58,8 @@ For each load-test run (`testrun-<id>` in namespace `lt-env-<namespace_id>`):
    - ingress allow: from runner pods (`loadtest.io/run-id=<run-id>`) on `targets[].ports`.
    - One ingress rule per target (service + port); required because the namespace `default-deny-all` denies ingress by default; without it the runner cannot reach the SUT even when egress is allowed.
 
+    **Contract (`targets[]`):** every target must carry `service_name` (service **name** → pod label `loadtest.io/component-id`). `service_id` is server-generated (`svc-<rand>`), is NOT a pod label, and is never accepted as a fallback — a target missing `service_name` makes `RunNetworkPolicies` fail-closed (error) so no policy can silently select by a non-pod-label id.
+
 ### 3.3 Labeling and lifecycle (prune safety)
 
 Run policies use a label set **distinct** from the Env Reconciler / Watcher managed set so they are never pruned as "drift" and never counted in the Watcher's "full expected NetworkPolicy set":
