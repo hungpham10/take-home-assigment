@@ -189,6 +189,57 @@ func TestRunIngressPerTargetAnd6565(t *testing.T) {
 	}
 }
 
+// TestRunAPI6565AllowsK6OperatorNamespace — k6-operator StartJobs probes
+// http://<runner-svc>:6565/v1/status from its controller pod in
+// k6-operator-system. default-deny blocks cross-namespace ingress, so the api
+// NetworkPolicy must allow ingress from that namespace on 6565 (in addition to
+// from runner pods in the same run).
+func TestRunAPI6565AllowsK6OperatorNamespace(t *testing.T) {
+	targets := []map[string]any{
+		{"service_id": "svc-echo", "service_name": "echo", "port": int32(80)},
+	}
+	objs, _ := envreconciler.RunNetworkPolicies("lt-env-ns", &envreconciler.Env{}, "run-1", targets)
+	var api *unstructured.Unstructured
+	for _, o := range objs {
+		if o.GetName() == "loadtest-run-api-run-1" {
+			api = o
+		}
+	}
+	if api == nil {
+		t.Fatal("run api (6565) ingress policy not rendered")
+	}
+	rules := npIngressRules(api)
+	if len(rules) != 2 {
+		t.Fatalf("api ingress should have 2 rules (runner + k6-operator ns), got %d: %v", len(rules), rules)
+	}
+	// Rule 2: namespaceSelector kubernetes.io/metadata.name=k6-operator-system.
+	foundNS := false
+	for _, r := range rules {
+		rm := r.(map[string]any)
+		from, _, _ := unstructured.NestedSlice(rm, "from")
+		for _, f := range from {
+			fm := f.(map[string]any)
+			nsSel, found, _ := unstructured.NestedMap(fm, "namespaceSelector", "matchLabels")
+			if found && nsSel["kubernetes.io/metadata.name"] == "k6-operator-system" {
+				foundNS = true
+				ports, _, _ := unstructured.NestedSlice(rm, "ports")
+				if len(ports) != 1 {
+					t.Fatalf("k6-operator ns rule should have 1 port, got %d", len(ports))
+				}
+				pm := ports[0].(map[string]any)
+				proto, _, _ := unstructured.NestedString(pm, "protocol")
+				pv, ok, _ := unstructured.NestedFloat64(pm, "port")
+				if proto != "TCP" || !ok || int32(pv) != 6565 {
+					t.Fatalf("k6-operator ns rule port = proto=%s port=%v ok=%v, want TCP/6565", proto, pv, ok)
+				}
+			}
+		}
+	}
+	if !foundNS {
+		t.Fatalf("api ingress missing namespaceSelector rule for k6-operator-system: %v", rules)
+	}
+}
+
 // TestRunNetworkPoliciesFailsWithoutServiceName — fail-closed: a target with
 // only service_id (no service_name) must not render a policy selecting by the
 // non-pod-label id (which would match no pods and silently break enforcement).

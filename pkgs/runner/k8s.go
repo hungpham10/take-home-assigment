@@ -238,10 +238,9 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 	case "error":
 		return Status{State: "FAILED", Msg: "testrun stage error"}, nil
 	}
-	// stage is "created"/"initialization"/"initialized"/"" — fall back to
-	// runner-pod readiness.
+	// runner-pod readiness (only pods labeled runner=true count).
 	pods, err := r.Client.List(context.Background(), podGVK, r.nsFor(ref),
-		labels.Set{"loadtest.io/run-id": ref})
+		labels.Set{"loadtest.io/run-id": ref, "runner": "true"})
 	if err != nil {
 		return Status{}, err
 	}

@@ -70,6 +70,19 @@ Sau READY + NP assertions (đã có), thêm:
 | 4 | bound-service → demo-db | ✅ cho phép (database_bindings) |
 | 5 | undeclared egress (internet/metadata) | ❌ từ chối (default-deny) |
 
+### Root cause found & fix (E2E step 11 stall — loadtest kẹt RUNNING, không đến COMPLETED)
+
+**Root cause:** k6-operator `StartJobs` (`sources/k6-operator/internal/controller/k6_start.go:77-84`) probes `http://<runner-service-ClusterIP>:6565/v1/status` **from its controller pod in `k6-operator-system`** to decide the service is ready before advancing `TestRun.status.stage` `created` → `started`. The `loadtest-run-api-<run>` NetworkPolicy only allowed ingress from runner pods in the same env namespace (`loadtest.io/run-id=<run-id>`). Calico drops the cross-namespace probe → stage stays `created` forever → starter job never created → k6 runs `--paused` indefinitely → RUNNING never reaches COMPLETED.
+
+Phản ánh thêm: fallback pod-readiness trong `Status()` ban đầu match mọi pod có `loadtest.io/run-id` — bao gồm initializer pod (`Completed`) — nên chuyển PROVISIONING→RUNNING quá sớm (started_at gán khi initializer còn chạy), rồi kẹt RUNNING vì runner chưa bao giờ start.
+
+**Fix (áp dụng trong PR #32):**
+- `pkgs/envreconciler/component_runnerpolicy.go`: `loadtest-run-api-<run>` thêm ingress rule thứ 2 — `namespaceSelector kubernetes.io/metadata.name=k6-operator-system → TCP 6565` (namespace có thể override qua `K6_OPERATOR_NAMESPACE`). Giữ rule từ runner pods trong cùng run (starter job).
+- `pkgs/runner/k8s.go`: pod fallback selector giờ yêu cầu `runner=true` (chỉ tính pod runner đang Running, không tính initializer Completed).
+- TDD: `TestRunAPI6565AllowsK6OperatorNamespace` (api NP có 2 rule: runner + k6-operator ns), `TestK8sTestRunRunnerStatusFallsBackToRunnerPod` (runner pod Running → RUNNING), `TestK8sTestRunRunnerStatusIgnoresInitializerOnlyPod` (initializer-only → PROVISIONING).
+- `tests/e2e-full-deploy.sh`: khi step 11 fail, dump `kubectl get testrun -o json`, `kubectl get jobs -o wide`, `kubectl -n k6-operator-system logs` để chẩn đoán nhanh lần sau.
+- `docs/network-policy.md`: §3.2 #3 (api policy với 2 rule ingress), §5 (cross-namespace 6565 allowance).
+
 ## Risks
 - k6-operator image pull trong kind: `kind load docker-image` + rollout gate; fail loudly, không silent skip.
 - Pod-log metrics (k6 summary) **không** trong plan này → E2E chỉ assert lifecycle (status/events), không assert metrics.

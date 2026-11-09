@@ -180,7 +180,8 @@ func TestK8sTestRunRunnerStatusFallsBackToRunnerPod(t *testing.T) {
 		t.Fatalf("plant TestRun: %v", err)
 	}
 
-	// Plant a runner pod labeled loadtest.io/run-id=ref, phase Running.
+	// Plant a runner pod labeled loadtest.io/run-id=ref AND runner=true,
+	// phase Running.
 	pod := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -190,6 +191,7 @@ func TestK8sTestRunRunnerStatusFallsBackToRunnerPod(t *testing.T) {
 				"namespace": testNS,
 				"labels": map[string]any{
 					"loadtest.io/run-id": ref,
+					"runner":             "true",
 				},
 			},
 			"status": map[string]any{
@@ -207,6 +209,60 @@ func TestK8sTestRunRunnerStatusFallsBackToRunnerPod(t *testing.T) {
 	}
 	if st.State != "RUNNING" {
 		t.Fatalf("stage=created + runner pod Running → state %q, want RUNNING", st.State)
+	}
+}
+
+// TestK8sTestRunRunnerStatusIgnoresInitializerOnlyPod — an initializer pod
+// (Completed, no runner=true label) must not be treated as a running runner.
+// With stage "created" and only an initializer pod present, Status returns
+// PROVISIONING, not RUNNING.
+func TestK8sTestRunRunnerStatusIgnoresInitializerOnlyPod(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-z", Namespace: testNS})
+
+	// Plant a TestRun stuck at stage "created".
+	tr := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "k6.io/v1alpha1",
+			"kind":       "TestRun",
+			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"status": map[string]any{
+				"stage": "created",
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatalf("plant TestRun: %v", err)
+	}
+
+	// Plant an initializer pod: Completed, labeled run-id but NOT runner=true.
+	pod := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name":      ref + "-initializer",
+				"namespace": testNS,
+				"labels": map[string]any{
+					"loadtest.io/run-id": ref,
+				},
+			},
+			"status": map[string]any{
+				"phase": "Completed",
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, pod); err != nil {
+		t.Fatalf("plant Pod: %v", err)
+	}
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != "PROVISIONING" {
+		t.Fatalf("stage=created + only initializer pod → state %q, want PROVISIONING", st.State)
 	}
 }
 

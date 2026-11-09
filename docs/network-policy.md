@@ -25,7 +25,7 @@ NetworkPolicy is a **Kubernetes L3/L4** construct: it matches on pod/namespace s
 | `services[].dependencies[]` (`tbl_dependencies`) | `service_id`, `ports`, `required` | one egress policy **per service** (its own dependencies only) | **egress** (SUT → dependency) | dependency pod selector + ports |
 | `database_bindings[]` | `database_id`, `binding` | service → DB egress + DB ingress | **egress** (service → DB pod) / **ingress** (DB pod ← **bound services only**) | DB pod selector + engine port |
 | Platform allowances | DNS (kube-system:53), mock-service, ingress-nginx → SUT | per-namespace baseline | egress / ingress | `kube-system` label, mock-service label, ingress-nginx CIDR |
-| **Run-scoped** (`targets[]`, §3) | `service_id`, `ports`, `via` | one egress + one ingress per run | **egress** (runner → target) / **ingress** (target ← runner) | runner label `run-id` / target pod selector + port |
+| **Run-scoped** (`targets[]`, §3) | `service_id`, `ports`, `via` | one egress + one ingress + one api per run | **egress** (runner → target) / **ingress** (target ← runner) / **api** (k6-operator → runner 6565) | runner label `run-id` / target pod selector + port / k6-operator ns label |
 
 **Ordering:** NetworkPolicy is applied **before** workloads (`docs/k8s-orchestration.md` §4.1, step 2) so there is no window of unenforced traffic.
 
@@ -44,7 +44,7 @@ This is the gap the previous review identified: `loadtest-manager-api.md` §4 st
 
 The platform **injects** the resolved base URL into the runner script via env, e.g. `TARGET_<SERVICE_ID>_URL=http://svc-order.lt-env-<id>.svc.cluster.local:8080`. The script must not receive arbitrary remote URLs; only platform-resolved `service_id` targets.
 
-### 3.2 Two policies per run
+### 3.2 Three policies per run
 
 For each load-test run (`testrun-<id>` in namespace `lt-env-<namespace_id>`):
 
@@ -57,6 +57,13 @@ For each load-test run (`testrun-<id>` in namespace `lt-env-<namespace_id>`):
    - podSelector: target service pods (label `loadtest.io/component-id=<service_name>`, rendered from service **name**, not `service_id`).
    - ingress allow: from runner pods (`loadtest.io/run-id=<run-id>`) on `targets[].ports`.
    - One ingress rule per target (service + port); required because the namespace `default-deny-all` denies ingress by default; without it the runner cannot reach the SUT even when egress is allowed.
+
+3. **Runner API ingress (6565)** — `loadtest-run-api-<run-id>`:
+   - podSelector: runner pods (`loadtest.io/run-id=<run-id>`, `runner=true`) — only runner pods expose the k6 API on `:6565`.
+   - ingress allow:
+     - From runner pods in the same run (`loadtest.io/run-id=<run-id>`): the k6-operator starter job needs this to mark the TestRun `started`.
+     - From the k6-operator controller namespace (`kubernetes.io/metadata.name=k6-operator-system`, override via `K6_OPERATOR_NAMESPACE`): k6-operator `StartJobs` probes `http://<runner-service-ClusterIP>:6565/v1/status` from its controller pod to decide the service is ready before advancing `TestRun.status.stage` to `started` (`sources/k6-operator/internal/controller/service_ready.go:14`, `k6_start.go:77-84`). Without this cross-namespace allowance, Calico drops the probe, stage stays `created`, and the run never leaves PROVISIONING.
+   - Port-scoped: TCP 6565 only.
 
     **Contract (`targets[]`):** every target must carry `service_name` (service **name** → pod label `loadtest.io/component-id`). `service_id` is server-generated (`svc-<rand>`), is NOT a pod label, and is never accepted as a fallback — a target missing `service_name` makes `RunNetworkPolicies` fail-closed (error) so no policy can silently select by a non-pod-label id.
 
@@ -92,6 +99,8 @@ Lifecycle:
 Initializer and starter pods (spawned by the operator around the runner) need to reach the runner API on port **6565** (confirmed in `sources/k6-operator/internal/controller/service_ready.go:14`). Render a small allowance:
 
 - initializer/starter pod selector → runner pod selector (`app=k6`, `k6_cr=<testrun>`), TCP 6565.
+
+In addition, the `loadtest-run-api-<run-id>` policy (**§3.2 #3**) allows ingress from the k6-operator controller namespace (`kubernetes.io/metadata.name=k6-operator-system`) to TCP 6565. k6-operator `StartJobs` probes `http://<runner-service-ClusterIP>:6565/v1/status` from its controller pod to decide the service is ready before advancing `TestRun.status.stage` to `started` (`sources/k6-operator/internal/controller/k6_start.go:77-84`). Without this cross-namespace allowance, Calico drops the probe, stage stays `created`, starter job is never created, and the run stalls at PROVISIONING→RUNNING.
 
 These pods are operator-managed, not platform-owned; the policy above is rendered by the controller in the same env namespace so CNI can enforce it.
 
