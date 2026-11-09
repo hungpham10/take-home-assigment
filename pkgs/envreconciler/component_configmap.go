@@ -11,14 +11,24 @@ type ConfigMapComponent struct {
 	svc   ServiceSpec
 }
 
+// Kind returns the Kubernetes kind of the component object.
 func (c ConfigMapComponent) Kind() string { return "ConfigMap" }
+
+// Name returns the object name.
 func (c ConfigMapComponent) Name() string { return c.svc.Name + "-config" }
+
+// Labels returns the ownership labels stamped on the object.
 func (c ConfigMapComponent) Labels() map[string]string {
 	return withComponent(baseLabels(c.env), c.svc.Name)
 }
+
+// SpecHash returns the spec hash annotation value.
 func (c ConfigMapComponent) SpecHash() string { return c.svc.SpecHash }
+
+// Children returns nil — ConfigMapComponent is a leaf.
 func (c ConfigMapComponent) Children() []Component { return nil }
 
+// Render renders the ConfigMap manifest.
 func (c ConfigMapComponent) Render(env *Env) []*unstructured.Unstructured {
 	if len(c.svc.ConfigMap) == 0 {
 		return nil

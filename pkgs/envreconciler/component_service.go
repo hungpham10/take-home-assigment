@@ -14,23 +14,33 @@ type ServiceComponent struct {
 	svc   ServiceSpec
 }
 
+// Kind returns the Kubernetes kind of the component object.
 func (s ServiceComponent) Kind() string { return "ServiceGroup" }
+
+// Name returns the object name.
 func (s ServiceComponent) Name() string { return s.svc.Name }
+
+// Labels returns the ownership labels stamped on the object.
 func (s ServiceComponent) Labels() map[string]string {
 	return withComponent(baseLabels(s.env), s.svc.Name)
 }
+
+// SpecHash returns the spec hash annotation value.
 func (s ServiceComponent) SpecHash() string { return s.svc.SpecHash }
+
+// Children returns the service's sub-component children.
 func (s ServiceComponent) Children() []Component {
 	return []Component{
-		ConfigMapComponent{envNS: s.envNS, env: s.env, svc: s.svc},
-		SecretComponent{envNS: s.envNS, env: s.env, svc: s.svc},
-		ServiceAccountComponent{envNS: s.envNS, env: s.env, svc: s.svc},
-		DeploymentComponent{envNS: s.envNS, env: s.env, svc: s.svc},
-		K8sServiceComponent{envNS: s.envNS, env: s.env, svc: s.svc},
-		HPAComponent{envNS: s.envNS, env: s.env, svc: s.svc},
+		ConfigMapComponent(s),
+		SecretComponent(s),
+		ServiceAccountComponent(s),
+		DeploymentComponent(s),
+		K8sServiceComponent(s),
+		HPAComponent(s),
 	}
 }
 
+// Render returns nil — ServiceComponent has no self object, only children.
 func (s ServiceComponent) Render(env *Env) []*unstructured.Unstructured {
 	// ServiceComponent không có object "self"; tất cả objects nằm ở các con.
 	return nil
