@@ -123,8 +123,8 @@ type PolicySpec struct {
 // Ports, when non-empty, restricts the allow rule to those destination ports
 // (NetworkPolicy is L3/L4 only — see docs/network-policy.md).
 type EgressRule struct {
-	Type  string `json:"type"`
-	RefID string `json:"ref_id"`
+	Type  string  `json:"type"`
+	RefID string  `json:"ref_id"`
 	Ports []int32 `json:"ports,omitempty"`
 }
 
@@ -204,14 +204,14 @@ func defaultDenyNP(envNS string, env *Env) map[string]any {
 // defaultDenySpec: deny in/out by default, then open only the platform
 // baseline allowances (docs/network-policy.md §1):
 //
-//   egress: DNS (kube-system:53), kube-apiserver (node CIDR :443/:6443).
-//           Declared service→dependency traffic is NOT here — each service
-//           gets its own per-service egress policy
-//           (component_service_egress_policy.go) so "service A → DB allowed,
-//           other-service → DB denied" is enforceable at L4.
-//   ingress: ingress-nginx → env workloads, cnpg-system → database clusters.
-//             Everything else is denied — including intra-namespace traffic
-//             not covered by a declared dependency or a run-scoped policy.
+//	egress: DNS (kube-system:53), kube-apiserver (node CIDR :443/:6443).
+//	        Declared service→dependency traffic is NOT here — each service
+//	        gets its own per-service egress policy
+//	        (component_service_egress_policy.go) so "service A → DB allowed,
+//	        other-service → DB denied" is enforceable at L4.
+//	ingress: ingress-nginx → env workloads, cnpg-system → database clusters.
+//	          Everything else is denied — including intra-namespace traffic
+//	          not covered by a declared dependency or a run-scoped policy.
 func defaultDenySpec(_ *Env) map[string]any {
 	egress := []map[string]any{
 		{
@@ -231,7 +231,7 @@ func defaultDenySpec(_ *Env) map[string]any {
 			// node IP:6443 TRƯỚC khi netpol check — ipBlock trên service IP
 			// KHÔNG match (gotcha kinh điển, verified bằng probe trên kind).
 			// Allow node CIDR kind/colima (172.18.0.0/16), ports 443+6443.
-			"to":    []map[string]any{{"ipBlock": map[string]any{"cidr": "172.18.0.0/16"}}},
+			"to": []map[string]any{{"ipBlock": map[string]any{"cidr": "172.18.0.0/16"}}},
 			"ports": []map[string]any{
 				{"protocol": "TCP", "port": int64(443)},
 				{"protocol": "TCP", "port": int64(6443)},

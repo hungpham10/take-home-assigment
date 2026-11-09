@@ -44,7 +44,10 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 			// service id -> {name, port} so dependency service_id refs can be
 			// resolved to the pod label (loadtest.io/component-id=<name>) used
 			// by per-service egress policies.
-			svcByID := map[string]struct{ name string; port int32 }{}
+			svcByID := map[string]struct {
+				name string
+				port int32
+			}{}
 			for _, svc := range services {
 				port := int32(8080)
 				var deploy struct {
@@ -54,20 +57,29 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 					port = deploy.Port
 				}
 				id := derefStr(svc.ServiceID)
-				svcByID[id] = struct{ name string; port int32 }{svc.Name, port}
+				svcByID[id] = struct {
+					name string
+					port int32
+				}{svc.Name, port}
 			}
 			var dbs []store.Database
 			if err := db.WithContext(ctx).Where("namespace_id = ?", ns.ID).Find(&dbs).Error; err != nil {
 				return nil, err
 			}
 			// database id -> {name, port} for resolving database_bindings.
-			dbByID := map[string]struct{ name string; port int32 }{}
+			dbByID := map[string]struct {
+				name string
+				port int32
+			}{}
 			// database id -> set of service names bound to it (for per-DB
 			// ingress policy).
 			dbBoundServices := map[string]map[string]bool{}
 			for _, dbRow := range dbs {
 				dbSpec := DatabaseSpec{Name: dbRow.Name, Operator: dbRow.Operator}
-				dbByID[dbRow.ID] = struct{ name string; port int32 }{dbRow.Name, dbPort(dbSpec)}
+				dbByID[dbRow.ID] = struct {
+					name string
+					port int32
+				}{dbRow.Name, dbPort(dbSpec)}
 				dbBoundServices[dbRow.ID] = map[string]bool{}
 			}
 			for _, svc := range services {
@@ -98,7 +110,9 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 				// Resolve this service's declared dependencies (services +
 				// databases) into egress rules keyed by the target's pod label.
 				if len(svc.Dependencies) > 0 {
-					var deps []struct{ ServiceID string `json:"service_id"` }
+					var deps []struct {
+						ServiceID string `json:"service_id"`
+					}
 					if json.Unmarshal(svc.Dependencies, &deps) == nil {
 						for _, dep := range deps {
 							if t, ok := svcByID[dep.ServiceID]; ok && t.name != "" {
@@ -112,7 +126,9 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 					}
 				}
 				if len(svc.DatabaseBindings) > 0 {
-					var bindings []struct{ DatabaseID string `json:"database_id"` }
+					var bindings []struct {
+						DatabaseID string `json:"database_id"`
+					}
 					if json.Unmarshal(svc.DatabaseBindings, &bindings) == nil {
 						for _, b := range bindings {
 							db, ok := dbByID[b.DatabaseID]

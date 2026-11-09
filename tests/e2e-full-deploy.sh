@@ -62,17 +62,12 @@ fi
 kubectl get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 || fail "CNPG CRD not present"
 
 # Install k6-operator so load tests run as TestRun CRs inside the env
-# namespace (subject to NetworkPolicy). Installed via the Grafana Helm chart
-# (sources/k6-operator is gitignored, not present in CI). Creates CRDs +
-# RBAC + controller; no cert-manager needed.
+# namespace (subject to NetworkPolicy). bundle.yaml (namespace + CRDs + RBAC
+# + controller) is downloaded from the k6-operator repo; sources/ is
+# gitignored so we can't reference it in CI. No cert-manager needed.
 if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
-  command -v helm >/dev/null 2>&1 || fail "helm not installed (needed for k6-operator)"
-  say "install k6-operator (helm)"
-  helm repo add k6-operator https://grafana.github.io/k6-operator/ >/dev/null 2>&1 || true
-  helm repo update k6-operator >/dev/null 2>&1 || true
-  helm install k6-operator k6-operator/k6-operator \
-    --namespace k6-operator-system --create-namespace --wait --timeout 180s >/dev/null 2>&1 \
-    || fail "k6-operator helm install failed"
+  say "install k6-operator"
+  kubectl apply -f https://raw.githubusercontent.com/grafana/k6-operator/main/bundle.yaml
   # Wait for TestRun CRD to be established.
   for i in $(seq 1 30); do
     if kubectl get crd testruns.k6.io >/dev/null 2>&1; then break; fi

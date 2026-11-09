@@ -192,9 +192,9 @@ func TestServiceEgressPolicyDeclaredDepsOnly(t *testing.T) {
 	env := testEnvPolicy()
 	// echo depends on other-svc (port 8080); no DB binding.
 	svc := envreconciler.ServiceSpec{
-		Name:       "echo",
-		Port:       80,
-		SpecHash:   "hash-echo",
+		Name:     "echo",
+		Port:     80,
+		SpecHash: "hash-echo",
 		Dependencies: []envreconciler.EgressRule{{
 			Type:  "service",
 			RefID: "other-svc",
@@ -253,10 +253,10 @@ func TestDatabasePolicyBoundServicesOnly(t *testing.T) {
 	env := testEnvPolicy()
 	// demo-db bound to echo only → ingress allows echo pods on 5432.
 	db := envreconciler.DatabaseSpec{
-		Name:           "demo-db",
-		Operator:       "cloudnative-pg",
-		BoundServices:  []string{"echo"},
-		SpecHash:       "hash-db",
+		Name:          "demo-db",
+		Operator:      "cloudnative-pg",
+		BoundServices: []string{"echo"},
+		SpecHash:      "hash-db",
 	}
 	np := (envreconciler.NewDatabasePolicyComponent("lt-env-ns", env, db)).Render(env)
 	u := np[0]

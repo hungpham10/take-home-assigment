@@ -15,9 +15,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
+	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
 	"github.com/hungpham/loadtest-platform/pkgs/idempotency"
-	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
@@ -171,7 +171,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		ID:        lt.ID,
 		Namespace: envreconciler.EnvNamespaceName(ns.ID),
 		Script:    scriptContent(ctx, d.DB, sc), VUs: intOf(cfg["vusers"], 1),
-		Duration:   strOf(cfg["duration"], "1m"), TargetsJSON: lt.Targets,
+		Duration: strOf(cfg["duration"], "1m"), TargetsJSON: lt.Targets,
 	}
 	ref, err := d.Runner.Provision(runCtx, spec)
 	if err != nil {

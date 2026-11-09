@@ -22,9 +22,9 @@ type Reconciler struct {
 	// K8s is the cluster client for run-scoped NetworkPolicy + script
 	// ConfigMap cleanup when a run reaches a terminal status (nil in
 	// legacy/local mode).
-	K8s k8s.Client
-	Every  time.Duration
-	Now    func() time.Time
+	K8s   k8s.Client
+	Every time.Duration
+	Now   func() time.Time
 }
 
 // Start blocks until ctx is done; run in a goroutine.
