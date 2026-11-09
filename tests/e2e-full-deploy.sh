@@ -39,8 +39,14 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   kind load docker-image ealen/echo-server:latest ghcr.io/cloudnative-pg/postgresql:16 --name "$CLUSTER" 2>/dev/null || true
 
   # Install Calico so NetworkPolicy is actually enforced (kindnetd does not).
+  # kind's default CNI (kindnetd) does NOT enforce NetworkPolicies.
   say "install Calico CNI (NetworkPolicy enforcement)"
-  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml >/dev/null
+  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.1/manifests/calico.yaml
+  # Wait for calico-system namespace + daemonset to be ready.
+  for i in $(seq 1 30); do
+    if kubectl get ns calico-system >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
   kubectl -n calico-system rollout status daemonset/calico-node --timeout=180s
 fi
 [ -n "${KUBECONFIG:-}" ] || KUBECONFIG="$HOME/.kube/config"

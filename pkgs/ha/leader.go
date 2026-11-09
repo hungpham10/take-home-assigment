@@ -1,3 +1,7 @@
+// Package ha provides high-availability primitives for the loadtest
+// controller: a K8s Lease-based leader-election Gate so only one active
+// pod runs the background workers (Env Reconciler, Status Watcher, run
+// reconciler/reaper) at a time.
 package ha
 
 import (
@@ -61,7 +65,7 @@ func NewGate(client kubernetes.Interface, cfg Config) *Gate {
 		},
 	}
 	leaderCallbacks := leaderelection.LeaderCallbacks{
-		OnStartedLeading: func(ctx context.Context) {
+		OnStartedLeading: func(_ context.Context) {
 			g.leader.Store(true)
 		},
 		OnStoppedLeading: func() {
