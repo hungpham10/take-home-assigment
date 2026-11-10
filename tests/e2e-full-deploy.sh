@@ -286,7 +286,7 @@ echo "   script VALIDATED ($SCRIPT_ID) ✅"
 say "create loadtest"
 LT_RESP=$(curl -s -o /tmp/fd-lt.json -w "%{http_code}" -X POST "$BASE/api/loadtest/v1/namespaces/$NS/loadtests" \
   -H "Idempotency-Key: fd-lt-$(date +%s)" $H -H 'Content-Type: application/json' \
-  -d "{\"name\":\"echo-load\",\"script_id\":\"$SCRIPT_ID\",\"load_config\":{\"vusers\":5,\"duration\":\"20s\",\"timeout_minutes\":5}}")
+  -d "{\"name\":\"echo-load\",\"script_id\":\"$SCRIPT_ID\",\"load_config\":{\"vusers\":5,\"duration\":\"45s\",\"timeout_minutes\":5}}")
 [ "$LT_RESP" = "201" ] || fail "create loadtest: $LT_RESP $(cat /tmp/fd-lt.json 2>/dev/null || true)"
 LT_ID=$(jqget "['id']" < /tmp/fd-lt.json)
 echo "   loadtest $LT_ID created ✅"
@@ -330,6 +330,37 @@ API_6565=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-api-$LT_ID -o json
 [ -n "$API_6565" ] || fail "api NP missing 6565 ingress rule"
 echo "   run-scoped NetworkPolicies: egress/ingress/api present, port 80 scoped, target=echo, 6565 ✅"
 
+# --- 13. L3/L4 probes from busybox runner-like pod (in-flight, before completion) ---
+# Enforcement must be verified while the run is alive: the reconciler deletes
+# run-scoped NetworkPolicies once the run reaches terminal status (docs/
+# network-policy.md §3.3). Probing after completion only asserts "no policy
+# exists" (weak), not "policy scoped correctly" (strong).
+say "L3/L4 NetworkPolicy probes (in-flight, before completion)"
+PROBE_POD="netprobe-$LT_ID"
+kubectl run "$PROBE_POD" --image=busybox:latest --restart=Never -n "$ENVNS" \
+  --labels="loadtest.io/run-id=$LT_ID" -- sleep 300 >/dev/null 2>&1 || true
+for i in $(seq 1 60); do
+  PSTATUS=$(kubectl get pod "$PROBE_POD" -n "$ENVNS" -o jsonpath='{.status.phase}' 2>/dev/null || echo Pending)
+  [ "$PSTATUS" = "Running" ] && break
+  sleep 1
+done
+[ "$PSTATUS" = "Running" ] || fail "probe pod did not reach Running"
+
+# 13a. runner → echo (port 80) MUST be allowed (declared target)
+ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
+[ -n "$ECHO_PROBE" ] || fail "runner→echo:80 denied (declared target should be allowed)"
+# 13b. runner → demo-db (5432) MUST be denied (not a target)
+DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
+[ -z "$DB_PROBE" ] || fail "runner→demo-db:5432 allowed (should be denied — not a target)"
+# 13c. echo pod (component-id=echo, not bound to DB) → demo-db:5432 MUST be denied
+ECHO_POD=$(kubectl get pod -n "$ENVNS" -l loadtest.io/component-id=echo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -n "$ECHO_POD" ]; then
+  ECHO_DB_PROBE=$(kubectl exec "$ECHO_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
+  [ -z "$ECHO_DB_PROBE" ] || fail "echo→demo-db:5432 allowed (echo not bound to DB — should be denied)"
+fi
+kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
+echo "   L3/L4 probes: runner→echo ✅, runner→demo-db ❌, echo→demo-db ❌ ✅"
+
 # --- 11. wait for loadtest COMPLETED -----------------------------------------------
 say "wait for loadtest completion (deadline 3m)"
 LT_STATUS=""
@@ -360,38 +391,27 @@ FINISHED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | 
 [ -n "$STARTED" ] && [ -n "$FINISHED" ] || fail "loadtest missing started_at/finished_at"
 echo "   loadtest COMPLETED ✅ (started=$STARTED finished=$FINISHED)"
 
+# --- 11b. assert run-scoped NetworkPolicies garbage-collected after terminal ---
+# Reconciler (2s tick) deletes run-scoped NetworkPolicies + script ConfigMap
+# once the run reaches terminal status (docs/network-policy.md §3.3). Verify
+# hygiene rather than assuming.
+say "run-scoped NetworkPolicies garbage-collected after completion"
+for np in loadtest-run-egress-$LT_ID loadtest-run-ingress-$LT_ID-echo loadtest-run-api-$LT_ID; do
+  for i in $(seq 1 15); do
+    if ! kubectl get networkpolicy -n "$ENVNS" "$np" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  if kubectl get networkpolicy -n "$ENVNS" "$np" >/dev/null 2>&1; then
+    fail "run NetworkPolicy $np still present after run terminal (expected pruned by reconciler)"
+  fi
+done
+echo "   run-scoped NetworkPolicies garbage-collected ✅"
+
 # --- 12. events + unreliable ---------------------------------------------------------
 say "loadtest events + unreliable"
 EVENTS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID/events" $H)
 echo "$EVENTS" | python3 -c "import json,sys;d=json.load(sys.stdin);print('events:',len(d.get('events',[])),'unreliable:',d.get('unreliable'))" >/dev/null || fail "events payload unreadable: $EVENTS"
 echo "   events + unreliable present ✅"
-
-# --- 13. L3/L4 probes from busybox runner-like pod ----------------------------------
-say "L3/L4 NetworkPolicy probes"
-PROBE_POD="netprobe-$LT_ID"
-kubectl run "$PROBE_POD" --image=busybox:latest --restart=Never -n "$ENVNS" \
-  --labels="loadtest.io/run-id=$LT_ID" -- sleep 300 >/dev/null 2>&1 || true
-for i in $(seq 1 60); do
-  PSTATUS=$(kubectl get pod "$PROBE_POD" -n "$ENVNS" -o jsonpath='{.status.phase}' 2>/dev/null || echo Pending)
-  [ "$PSTATUS" = "Running" ] && break
-  sleep 1
-done
-[ "$PSTATUS" = "Running" ] || fail "probe pod did not reach Running"
-
-# 13a. runner → echo (port 80) MUST be allowed (declared target)
-ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
-[ -n "$ECHO_PROBE" ] || fail "runner→echo:80 denied (declared target should be allowed)"
-# 13b. runner → demo-db (5432) MUST be denied (not a target)
-DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
-[ -z "$DB_PROBE" ] || fail "runner→demo-db:5432 allowed (should be denied — not a target)"
-# 13c. echo pod (component-id=echo, not bound to DB) → demo-db:5432 MUST be denied
-ECHO_POD=$(kubectl get pod -n "$ENVNS" -l loadtest.io/component-id=echo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-if [ -n "$ECHO_POD" ]; then
-  ECHO_DB_PROBE=$(kubectl exec "$ECHO_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
-  [ -z "$ECHO_DB_PROBE" ] || fail "echo→demo-db:5432 allowed (echo not bound to DB — should be denied)"
-fi
-kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
-echo "   L3/L4 probes: runner→echo ✅, runner→demo-db ❌, echo→demo-db ❌ ✅"
 
 # --- 7. projection dump ----------------------------------------------------------
 say "projection"

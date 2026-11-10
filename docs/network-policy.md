@@ -80,7 +80,7 @@ Run policies use a label set **distinct** from the Env Reconciler / Watcher mana
 
 Lifecycle:
 1. Platform renders both policies **before** creating the `TestRun` (so enforcement exists when runner pods start).
-2. The run-scoped policies + run-scoped script ConfigMap are deleted when the run reaches a **terminal status** (COMPLETED/FAILED/STOPPED/TIMED_OUT), not only when the TestRun object is deleted — the loadtest reconciler owns this cleanup on its `finish`/timeout paths.
+2. **Enforcement verification must happen while the run is alive.** The run-scoped policies + run-scoped script ConfigMap are deleted when the run reaches a **terminal status** (COMPLETED/FAILED/STOPPED/TIMED_OUT), not only when the TestRun object is deleted — the loadtest reconciler owns this cleanup on its `finish`/timeout paths. Running L3/L4 probes *after* completion asserts "no policy exists" (weak), not "policy scoped correctly" (strong).
 3. On namespace teardown, run policies are garbage-collected with the namespace (1 Environment = 1 K8s Namespace, cascade).
 
 ## 4. Database policy detail
