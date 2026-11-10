@@ -22,7 +22,7 @@ Mock execution is a **separate deployable data plane** (`mock-service`), while c
 |---|---|---|
 | Namespace/service/database `mock` metadata CRUD | `loadtest-controller` | Canonical definition stored with namespace components. |
 | Pool/admin/status/reconcile APIs (`/api/loadtest/v1/mock-*`, `/namespaces/{id}/mock-status`) | `loadtest-controller` | Projection-backed reads; guarded mutations; no runner/user access. |
-| Runtime mock endpoints (OpenAPI operations, DB-profile behavior) | `mock-service` | Cluster-internal only, dependency-derived NetworkPolicy; no public ingress; no user RBAC. |
+| Runtime mock endpoints (OpenAPI operations, DB-profile behavior) | `mock-service` | Cluster-internal only, dependency-derived NetworkPolicy; no public ingress; no user RBAC. Deployed in `MOCK_SERVICE_NAMESPACE` (default `mock-system`); Service `mock-service` exposes port **80** → container port **8090**. Clients call `http://mock-service.<mock-system-ns>.svc.cluster.local` and NetworkPolicy egress is evaluated post-DNAT on port **8090** (see `docs/network-policy.md` §8). |
 | Snapshot/binding contract (controller → mock-service) | internal | Versioned desired config: `schema_version`, `namespace_id`, `generation`, resolved bindings/operations/latency/pool class. mock-service reports `observed_generation`, health, overhead metrics. |
 | Persistence/authz | split | Controller owns PostgreSQL/authz/ledger. mock-service has **no DB hot-path writes** and no tenant/owner authorization decisions. |
 

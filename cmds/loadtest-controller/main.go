@@ -102,10 +102,13 @@ func run() error {
 		}()
 	}
 
+	net := platformNet(cfg)
+
 	srv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run, K8s: k8sClient, K8S: cfg.K8SEnabled, StaleAfter: time.Duration(cfg.WatcherStalenessThreshold) * time.Second,
-			ApplyNow: applyNowFn(db, cfg.K8SAPIURL, func() bool { return leaderGate == nil || leaderGate.IsLeader() })}),
+			Net:   net,
+			ApplyNow: applyNowFn(db, cfg.K8SAPIURL, func() bool { return leaderGate == nil || leaderGate.IsLeader() }, net)}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

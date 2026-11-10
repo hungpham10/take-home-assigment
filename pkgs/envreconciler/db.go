@@ -13,8 +13,10 @@ import (
 // pending work (APPLYING/DATA_LOADING/DELETING) from PG and renders their
 // desired state from the component tables. Used by the controller's
 // orchestration loop and the integration harness (single implementation —
-// duplicated logic is a defect, pkgs/ is the boundary).
-func LoadEnvs(db *gorm.DB) EnvLoader {
+// duplicated logic is a defect, pkgs/ is the boundary). net is injected once
+// by the controller and stamped onto every Env so renderers (default-deny,
+// run-scoped policy) use a single source of truth for platform networking.
+func LoadEnvs(db *gorm.DB, net PlatformNet) EnvLoader {
 	return func(ctx context.Context) ([]*Env, error) {
 		var rows []store.Namespace
 		if err := db.WithContext(ctx).
@@ -27,6 +29,7 @@ func LoadEnvs(db *gorm.DB) EnvLoader {
 			env := &Env{
 				NamespaceID: ns.ID, Status: ns.Status,
 				Generation: ns.DesiredGeneration,
+				Net:         net,
 			}
 			if ns.Status == "DELETING" {
 				envs = append(envs, env) // teardown needs no components

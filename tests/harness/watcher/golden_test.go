@@ -36,7 +36,7 @@ func TestWATCH07GoldenPath(t *testing.T) {
 
 	rc := envreconciler.New(client, envreconciler.Options{})
 	mockcontrol.Attach(rc)
-	go rc.Start(ctx, envreconciler.LoadEnvs(sharedDB))
+	go rc.Start(ctx, envreconciler.LoadEnvs(sharedDB, envreconciler.PlatformNet{}))
 
 	cfg := statuswatcher.DefaultConfig()
 	cfg.Resync = 5 * time.Second

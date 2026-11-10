@@ -14,6 +14,7 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/adminapi"
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
+	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
 	"github.com/hungpham/loadtest-platform/pkgs/httpx"
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
@@ -36,6 +37,7 @@ type Deps struct {
 	K8s        k8s.Client       // cluster client for run-scoped NetworkPolicy (nil in legacy/local mode)
 	K8S        bool             // cluster wired → async apply (plans/21); false = legacy sync
 	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
+	Net        envreconciler.PlatformNet // platform networking defaults (k6-operator ns, node CIDRs, mock-service)
 	// ApplyNow (plans/26): hierarchical apply ngay trong request path sau khi
 	// desired-state commit (nil ở legacy mode).
 	ApplyNow func(ctx context.Context, namespaceID string)
@@ -85,7 +87,7 @@ func NewRouter(d Deps) http.Handler {
 		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
-		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8s: d.K8s, K8S: d.K8S, StaleAfter: d.StaleAfter})
+		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8s: d.K8s, K8S: d.K8S, StaleAfter: d.StaleAfter, Net: d.Net})
 	})
 	// Script content reader for the runner (staged files).
 	loadtest.ScriptContentOf = func(ref string) ([]byte, error) {

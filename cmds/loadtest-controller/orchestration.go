@@ -24,6 +24,18 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/statuswatcher"
 )
 
+// platformNet builds the platform networking defaults from config. Zero env
+// vars keep historical hardcoded defaults (k6-operator-system,
+// 172.18.0.0/16, mock-system, ports 80/8090).
+func platformNet(cfg config.Config) envreconciler.PlatformNet {
+	return envreconciler.PlatformNet{
+		K6OperatorNamespace:    cfg.K6OperatorNamespace,
+		K8SNodeCIDRs:           cfg.K8SNodeCIDRs,
+		MockServiceNamespace:   cfg.MockServiceNamespace,
+		MockServicePorts:       cfg.MockServicePorts,
+	}
+}
+
 // startOrchestration boots the two loops; both stop when ctx is cancelled.
 // isLeader gates all writes when HA is enabled (nil = always leader).
 func startOrchestration(ctx context.Context, db *gorm.DB, cfg config.Config, apiURL string, isLeader func() bool, resync, grace, stable, applyDeadline, staleness time.Duration) error {
@@ -32,12 +44,13 @@ func startOrchestration(ctx context.Context, db *gorm.DB, cfg config.Config, api
 		return err
 	}
 
+	net := platformNet(cfg)
 	rc := envreconciler.New(client, envreconciler.Options{
 		IsLeader:         isLeader,
 		GenerationLoader: envreconciler.LoadGeneration(db),
 	})
 	mockcontrol.Attach(rc) // binding ConfigMaps + MOCK_* env injection (step 5)
-	go rc.Start(ctx, envreconciler.LoadEnvs(db))
+	go rc.Start(ctx, envreconciler.LoadEnvs(db, net))
 
 	w := statuswatcher.New(client, db, statuswatcher.Config{
 		Resync:             resync,
@@ -48,7 +61,7 @@ func startOrchestration(ctx context.Context, db *gorm.DB, cfg config.Config, api
 		IsLeader:           isLeader,
 	})
 	go w.Start(ctx)
-	slog.Info("orchestration loops started", "api", apiURL, "resync", resync, "ha", cfg.HAEnabled)
+	slog.Info("orchestration loops started", "api", apiURL, "resync", resync, "ha", cfg.HAEnabled, "k6-operator-ns", net.K6OperatorNamespace)
 	return nil
 }
 
@@ -59,7 +72,7 @@ func startOrchestration(ctx context.Context, db *gorm.DB, cfg config.Config, api
 // HA: only the leader applies. A standby returns no-op — the handler already
 // committed desired_generation++ and will answer 202; the leader applies on
 // the next tick (level-triggered convergence).
-func applyNowFn(db *gorm.DB, apiURL string, isLeader func() bool) func(context.Context, string) {
+func applyNowFn(db *gorm.DB, apiURL string, isLeader func() bool, net envreconciler.PlatformNet) func(context.Context, string) {
 	client, err := k8s.NewClientFromEnv(apiURL)
 	if err != nil {
 		slog.Warn("apply-now disabled: cluster client unavailable", "err", err)
@@ -71,7 +84,7 @@ func applyNowFn(db *gorm.DB, apiURL string, isLeader func() bool) func(context.C
 			// leader applies via tick.
 			return
 		}
-		envs, err := envreconciler.LoadEnvs(db)(ctx)
+		envs, err := envreconciler.LoadEnvs(db, net)(ctx)
 		if err != nil {
 			slog.Warn("apply-now: load envs", "err", err)
 			return

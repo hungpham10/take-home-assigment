@@ -292,6 +292,8 @@ Same pattern — per-namespace Lease for watcher:
 | Orchestration wiring | `cmds/loadtest-controller/orchestration.go` | Initialize election locks per namespace |
 | Deployment | `conf/k8s/deployment.yaml` | Single replica for MVP; HA = add Lease RBAC + config |
 
+**Platform networking env vars** (read by `pkgs/config.FromEnv`, injected into every `envreconciler.Env`): `K6_OPERATOR_NAMESPACE` (default `k6-operator-system`), `K8S_NODE_CIDRS` (default `172.18.0.0/16` — production must set), `MOCK_SERVICE_NAMESPACE` (default `mock-system`), `MOCK_SERVICE_PORTS` (default `80,8090`). See [`docs/network-policy.md` §8](network-policy.md) for the rendered NetworkPolicy effect.
+
 ### RBAC for Leases
 
 ```yaml

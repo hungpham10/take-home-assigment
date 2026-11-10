@@ -24,7 +24,7 @@ NetworkPolicy is a **Kubernetes L3/L4** construct: it matches on pod/namespace s
 |---|---|---|---|---|
 | `services[].dependencies[]` (`tbl_dependencies`) | `service_id`, `ports`, `required` | one egress policy **per service** (its own dependencies only) | **egress** (SUT → dependency) | dependency pod selector + ports |
 | `database_bindings[]` | `database_id`, `binding` | service → DB egress + DB ingress | **egress** (service → DB pod) / **ingress** (DB pod ← **bound services only**) | DB pod selector + engine port |
-| Platform allowances | DNS (kube-system:53), mock-service, ingress-nginx → SUT | per-namespace baseline | egress / ingress | `kube-system` label, mock-service label, ingress-nginx CIDR |
+| Platform allowances | DNS (kube-system:53), mock-service (rendered in `default-deny` egress), ingress-nginx → SUT | per-namespace baseline | egress / ingress | `kube-system` label, `MOCK_SERVICE_NAMESPACE` label, ingress-nginx CIDR |
 | **Run-scoped** (`targets[]`, §3) | `service_id`, `ports`, `via` | one egress + one ingress + one api per run | **egress** (runner → target) / **ingress** (target ← runner) / **api** (k6-operator → runner 6565) | runner label `run-id` / target pod selector + port / k6-operator ns label |
 
 **Ordering:** NetworkPolicy is applied **before** workloads (`docs/k8s-orchestration.md` §4.1, step 2) so there is no window of unenforced traffic.
@@ -50,7 +50,7 @@ For each load-test run (`testrun-<id>` in namespace `lt-env-<namespace_id>`):
 
 1. **Runner egress** — `loadtest-run-egress-<run-id>`:
    - podSelector: runner pods selected by label `loadtest.io/run-id=<run-id>` (also `app=k6`, `k6_cr=<testrun>`, `runner=true` set on `TestRun.spec.runner.metadata.labels`).
-   - egress allow: resolved target pod selectors + `targets[].ports`; DNS (`kube-system`:53 UDP/TCP); mock-service endpoint when the run uses mocks.
+   - egress allow: resolved target pod selectors + `targets[].ports`; DNS (`kube-system`:53 UDP/TCP). The mock-service endpoint is allowed additively by the namespace `default-deny` baseline (see Configuration below) — the run policy does not render it separately.
    - everything else denied (default-deny baseline of the namespace still applies).
 
 2. **Target ingress** — `loadtest-run-ingress-<run-id>`:
@@ -117,7 +117,22 @@ These pods are operator-managed, not platform-owned; the policy above is rendere
 
 kind's default CNI (kindnet) and colima's default CNI **may not** enforce NetworkPolicy. Verify before running these tests; if not enforced, install Calico or Cilium in the kind/colima cluster (documented as a test prerequisite, not a controller change).
 
-## 8. Open items / post-MVP
+## 8. Platform networking configuration
+
+The controller reads platform networking defaults from environment variables (docs/k8s-orchestration.md). Zero value / unset keeps the historical hardcoded defaults, which target kind/colima; production clusters **must** set `K8S_NODE_CIDRS` explicitly.
+
+| Env var | Config field | Default | Meaning |
+|---|---|---|---|
+| `K6_OPERATOR_NAMESPACE` | `K6OperatorNamespace` | `k6-operator-system` | Namespace k6-operator controller pods run in. `StartJobs` probes the runner API from here; the run-scoped `loadtest-run-api-<run>` policy allows ingress from this namespace on TCP 6565. Override when k6-operator is installed elsewhere. |
+| `K8S_NODE_CIDRS` | `K8SNodeCIDRs` | `172.18.0.0/16` | Comma list of node CIDRs whose pods reach kube-apiserver (node IP :443/:6443). kube-proxy DNATs the service IP before the netpol check, so `ipBlock` must target the node CIDR, not the service ClusterIP. Production clusters must set this; `172.18.0.0/16` only matches kind/colima. |
+| `MOCK_SERVICE_NAMESPACE` | `MockServiceNamespace` | `mock-system` | Namespace the shared mock-service runtime runs in. `default-deny` allows egress to this namespace on `MOCK_SERVICE_PORTS`. |
+| `MOCK_SERVICE_PORTS` | `MockServicePorts` | `80,8090` | Comma list of TCP ports allowed for egress SUT/runner → mock-service. `80` is the ExternalName-facing port; `8090` is the post-DNAT pod port. |
+
+Invalid CIDRs or out-of-range ports make the controller fail to start (`FromEnv` validation).
+
+**Prerequisites (deployment, not controller code):** the `mock-system` namespace must exist and allow ingress from `lt-env-*` namespaces (the controller only renders the client-side egress allowance). The kube-apiserver egress rule assumes the CNI enforces NetworkPolicy (§7).
+
+## 9. Open items / post-MVP
 
 1. `targets[].via` default locked to `service` (decided; documented here).
 2. L7 enforcement (operation_id / path / method) → Cilium L7 policy or egress proxy/sidecar.
@@ -125,15 +140,15 @@ kind's default CNI (kindnet) and colima's default CNI **may not** enforce Networ
 4. Restore Job egress scoping (object store + DB only, short-lived scoped credentials).
 5. Confirm kind/colima CNI enforcement; add Calico/Cilium install step to `tests/e2e-full-deploy.sh` and `tests/e2e-run-k8s.sh` prerequisites if needed.
 
-## 9. Cross-references updated
+## 10. Cross-references updated
 
 - [`docs/k8s-orchestration.md`](k8s-orchestration.md) §3.5 now points here for the runner policy and DB detail; §6 RBAC should add `testruns.k6.io`, `configmaps`, `pods`, `pods/log` for the K8s runner.
 - [`docs/architecture.md`](architecture.md) §3.7 runner-egress diagram and Open Item #2 / #6 reference this spec.
-- [`docs/namespace-management-api.md`](namespace-management-api.md) §8 and §12 open item #6 reference this spec for the derived NetworkPolicy.
+- [`docs/namespace-management-api.md`](namespace-management-api.md) §9 and §12 open item #6 reference this spec for the derived NetworkPolicy.
 - [`docs/service-management-api.md`](service-management-api.md) §7 references this spec for dependency-derived policy.
 - [`docs/loadtest-manager-api.md`](loadtest-manager-api.md) §4 step 7 and §7 reference this spec for the run-scoped NetworkPolicy; §6 status source of truth.
 
-## 10. Runner lifecycle vs platform status (k6-operator)
+## 11. Runner lifecycle vs platform status (k6-operator)
 
 The k6-operator `TestRun.status.stage` machine (`initialized → created → started → finished`) is **operator-managed** and has been observed to stall in two distinct ways:
 

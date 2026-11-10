@@ -39,6 +39,7 @@ type Deps struct {
 	// than StaleAfter. Legacy mode (K8S=false) skips the gate.
 	K8S        bool
 	StaleAfter time.Duration
+	Net        envreconciler.PlatformNet // platform networking defaults for run-scoped policy
 }
 
 // Mount registers the loadtest routes FLAT on the passed-in router (server
@@ -147,7 +148,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	if d.K8s != nil {
 		envNS := envreconciler.EnvNamespaceName(ns.ID)
 		runObjs, err := envreconciler.RunNetworkPolicies(envNS, &envreconciler.Env{
-			NamespaceID: ns.ID, TenantID: ns.TenantID,
+			NamespaceID: ns.ID, TenantID: ns.TenantID, Net: d.Net,
 		}, lt.ID, targets)
 		if err != nil {
 			httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "run policy build failed: "+err.Error())

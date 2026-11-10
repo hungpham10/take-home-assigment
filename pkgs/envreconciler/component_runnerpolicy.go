@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strconv"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -13,17 +12,6 @@ import (
 
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 )
-
-// k6OperatorNamespace is the namespace k6-operator controller pods run in.
-// StartJobs probes http://<runner-svc>:6565/v1/status from this namespace, so
-// the run-scoped "api" NetworkPolicy must allow ingress from it. Override via
-// K6_OPERATOR_NAMESPACE when k6-operator is installed elsewhere.
-var k6OperatorNamespace = func() string {
-	if v := os.Getenv("K6_OPERATOR_NAMESPACE"); v != "" {
-		return v
-	}
-	return "k6-operator-system"
-}()
 
 // RunNetworkPolicies renders the run-scoped NetworkPolicies for a load-test
 // run (docs/network-policy.md §3):
@@ -218,12 +206,14 @@ func RunNetworkPolicies(envNS string, env *Env, runID string, targets []map[stri
 					"ports": []map[string]any{{"protocol": "TCP", "port": int64(6565)}},
 				},
 				// k6-operator StartJobs probes http://<runner-svc>:6565/v1/status
-				// from its controller pod in k6-operator-system. default-deny
-				// blocks cross-namespace ingress, so allow it explicitly.
+				// from its controller pod in the k6-operator namespace
+				// (env.Net.K6OperatorNamespace, default k6-operator-system).
+				// default-deny blocks cross-namespace ingress, so allow it
+				// explicitly.
 				map[string]any{
 					"from": []any{map[string]any{
 						"namespaceSelector": map[string]any{
-							"matchLabels": map[string]string{"kubernetes.io/metadata.name": k6OperatorNamespace},
+							"matchLabels": map[string]string{"kubernetes.io/metadata.name": env.netConfig().K6OperatorNamespace},
 						},
 					}},
 					"ports": []map[string]any{{"protocol": "TCP", "port": int64(6565)}},
