@@ -35,7 +35,41 @@ var (
 	// k6-operator does not advance TestRun.status.stage past "created" (seen
 	// in CI: stage stays "created" while the runner pod is already Running).
 	podGVK = schema.GroupVersionKind{Version: "v1", Kind: "Pod"}
+	// jobGVK is used by Status() to read the runner Job "-1" conditions as
+	// the source of truth for terminal status (Complete -> COMPLETED,
+	// Failed/Error -> FAILED) before mapping status.stage, because the
+	// k6-operator stage machine can stall without ever emitting events.
+	jobGVK = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
 )
+
+// probeDefaults returns an explicit readiness/liveness probe so the runner
+// container is not killed by k6-operator's default probe (1s timeout, 10s
+// period, failureThreshold 3) on a loaded node. Values chosen to keep a
+// 20s k6 run comfortably inside the failure window while still detecting a
+// truly dead runner.
+func probeDefaults() map[string]any {
+	return map[string]any{
+		"httpGet": map[string]any{
+			"path": "/v1/status",
+			"port": int64(6565),
+		},
+		"initialDelaySeconds": int64(5),
+		"periodSeconds":       int64(5),
+		"timeoutSeconds":      int64(3),
+		"failureThreshold":    int64(12),
+	}
+}
+
+// livenessProbeDefaults returns a more forgiving liveness probe: start later,
+// fail slower, so a temporary probe hiccup cannot kill a runner mid-run.
+func livenessProbeDefaults() map[string]any {
+	p := probeDefaults()
+	p["initialDelaySeconds"] = int64(20)
+	p["periodSeconds"] = int64(10)
+	p["timeoutSeconds"] = int64(5)
+	p["failureThreshold"] = int64(6)
+	return p
+}
 
 // toUnstructured wraps a rendered manifest map with its GVK. The JSON
 // round-trip normalizes Go-native maps (e.g. map[string]string labels) into
@@ -156,6 +190,10 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 		},
 		"spec": map[string]any{
 			"parallelism": int64(1),
+			// paused: "false" -> k6 runs immediately; do NOT depend on the
+			// starter/Service 6565 handshake or the operator advancing
+			// stage created->started (both have been observed to stall).
+			"paused": "false",
 			"script": map[string]any{
 				"configMap": map[string]any{
 					"name": ref + "-script",
@@ -163,10 +201,26 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 				},
 			},
 			"args": args,
+			// initializer.disabled: "true" -> the platform already validated
+			// the script; skip the initializer k6 inspect chagne (28s vs 45s
+			// locally) and remove one dependency on the 6565 handshake.
+			"initializer": map[string]any{
+				"disabled": true,
+				"metadata": map[string]any{
+					"labels": map[string]any{
+						"loadtest.io/run-id":     ref,
+						"app":                    "k6",
+						"loadtest.io/managed-by": "loadtest-controller",
+					},
+				},
+			},
 			// Stamp run-id on runner/initializer/starter so k6-operator
 			// propagates it to the pods they spawn. The run-scoped
 			// NetworkPolicies select pods by loadtest.io/run-id, so without
 			// these labels the policies match nothing and the run stalls.
+			// k6_cr is stamped only on runner.metadata.labels (k6-operator
+			// uses it to identify the TestRun); initializer/starter metadata
+			// labels must not carry undeclared schema fields.
 			"runner": map[string]any{
 				"metadata": map[string]any{
 					"labels": map[string]any{
@@ -177,23 +231,17 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 						"loadtest.io/managed-by": "loadtest-controller",
 					},
 				},
-			},
-			"initializer": map[string]any{
-				"metadata": map[string]any{
-					"labels": map[string]any{
-						"loadtest.io/run-id":     ref,
-						"app":                    "k6",
-						"k6_cr":                  ref,
-						"loadtest.io/managed-by": "loadtest-controller",
-					},
-				},
+				// Explicit probes (not the operator default: 1s timeout,
+				// 10s period, failureThreshold 3) so a loaded node cannot
+				// kill the runner container mid-run via liveness.
+				"readinessProbe": probeDefaults(),
+				"livenessProbe":  livenessProbeDefaults(),
 			},
 			"starter": map[string]any{
 				"metadata": map[string]any{
 					"labels": map[string]any{
 						"loadtest.io/run-id":     ref,
 						"app":                    "k6",
-						"k6_cr":                  ref,
 						"loadtest.io/managed-by": "loadtest-controller",
 					},
 				},
@@ -215,10 +263,12 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 //	error → FAILED
 //	missing → STOPPED with Missing=true (reconciler treats as runner-lost)
 //
-// Fallback: k6-operator may not advance TestRun.status.stage past "created"
-// even after spawning runner pods. When stage is "created"/"initialization"/
-// "initialized"/"" and a pod labeled loadtest.io/run-id=<ref> is Running, treat
-// the run as RUNNING so the reconciler can advance PROVISIONING→RUNNING.
+// Source-of-truth order: the k6-operator stage machine (`status.stage`) can
+// stall without ever emitting events, so terminal status is derived from the
+// runner Job "-1" conditions first (Complete -> COMPLETED,
+// Failed/Error -> FAILED), then from status.stage, and finally from a
+// runner=true Running pod fallback. This decouples platform status from the
+// operator's stage machine (docs/network-policy.md §10).
 func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error) {
 	tr, err := r.Client.Get(context.Background(), testRunKind, r.nsFor(ref), ref)
 	if err != nil {
@@ -227,6 +277,40 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 		}
 		return Status{}, err
 	}
+
+	// 1. Job "-1" conditions as source of truth for terminal status.
+	jobName := ref + "-1"
+	jobs, err := r.Client.List(context.Background(), jobGVK, r.nsFor(ref),
+		labels.Set{"job-name": jobName})
+	if err != nil {
+		return Status{}, err
+	}
+	for _, j := range jobs {
+		conditions, found, _ := unstructured.NestedSlice(j.Object, "status", "conditions")
+		if !found {
+			continue
+		}
+		for _, c := range conditions {
+			cm, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			condType, _, _ := unstructured.NestedString(cm, "type")
+			condStatus, _, _ := unstructured.NestedString(cm, "status")
+			switch condType {
+			case "Complete":
+				if condStatus == "True" {
+					return Status{State: "COMPLETED"}, nil
+				}
+			case "Failed":
+				if condStatus == "True" {
+					return Status{State: "FAILED", Msg: "runner job failed"}, nil
+				}
+			}
+		}
+	}
+
+	// 2. Map status.stage.
 	stage, _, _ := unstructured.NestedString(tr.Object, "status", "stage")
 	switch stage {
 	case "started":
@@ -238,7 +322,9 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 	case "error":
 		return Status{State: "FAILED", Msg: "testrun stage error"}, nil
 	}
-	// runner-pod readiness (only pods labeled runner=true count).
+
+	// 3. runner-pod readiness fallback (only pods labeled runner=true count).
+	// Useful when stage is stuck but the runner pod is still Running.
 	pods, err := r.Client.List(context.Background(), podGVK, r.nsFor(ref),
 		labels.Set{"loadtest.io/run-id": ref, "runner": "true"})
 	if err != nil {

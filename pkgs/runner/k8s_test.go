@@ -84,9 +84,10 @@ func TestK8sTestRunRunnerStartCreatesTestRun(t *testing.T) {
 	if lbls["k6_cr"] != "run-123" {
 		t.Fatalf("TestRun k6_cr label = %q", lbls)
 	}
-	// run-id must be stamped on runner/initializer/starter metadata so
-	// k6-operator propagates it to the pods the run policies select.
-	for _, comp := range []string{"runner", "initializer", "starter"} {
+	// run-id must be stamped on runner/starter metadata so k6-operator
+	// propagates it to the pods the run policies select. (initializer carries
+	// disabled:true and is asserted separately.)
+	for _, comp := range []string{"runner", "starter"} {
 		l, _, _ := unstructured.NestedMap(tr.Object, "spec", comp, "metadata", "labels")
 		if l["loadtest.io/run-id"] != "run-123" {
 			t.Fatalf("TestRun spec.%s.metadata.labels run-id = %v, want run-123", comp, l)
@@ -324,5 +325,173 @@ func TestK8sTestRunRunnerStopMissingIsNoop(t *testing.T) {
 	r := newK8sRunner(t)
 	if err := r.Stop(context.Background(), "does-not-exist"); err != nil {
 		t.Fatalf("Stop of missing TestRun must be nil, got %v", err)
+	}
+}
+
+// plantJob plants a Job named ref+"-1" with the given condition type/status.
+func plantJob(t *testing.T, r *K8sTestRunRunner, ref, condType, condStatus string) {
+	t.Helper()
+	ctx := context.Background()
+	cond := map[string]any{
+		"type":   condType,
+		"status": condStatus,
+	}
+	job := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "batch/v1",
+			"kind":       "Job",
+			"metadata": map[string]any{
+				"name":      ref + "-1",
+				"namespace": testNS,
+				"labels": map[string]any{
+					"job-name": ref + "-1",
+				},
+			},
+			"status": map[string]any{
+				"conditions": []any{cond},
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, job); err != nil {
+		t.Fatalf("plant Job: %v", err)
+	}
+}
+
+// TestK8sTestRunRunnerStatusJobCompleteIsCompleted — stage stuck at
+// "initialized" (operator never advanced it) but Job "-1" is Complete must
+// still surface COMPLETED to the reconciler.
+func TestK8sTestRunRunnerStatusJobCompleteIsCompleted(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-jc", Namespace: testNS})
+
+	tr := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "k6.io/v1alpha1",
+			"kind":       "TestRun",
+			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"status": map[string]any{
+				"stage": "initialized", // operator stalled here
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatalf("plant TestRun: %v", err)
+	}
+	plantJob(t, r, ref, "Complete", "True")
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != "COMPLETED" {
+		t.Fatalf("stage=initialized + Job Complete -> state %q, want COMPLETED", st.State)
+	}
+}
+
+// TestK8sTestRunRunnerStatusJobFailedIsFailed — stage stuck but Job "-1"
+// Failed must surface FAILED.
+func TestK8sTestRunRunnerStatusJobFailedIsFailed(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-jf", Namespace: testNS})
+
+	tr := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "k6.io/v1alpha1",
+			"kind":       "TestRun",
+			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"status": map[string]any{
+				"stage": "initialized",
+			},
+		},
+	}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatalf("plant TestRun: %v", err)
+	}
+	plantJob(t, r, ref, "Failed", "True")
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != "FAILED" {
+		t.Fatalf("stage=initialized + Job Failed -> state %q, want FAILED", st.State)
+	}
+}
+
+// TestK8sTestRunRunnerStartRendersPausedFalse — paused must be "false" so k6
+// runs without the starter/Service 6565 handshake.
+func TestK8sTestRunRunnerStartRendersPausedFalse(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-pf", Namespace: testNS})
+	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, ref)
+	if err != nil {
+		t.Fatalf("TestRun not created: %v", err)
+	}
+	paused, _, _ := unstructured.NestedString(tr.Object, "spec", "paused")
+	if paused != "false" {
+		t.Fatalf("spec.paused = %q, want \"false\"", paused)
+	}
+}
+
+// TestK8sTestRunRunnerStartRendersInitializerDisabled — initializer must be
+// disabled so the platform skips the k6-inspect chagne.
+func TestK8sTestRunRunnerStartRendersInitializerDisabled(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-id", Namespace: testNS})
+	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, ref)
+	if err != nil {
+		t.Fatalf("TestRun not created: %v", err)
+	}
+	disabled, found, _ := unstructured.NestedBool(tr.Object, "spec", "initializer", "disabled")
+	if !found || !disabled {
+		t.Fatalf("spec.initializer.disabled = %v (found=%v), want true", disabled, found)
+	}
+}
+
+// TestK8sTestRunRunnerStartRendersRunnerProbes — explicit readiness/liveness
+// probes must be rendered (not the operator's 1s default).
+func TestK8sTestRunRunnerStartRendersRunnerProbes(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-pr", Namespace: testNS})
+	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, ref)
+	if err != nil {
+		t.Fatalf("TestRun not created: %v", err)
+	}
+	for _, probe := range []string{"readinessProbe", "livenessProbe"} {
+		p, found, _ := unstructured.NestedMap(tr.Object, "spec", "runner", probe)
+		if !found {
+			t.Fatalf("spec.runner.%s not rendered", probe)
+		}
+		path, _, _ := unstructured.NestedString(p, "httpGet", "path")
+		portAny, portFound, _ := unstructured.NestedFieldNoCopy(p, "httpGet", "port")
+		if !portFound {
+			t.Fatalf("spec.runner.%s httpGet.port missing", probe)
+		}
+		var port int64
+		switch v := portAny.(type) {
+		case float64:
+			port = int64(v)
+		case int64:
+			port = v
+		default:
+			t.Fatalf("spec.runner.%s httpGet.port type %T, want numeric", probe, portAny)
+		}
+		if path != "/v1/status" || port != 6565 {
+			t.Fatalf("spec.runner.%s httpGet = path=%q port=%d, want /v1/status 6565", probe, path, port)
+		}
 	}
 }

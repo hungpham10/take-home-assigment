@@ -47,9 +47,9 @@ func New(c k8s.Client, opts Options) *Reconciler {
 		opts.Interval = 5 * time.Second
 	}
 	return &Reconciler{
-		client:   c,
-		interval: opts.Interval,
-		isLeader: opts.IsLeader,
+		client:    c,
+		interval:  opts.Interval,
+		isLeader:  opts.IsLeader,
 		genLoader: opts.GenerationLoader,
 	}
 }
@@ -137,6 +137,13 @@ func (r *Reconciler) prune(ctx context.Context, env *Env, desired []*unstructure
 		}
 		for _, o := range objs {
 			if want[gvk.Kind+"/"+o.GetName()] {
+				continue
+			}
+			// k6-operator owns the runner Job/Service/<run>-service-<i> and
+			// stamps them with loadtest.io/run-id; they are not part of the
+			// env desired set and must not be pruned as "drift" (docs/
+			// network-policy.md §10, plan 28 latent-bug item).
+			if _, ok := o.GetLabels()["loadtest.io/run-id"]; ok {
 				continue
 			}
 			if err := r.client.Delete(ctx, gvk, envNS, o.GetName()); err != nil && err != k8s.ErrNotFound {

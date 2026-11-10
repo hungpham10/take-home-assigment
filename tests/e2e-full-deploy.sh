@@ -333,35 +333,25 @@ echo "   run-scoped NetworkPolicies: egress/ingress/api present, port 80 scoped,
 # --- 11. wait for loadtest COMPLETED -----------------------------------------------
 say "wait for loadtest completion (deadline 3m)"
 LT_STATUS=""
-UNBLOCK_TRIED=0
 for i in $(seq 1 90); do
   LT_STATUS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['status']")
   [ "$LT_STATUS" = "COMPLETED" ] && break
   [ "$LT_STATUS" = "FAILED" ] && { curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H; fail "loadtest FAILED"; }
 
-  # Unblock k6-operator if stuck at initialized/created with orphaned job
-  # (k6-operator CreateJobs errors when the runner job already exists, e.g. if
-  # the first UpdateStatus to stage=created failed. Deleting the orphaned job
-  # + service lets the operator recreate them and advance the stage.)
-  if [ "$UNBLOCK_TRIED" -eq 0 ] && [ "$i" -gt 30 ]; then
-    TR_STAGE=$(kubectl get testrun -n "$ENVNS" "$LT_ID" -o jsonpath='{.status.stage}' 2>/dev/null || echo "unknown")
-    if [ "$TR_STAGE" = "initialized" ] || [ "$TR_STAGE" = "created" ]; then
-      echo "k6-operator stuck at stage=$TR_STAGE, deleting orphaned job+service to unblock"
-      kubectl delete job -n "$ENVNS" "${LT_ID}-1" 2>/dev/null || true
-      kubectl delete service -n "$ENVNS" "${LT_ID}-service-1" 2>/dev/null || true
-      UNBLOCK_TRIED=1
-    fi
-  fi
-
   sleep 2
 done
 [ "$LT_STATUS" = "COMPLETED" ] || {
+  echo "--- LT_STATUS=$LT_STATUS (want COMPLETED) ---"
   echo "--- TestRun CR ---"
   kubectl get testrun -n "$ENVNS" "$LT_ID" -o json 2>&1 || true
+  echo "--- describe testrun ---"
+  kubectl describe testrun -n "$ENVNS" "$LT_ID" 2>&1 || true
   echo "--- Jobs in $ENVNS ---"
   kubectl get jobs -n "$ENVNS" -o wide 2>&1 || true
-  echo "--- k6-operator logs ---"
-  kubectl -n k6-operator-system logs deploy/k6-operator-controller-manager --tail=50 2>&1 || true
+  echo "--- k6-operator logs (tail=400, looking for the Create(Service) trigger) ---"
+  kubectl -n k6-operator-system logs deploy/k6-operator-controller-manager --tail=400 2>&1 | grep -E "Failed to launch|Reconciler error|job with the name|Creating test jobs|stage =" || true
+  echo "--- events (tail=30, for pod scheduling only; Create failures emit no event) ---"
+  kubectl get events -n "$ENVNS" --sort-by=.lastTimestamp 2>&1 | tail -30 || true
   curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H
   fail "loadtest did not complete (status=$LT_STATUS)"
 }

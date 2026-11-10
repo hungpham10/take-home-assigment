@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -206,6 +207,7 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 	// Launch the run only after the transaction committed. Start failure is
 	// terminal FAILED (otherwise the reconciler polls a dead ref forever).
 	if err := d.Runner.Start(runCtx, ref, spec); err != nil {
+		slog.Error("runner start failed", "loadtest", lt.ID, "ref", ref, "err", err)
 		_ = store.LTToFailed(ctx, d.DB, lt.ID,
 			actor, "runner start failed: "+err.Error())
 		httpx.WriteError(w, http.StatusInternalServerError, "INTERNAL", "runner start failed")

@@ -101,4 +101,15 @@ Remote/registered scripts should be validated before dispatching load:
 - `GET /loadtests/{id}/events`: chuỗi transition (`from_status` → `to_status`) + `reason`, kèm `unreliable` flag (namespace `DEGRADED` sau khi run bắt đầu → `unreliable: true`, run vẫn tiếp tục).
 - **K6 metrics/summary** (pod log parse → `result_summary`, `thresholds_failed`, `result_collected_at`) là deferred sang benchmark plan (k6 OSS không có endpoint metrics mặc định; cần cài k6 + parse pod log).
 
+### Status source of truth (k8s runner)
+
+`Status()` (implemented in `pkgs/runner/k8s.go`) does **not** treat `TestRun.status.stage` as the sole source of truth — the k6-operator stage machine (`initialized → created → started → finished`) can stall without emitting events. Resolution order:
+
+1. Missing TestRun → `STOPPED` + `Missing: true`.
+2. **Job `-1` conditions (source of truth for result):** `Complete` → `COMPLETED`; `Failed`/`Error` → `FAILED`.
+3. `status.stage` mapping: `started` → `RUNNING`; `finished` → `COMPLETED`; `stopped` → `STOPPED`; `error` → `FAILED`; empty/initialization/initialized/created → `PROVISIONING`.
+4. Fallback: a pod labeled `loadtest.io/run-id=<ref>` with `runner=true` and phase `Running` → `RUNNING`.
+
+Render (`Start()`) sets `spec.paused = "false"` and `spec.initializer.disabled = "true"` so k6 runs without the 6565 starter/Service handshake, and sets explicit `runner.readinessProbe`/`runner.livenessProbe` (not the operator's 1s default) so a loaded node cannot kill the runner via probe.
+
 **Lưu ý:** `operation_id`/`method`/`path` trong `targets[]` chỉ validate/audit ở API layer — NetworkPolicy là L3/L4 (`service` + `port`) và không thể enforce L7.

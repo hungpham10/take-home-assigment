@@ -131,4 +131,16 @@ kind's default CNI (kindnet) and colima's default CNI **may not** enforce Networ
 - [`docs/architecture.md`](architecture.md) §3.7 runner-egress diagram and Open Item #2 / #6 reference this spec.
 - [`docs/namespace-management-api.md`](namespace-management-api.md) §8 and §12 open item #6 reference this spec for the derived NetworkPolicy.
 - [`docs/service-management-api.md`](service-management-api.md) §7 references this spec for dependency-derived policy.
-- [`docs/loadtest-manager-api.md`](loadtest-manager-api.md) §4 step 7 and §7 reference this spec for the run-scoped NetworkPolicy.
+- [`docs/loadtest-manager-api.md`](loadtest-manager-api.md) §4 step 7 and §7 reference this spec for the run-scoped NetworkPolicy; §6 status source of truth.
+
+## 10. Runner lifecycle vs platform status (k6-operator)
+
+The k6-operator `TestRun.status.stage` machine (`initialized → created → started → finished`) is **operator-managed** and has been observed to stall in two distinct ways:
+
+1. **CI (k8s 1.31 + Calico):** `Create(Service "<run>-service-1")` in `launchTest` is rejected, so `stage` never advances past `initialized`; the next reconcile hits the `job with the name <run>-1 exists` guard and returns an error, so the Service is never retried. `kubectl get events` emits nothing for a failed `Create` — the trigger message lives only in the operator log (`Failed to launch k6 test services`, `--tail=400`).
+2. **Local (k8s 1.37 + kindnet):** `stage` reaches `started` (Service created OK) but kubelet's default liveness probe (`timeoutSeconds:1`, period `10s`, failureThreshold `3`) times out the `:6565/v1/status` probe on a loaded 2 CPU/2 GB node and kills the runner container; the starter `curl` (no `--max-time`) hangs forever.
+
+**Consequence:** the platform must **not** treat `status.stage` as the source of truth for terminal status. `Status()` (implemented in `pkgs/runner/k8s.go`) reads the **Job `-1`** conditions first (`Complete` → COMPLETED, `Failed`/`Error` → FAILED), then maps `status.stage`, and finally falls back to a `runner=true` Running pod. Rendering `paused: "false"` + `initializer.disabled: "true"` (so k6 runs without the 6565 handshake) plus explicit `readinessProbe`/`livenessProbe` (not the operator's 1s default) removes both stall paths without touching `sources/` (k6-operator is read-only here).
+
+**NetworkPolicy is ruled out as a root cause:** NP is data-plane only; it cannot reject an API `Create(Service)`. Locally (kindnet, no enforcement) the exact platform spec runs `finished` on the first try; CI's failure is an API write rejection inside k6-operator, not a policy drop.
+
