@@ -321,3 +321,61 @@ func TestINT_NS_14_DeletedReuse(t *testing.T) {
 		t.Fatalf("reuse deleted name: %d %s, want 409", rec.Code, rec.Body.String())
 	}
 }
+
+// --- INT-NS-15: DELETE từ READY (ready_for_loadtest=true) → 202 DELETING, flag cleared ---
+// Regression cho CI run 42772143419: READY(ready=true) → DELETING vi phạm
+// chk_namespaces_ready_only_when_ready do fn_namespace_transition không clear flag.
+func TestINT_NS_15_DeleteFromReady(t *testing.T) {
+	h, db := testServer(t)
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	// create namespace + service with valid spec
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"), map[string]string{"name": "env-ready-del"})
+	if rec.Code != 201 {
+		t.Fatalf("create ns: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	// service with valid spec (validate readiness gate requires a service)
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/services", principal, map[string]any{
+		"name": "widgets", "spec": json.RawMessage(widgetSpec),
+	})
+	if rec.Code != 201 {
+		t.Fatalf("create service: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// validate (DRAFT → VALIDATING → APPLYING)
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/validate", principal, nil)
+	if rec.Code != 200 {
+		t.Fatalf("validate: %d %s", rec.Code, rec.Body.String())
+	}
+	// apply (APPLYING → DATA_LOADING → READY + ready_for_loadtest=true)
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/apply", testutil.WithKey(principal, "ka1"), nil)
+	if rec.Code != 200 {
+		t.Fatalf("apply: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, principal, nil)
+	var ready store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ready)
+	if ready.Status != "READY" || !ready.ReadyForLoadtest {
+		t.Fatalf("after apply = %+v: want READY+ready=true", ready)
+	}
+
+	// DELETE phải thành công 202 DELETING và clear ready_for_loadtest (không 409).
+	rec = testutil.Do(t, h, http.MethodDelete, base+"/"+ns.ID, principal, nil)
+	if rec.Code != 202 {
+		t.Fatalf("delete: %d %s, want 202 DELETING", rec.Code, rec.Body.String())
+	}
+	var deleted store.Namespace
+	if err := db.Model(&store.Namespace{}).Where("id = ?", ns.ID).First(&deleted).Error; err != nil {
+		t.Fatalf("load deleted ns: %v", err)
+	}
+	if deleted.Status != "DELETING" {
+		t.Errorf("status after delete = %q, want DELETING", deleted.Status)
+	}
+	if deleted.ReadyForLoadtest {
+		t.Errorf("ready_for_loadtest after delete = true, want false (invariant violation)")
+	}
+}

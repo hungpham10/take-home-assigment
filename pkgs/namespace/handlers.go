@@ -7,12 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/hungpham/loadtest-platform/pkgs/authz"
@@ -215,12 +217,38 @@ func (d Deps) deleteNamespace(w http.ResponseWriter, r *http.Request) {
 
 	actor := store.ActorJSON(p.TenantID, p.UserID, p.Role)
 	if err := store.NSToDeleting(ctx, d.DB, ns.ID, actor, "delete requested"); err != nil {
-		// INVALID_TRANSITION from the DB function (e.g. APPLYING/DATA_LOADING).
-		httpx.WriteCodeError(w, "INVALID_TRANSITION", "namespace cannot be deleted from its current status")
+		// Chỉ check_violation INVALID_TRANSITION (transition không được phép) mới
+		// map 409. Lỗi DB khác (kết nối, constraint khác, ...) → 500 INTERNAL + log,
+		// không bị mask thành lỗi của client (phòng khi fn_namespace_transition
+		// raise check_violation không mong muốn, vd ready_for_loadtest invariant).
+		code, errCode := mapDeleteNamespaceError(err)
+		if code == http.StatusInternalServerError {
+			slog.Error("namespace.delete: transition failed", "namespace", ns.ID, "err", err)
+			httpx.WriteError(w, code, errCode, "namespace delete failed")
+			return
+		}
+		httpx.WriteCodeError(w, errCode, "namespace cannot be deleted from its current status")
 		return
 	}
 	d.audit(ctx, r, p, "namespace.delete", ns.ID)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"id": ns.ID, "status": "DELETING"})
+}
+
+// mapDeleteNamespaceError classifies a transition error from fn_namespace_transition.
+// check_violation (23514) with INVALID_TRANSITION prefix → 409 (illegal transition).
+// OBJECT_NOT_FOUND (P0001) → 409. Everything else → 500 INTERNAL so real DB errors
+// (e.g. a violated readiness invariant) are not masked as client errors.
+func mapDeleteNamespaceError(err error) (int, string) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		if pgErr.Code == "23514" && strings.HasPrefix(pgErr.Message, "INVALID_TRANSITION") {
+			return http.StatusConflict, "INVALID_TRANSITION"
+		}
+		if pgErr.Code == "P0001" && strings.HasPrefix(pgErr.Message, "OBJECT_NOT_FOUND") {
+			return http.StatusConflict, "OBJECT_NOT_FOUND"
+		}
+	}
+	return http.StatusInternalServerError, "INTERNAL"
 }
 
 func (d Deps) events(w http.ResponseWriter, r *http.Request) {

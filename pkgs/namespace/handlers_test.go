@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,5 +202,43 @@ func TestINT_NS_09_10_OwnerIsolationAndAdminOverride(t *testing.T) {
 	rec = testutil.Do(t, h, http.MethodGet, base+"/"+ns.ID, adminHeaders, nil)
 	if rec.Code != 200 {
 		t.Errorf("same-tenant admin get: status = %d, want 200", rec.Code)
+	}
+}
+
+// --- INT-NS-16: DELETE từ APPLYING (không được phép) → 409 INVALID_TRANSITION ---
+// Chỉ check_violation INVALID_TRANSITION mới map 409; đây là path đúng (không mask).
+func TestINT_NS_16_DeleteFromApplying(t *testing.T) {
+	h, db := testServer(t)
+	base := "/api/loadtest/v1/namespaces"
+	principal := testutil.TenantUserHeaders(t, db, "user")
+
+	rec := testutil.Do(t, h, http.MethodPost, base, testutil.WithKey(principal, "k1"), map[string]string{"name": "env-app-del"})
+	if rec.Code != 201 {
+		t.Fatalf("create ns: %d %s", rec.Code, rec.Body.String())
+	}
+	var ns store.Namespace
+	_ = json.Unmarshal(rec.Body.Bytes(), &ns)
+
+	// create service with valid spec (validate readiness gate requires a service)
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/services", principal, map[string]any{
+		"name": "widgets", "spec": json.RawMessage(widgetSpec),
+	})
+	if rec.Code != 201 {
+		t.Fatalf("create service: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// validate → APPLYING (DRAFT → VALIDATING → APPLYING)
+	rec = testutil.Do(t, h, http.MethodPost, base+"/"+ns.ID+"/validate", principal, nil)
+	if rec.Code != 200 {
+		t.Fatalf("validate: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// DELETE từ APPLYING không có transition seed → 409 INVALID_TRANSITION
+	rec = testutil.Do(t, h, http.MethodDelete, base+"/"+ns.ID, principal, nil)
+	if rec.Code != 409 {
+		t.Fatalf("delete from APPLYING: %d %s, want 409 INVALID_TRANSITION", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "INVALID_TRANSITION") {
+		t.Errorf("delete body does not contain INVALID_TRANSITION: %s", rec.Body.String())
 	}
 }

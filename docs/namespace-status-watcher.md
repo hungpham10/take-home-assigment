@@ -101,6 +101,7 @@ APPLYING | DATA_LOADING → any permanent FAILED  → INVALID (blocking_reasons)
 APPLYING | DATA_LOADING → past apply_deadline   → DEGRADED/INVALID
 READY        → a required component not READY
                continuously > grace window (60s) → DEGRADED (ready_for_loadtest=false)
+READY        → DELETING/DEGRADED/INVALID         → ready_for_loadtest được clear trong cùng transition (fn_namespace_transition, sql/0013); chk_namespaces_ready_only_when_ready (sql/0012) là backstop.
 DEGRADED     → all READY stable > stable window (60s) → READY
 DELETING     → K8s Namespace gone               → DELETED
 ```

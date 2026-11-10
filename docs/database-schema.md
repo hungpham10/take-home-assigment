@@ -42,7 +42,7 @@ Append-only. `actor JSONB` chứa principal từ trusted headers. Index `(tenant
 
 ### tbl_namespaces (current state)
 - `status`: `DRAFT, VALIDATING, INVALID, APPLYING, DATA_LOADING, READY, DEGRADED, DELETING, DELETED` (CHECK constraint).
-- `ready_for_loadtest BOOL` — gate tạo loadtest; `version` cho ETag/If-Match.
+- `ready_for_loadtest BOOL` — gate tạo loadtest; `version` cho ETag/If-Match. `fn_namespace_transition` (sql/0013) tự clear flag khi rời READY (target ≠ READY); `chk_namespaces_ready_only_when_ready` (sql/0012) là backstop CHECK.
 - TTL: `ttl_expires_at` (NULL = không TTL) + `cleanup_policy JSONB` — reaper (Plan 13) đọc index partial.
 - Unique `(tenant_id, name)`; index `(tenant_id, status)`, `(owner_user_id, status)`.
 - Chỉ transition sang `DELETED` (soft delete) — không xóa cứng.
