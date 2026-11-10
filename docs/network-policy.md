@@ -56,7 +56,7 @@ For each load-test run (`testrun-<id>` in namespace `lt-env-<namespace_id>`):
 2. **Target ingress** — `loadtest-run-ingress-<run-id>`:
    - podSelector: target service pods (label `loadtest.io/component-id=<service_name>`, rendered from service **name**, not `service_id`).
    - ingress allow: from runner pods (`loadtest.io/run-id=<run-id>`) on `targets[].ports`.
-   - One ingress rule per target (service + port); required because the namespace `default-deny-all` denies ingress by default; without it the runner cannot reach the SUT even when egress is allowed.
+   - One ingress rule per target (service + port); required because the namespace `default-deny` denies ingress by default; without it the runner cannot reach the SUT even when egress is allowed.
 
 3. **Runner API ingress (6565)** — `loadtest-run-api-<run-id>`:
    - podSelector: runner pods (`loadtest.io/run-id=<run-id>`, `runner=true`) — only runner pods expose the k6 API on `:6565`.

@@ -81,32 +81,23 @@ Dependencies are declared on services and validated; **NetworkPolicy is configur
 
 A load test targets a **ready namespace**, explicitly declares **which API(s)** it affects, and provides the **JS file (k6 script)** that defines the test.
 
-### 2.1 `POST /api/loadtest/v1/loadtests` — Create & trigger (`202`)
+### 2.1 `POST /api/loadtest/v1/namespaces/{namespace_id}/loadtests` — Create & trigger (`201`)
 Support `Idempotency-Key` to prevent duplicate runs on client retry.
-**Preconditions:** `namespace_id` required; namespace `ready_for_loadtest=true` else **`409 Conflict`** (`NAMESPACE_NOT_READY`). `targets` must resolve to valid service operations from namespace OpenAPI. `script` (JS) is required. For approved remote/script refs, script must be `VALIDATED` per policy (async validation Job + K8s watcher) else `409 SCRIPT_NOT_VALIDATED`/`422` as finalized; inline scripts use guardrails/light validation.
+**Preconditions:** `namespace_id` (path segment) required; namespace `ready_for_loadtest=true` else **`409 Conflict`** (`NAMESPACE_NOT_READY`). Targets are **derived server-side** from each service's parsed OpenAPI operations (not client-supplied). `script_id` (validated, status `VALIDATED`) is required. For approved remote/script refs, script must be `VALIDATED` per policy (async validation Job + K8s watcher) else `409 SCRIPT_NOT_VALIDATED`/`422` as finalized; inline scripts use guardrails/light validation.
 
 **Request body (clear/required shape):**
 ```json
 {
-  "namespace_id": "ns-1a2b3c4d",
   "name": "checkout-api-stress",
-  "targets": [
-    { "service_id": "svc-order", "operation_id": "createOrder" },
-    { "service_id": "svc-order", "method": "GET", "path": "/orders/{id}" }
-  ],
-  "script": {
-    "filename": "checkout.js",
-    "content_type": "application/javascript",
-    "content": "import http from 'k6/http';\nexport default function () { /* ... */ }\n"
-  },
+  "script_id": "scr-7f2e9a1b",
   "load_config": { "vusers": 200, "duration": "10m", "timeout_minutes": 15 }
 }
 ```
-*(JS definition mandatory. Supported forms: `inline` (`filename`+`content`, size-limited), managed upload, or approved `script_ref` (e.g., S3/object ref). k6-operator has no native S3 source; approved refs are validated and staged to `configMap`/`volumeClaim` before `TestRun`. Remote refs should require async validation via K8s Job + watcher/informer before execution; see `docs/loadtest-manager-api.md` §5.)*
+*(JS definition mandatory, referenced by `script_id`; must already be `VALIDATED`. Supported forms: `inline` (staged via `/namespaces/{id}/scripts`), managed upload, or approved `script_ref` (e.g., S3/object ref). k6-operator has no native S3 source; approved refs are validated and staged to `configMap`/`volumeClaim` before `TestRun`. Remote refs should require async validation via K8s Job + watcher/informer before execution; see `docs/loadtest-manager-api.md` §5.)*
 
-**Security note:** `targets[]` is validated against namespace OpenAPI and recorded for audit, but a k6 JS script can make arbitrary requests. Implementation **must** enforce **network-level runner egress** via run-scoped NetworkPolicy in the Environment’s mapped K8s Namespace (1:1): default deny egress, allow only resolved targets/approved deps/mocks + required DNS/platform allowances. `targets[]` is **not** advisory-only. Runner uses least privilege, no platform/K8s credentials; apply script/size/resource guardrails and SSRF-safe resolution.
+**Security note:** targets are **derived server-side** from each namespace service's parsed OpenAPI operations and recorded for audit; a k6 JS script can make arbitrary requests beyond the derived list. Implementation **must** enforce **network-level runner egress** via run-scoped NetworkPolicy in the Environment's mapped K8s Namespace (1:1): default deny egress, allow only resolved targets/approved deps/mocks + required DNS/platform allowances. The run-scoped policy is the enforcement target — targets themselves are metadata/audit only. Runner uses least privilege, no platform/K8s credentials; apply script/size/resource guardrails and SSRF-safe resolution.
 
-**Response `202 Accepted`:**
+**Response `201 Created`:**
 ```json
 {
   "test_id": "lt-8f92a10b",
@@ -114,25 +105,25 @@ Support `Idempotency-Key` to prevent duplicate runs on client retry.
   "status": "PROVISIONING",
   "created_at": "2026-11-06T07:10:00Z",
   "expires_at": "2026-11-06T07:25:00Z",
-  "status_url": "/api/loadtest/v1/loadtests/lt-8f92a10b"
+  "status_url": "/api/loadtest/v1/namespaces/ns-1a2b3c4d/loadtests/lt-8f92a10b"
 }
 ```
 
 ### 2.2 Scripts (validation/staging, async)
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/loadtest/v1/scripts` | Register script metadata / upload / approved ref (tenant-scoped). Returns `script_id`, checksum/hash, status. |
-| `GET` | `/api/loadtest/v1/scripts/{script_id}` | Script metadata + validation/execution readiness status (projection-backed). |
-| `POST` | `/api/loadtest/v1/scripts/{script_id}/validate` | Start async validation (`202`). Creates isolated **K8s Job**; status reconciled via **K8s watcher/informer**. Idempotent policy. |
-| `GET` | `/api/loadtest/v1/scripts/{script_id}/validations/{validation_id}` | Validation job status/diagnostics (`PENDING_VALIDATION, VALIDATING, VALIDATED, INVALID, VALIDATION_FAILED`). |
+| `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/scripts` | Register script metadata / upload / approved ref (namespace-scoped). Returns `script_id`, checksum/hash, status. |
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/scripts/{script_id}` | Script metadata + validation/execution readiness status (projection-backed). |
+| `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/scripts/{script_id}/validate` | Start async validation (`202`). Creates isolated **K8s Job**; status reconciled via **K8s watcher/informer**. Idempotent policy. |
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/scripts/{script_id}/validations/{validation_id}` | Validation job status/diagnostics (`PENDING_VALIDATION, VALIDATING, VALIDATED, INVALID, VALIDATION_FAILED`). |
 
 ### 2.3 Load test management
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/loadtest/v1/loadtests` | List (filters `namespace_id`, `service_id`, `status`, owner admin-only). |
-| `GET` | `/api/loadtest/v1/loadtests/{id}` | Status, targets, resolved namespace/service snapshot, metrics summary. |
-| `POST` | `/api/loadtest/v1/loadtests/{id}/stop` | Force close / teardown (idempotent policy). |
-| `GET` | `/api/loadtest/v1/loadtests/{id}/logs` | Execution logs (authz-scoped, redacted). |
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/loadtests` | List (filters `service_id`, `status`, owner admin-only). |
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/loadtests/{id}` | Status, targets, resolved namespace/service snapshot, metrics summary. |
+| `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/loadtests/{id}/stop` | Force close / teardown (idempotent policy). |
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/loadtests/{id}/logs` | Execution logs (authz-scoped, redacted). |
 | (inferred) | `GET .../{id}/events`, `/metrics`, `/artifacts`, `POST .../rerun`, `DELETE .../{id}` | Timeline, telemetry, rerun, cleanup per policy. |
 
 ## 3. Mock Service (metadata in components, separate runtime)

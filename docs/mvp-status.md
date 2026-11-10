@@ -19,7 +19,7 @@ nginx (conf/nginx — có sẵn, chưa đụng)
                              ├─ pkgs/secrets        SOPS env resolver + AES-256-GCM field-level
                              └─ pkgs/store          GORM models + migration runner + Transition (Raw duy nhất)
                                     ▼
-                            PostgreSQL (9 migrations, tbl_schema_migrations tracked)
+                            PostgreSQL (13 migrations, tbl_schema_migrations tracked)
 ```
 
 ## 2. API surface (đã implement)
@@ -59,7 +59,7 @@ nginx (conf/nginx — có sẵn, chưa đụng)
 
 Health: `/health`, `/ready` (fail-closed DB), `/metrics` (prometheus).
 
-## 3. DB schema (9 migrations — nguồn chân lý `sql/`)
+## 3. DB schema (13 migrations — nguồn chân lý `sql/`)
 
 | Migration | Nội dung |
 |---|---|
@@ -109,9 +109,9 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 
 ## 7. Gap / việc còn lại
 
-1. **K8s runner thật** — `runner.Runner` interface sẵn, `newRunner()` chọn `K8sTestRunRunner` khi `RUNNER_MODE=k8s` (tạo `k6.io/v1alpha1 TestRun` qua Go client, script qua ConfigMap). Integration test qua `tests/e2e-full-deploy.sh` (kind + k6-operator) ✅ trong plan 27.
+1. **K8s runner đã implement** — `runner.Runner` interface + `K8sTestRunRunner` khi `RUNNER_MODE=k8s` (tạo `k6.io/v1alpha1 TestRun` qua Go client, script qua ConfigMap). Integration test qua `tests/e2e-full-deploy.sh` (kind + k6-operator) ✅ plan 27.
 2. **k6 perf gate chưa chạy** — cần cài k6 và chạy `tests/perf/*` ít nhất 1 lần, ghi số liệu vào README
-3. **mock-service** — phase sau (biên riêng, không dùng pkgs/controller); endpoint mock-status/mock-pools còn stub
+3. **mock-service** — binary tồn tại tại `cmds/mock-service` (data-plane riêng, không dùng pkgs/controller); endpoint mock-status/mock-pools còn stub, metadata CRUD qua namespace components.
 4. **Outbox worker** — bảng + ghi outbox đã có, chưa có dispatcher loop
 5. **Quota gate 429** — `tbl_reservation_ledger` có schema, chưa wire vào loadtest create
 6. **CodeGraph final review + bump version** (`scripts/bump.sh`) — theo AGENTS.md trước khi coi là release

@@ -53,7 +53,7 @@ Environment ns-1a2b → K8s Namespace lt-env-ns-1a2b (+ ResourceQuota/LimitRange
 │    ready = Deployment Available (condition) AND observedGeneration == metadata.generation
 │
 ├─ database db-orders (operator = cloudnative-pg)
-│    → CNPG Cluster CR (postgresql.cnpg.io/v1, tên `db-<database_id>`)
+│    → CNPG Cluster CR (postgresql.cnpg.io/v1, tên bằng database `name`, ví dụ `demo-db`)
 │    → Secret do operator sinh (`<cluster>-app`): controller CHỈ đọc TÊN secret,
 │       không đọc value; inject secretKeyRef vào Deployment SUT theo database_bindings
 │    → data_source: K8s Job (pg_restore) chạy SAU khi Cluster condition Ready,
@@ -99,8 +99,8 @@ Xem §8. Điểm chính: mock **không có public ingress**; SUT gọi mock qua 
 
 ### 3.5 NetworkPolicy
 - Render từ dependency graph đã resolve ở API layer (`GET .../network-policies`): mỗi service được phép egress tới `dependencies[]` và `database_bindings[]`; mọi traffic khác bị deny.
-- Bộ: 1 `default-deny-all` cho namespace + 1 policy per service (labels theo §1) + platform allowances (kube-dns, mock-service, ingress-nginx backend).
-- **Runner policy:** cho load-test run, render thêm 2 policy per run (egress runner → target + ingress target ← runner) chọn bởi label `loadtest.io/run-id`; spec đầy đủ tại [`docs/network-policy.md`](network-policy.md) §3. K8s runner (`RUNNER_MODE=k8s`) tạo `TestRun` (k6.io/v1alpha1) qua Go Kubernetes API (`docs/k6-operator-go-client.md`), không dùng `kubectl`.
+- Bộ: 1 `default-deny` cho namespace + 1 policy per service (labels theo §1) + platform allowances (kube-dns, mock-service, ingress-nginx backend).
+- **Runner policy:** cho load-test run, render thêm **3** policy per run (egress runner → target + ingress target ← runner + api k6-operator ns → runner TCP 6565) chọn bởi label `loadtest.io/run-id`; spec đầy đủ tại [`docs/network-policy.md`](network-policy.md) §3. K8s runner (`RUNNER_MODE=k8s`) tạo `TestRun` (k6.io/v1alpha1) qua Go Kubernetes API (`docs/k6-operator-go-client.md`), không dùng `kubectl`.
 - **Chi tiết DB / k6-operator / nguyên hạn của NetworkPolicy:** [`docs/network-policy.md`](network-policy.md) §4–§6.
 - **Thứ tự:** NetworkPolicy apply trước workload (bước 2 trong §4) để không có cửa sổ traffic không bị chặn.
 
@@ -267,14 +267,11 @@ func shouldReconcile(namespaceID string, replicaCount, replicaIndex int) bool {
 
 ### Shared SSA Field Manager
 
-If multiple pods apply, **field manager must be unique per pod** OR use leader election:
+**Single stable field manager** (`loadtest-controller`) is the canonical choice — identical manager + identical applied config converges under SSA. A per-pod field manager name fragments field ownership, and fields removed by a later apply are then no longer pruned by SSA. Concurrency between multiple controller instances is handled by **leader election** (single writer), not by per-pod manager names:
 
 ```go
-// Option 1: Unique field manager per pod (with leader election)
-fieldManager := "loadtest-controller-" + podName
-
-// Option 2: Same field manager ONLY if leader election ensures single writer
-// Current: const FieldManager = "loadtest-controller" (single writer assumed)
+// Current: const FieldManager = "loadtest-controller" (single writer, leader election gates writes)
+// Rejected: fieldManager := "loadtest-controller-" + podName  (fragments SSA field ownership / breaks prune)
 ```
 
 ### Watcher HA
@@ -313,91 +310,12 @@ Same pattern — per-namespace Lease for watcher:
 
 This is documented as **Open Item #10** in `architecture.md` and tracked for post-MVP implementation.
 
-## 11. Future Refactor: Composite Component Pattern for ApplyTree
+## 11. Future Refactor: Composite Component Pattern for ApplyTree (post-MVP, deferred)
 
 **Current implementation** (`pkgs/envreconciler/tree.go`) uses a custom `Applier` interface with three concrete types (`objectApplier`, `groupApplier`, `namespaceApplier`). The `BuildApplyTree()` function is a monolithic builder that hardcodes the apply order and component types.
 
-**Proposed refactor** — **Composite Pattern** with a `Component` interface:
+**Decision:** this refactor is **deferred** (see `architecture.md` §5.4.1 "Registry of factories — Defer"). A global `init()` registry / composite `Component` pattern is not introduced before a trigger event: a third new component kind is added (e.g. service mesh policy), or the Watcher needs the expected resource set without duplicating render logic. Until then, `BuildApplyTree()` remains the single source of truth for apply order — no hidden registry, no magic `init()` registration.
 
-```go
-type Component interface {
-    Kind() string
-    Name() string
-    Render(env *Env) []*unstructured.Unstructured
-    Apply(ctx context.Context, client k8s.Client, env *Env) error
-    Children() []Component
-    SpecHash() string
-    DesiredGeneration() int64
-    Labels() map[string]string
-}
-```
+When the trigger fires, the natural refactor is a Composite `Component` interface (`Kind/Name/Render/Apply/Children/SpecHash/Labels`) with per-kind leaf/composite types extracted from `render.go` into dedicated files (`component_networkpolicy.go`, `component_database.go`, `component_service.go`, `component_ingress.go`, `component_mockbinding.go`, `component_environment.go`), replacing `BuildApplyTree()` with a DFS `applyDFS()`.
 
-### Component Hierarchy
-
-```
-EnvironmentComponent (root composite)
-├── NetworkPolicyComponent (leaf)
-├── DatabaseComponent (leaf, polymorphic: CNPG/ECK)
-├── ServiceComponent (composite) ← "svc-order"
-│   ├── ConfigMapComponent (leaf) ← "svc-order-config"
-│   ├── SecretComponent (leaf) ← "svc-order-secret"
-│   ├── ServiceAccountComponent (leaf) ← "svc-order"
-│   ├── DeploymentComponent (leaf) ← "svc-order"
-│   ├── K8sServiceComponent (leaf) ← "svc-order"
-│   └── HPAComponent (leaf, optional) ← "svc-order"
-├── IngressComponent (leaf)
-└── MockBindingComponent (leaf)
-```
-
-### Benefits
-
-| Aspect | Current | Composite Pattern |
-|--------|---------|-------------------|
-| **New component type** | Modify `BuildApplyTree()` + `tree.go` | Add factory to registry |
-| **Service sub-resources** | Hardcoded sequence in `BuildApplyTree` | Natural children of `ServiceComponent` |
-| **Mock bindings** | Separate `BindingsFunc` hook | Just another component in tree |
-| **Render vs Apply** | Coupled in builder | Separated: `Render()` pure, `Apply()` default |
-| **Testability** | Need full tree + fake client | Test `Render()` in isolation |
-| **Extensibility** | Low | High (plugin-style registry) |
-
-### Migration Plan
-
-1. Add `component.go` with `Component` interface + `LeafComponent`/`CompositeComponent` base types
-2. Extract each component's render logic from `render.go` into dedicated files:
-   - `component_networkpolicy.go`
-   - `component_database.go` (CNPG/ECK polymorphic)
-   - `component_service.go` (composite with sub-components)
-   - `component_ingress.go`
-   - `component_mockbinding.go`
-   - `component_environment.go` (root)
-3. Create `registry.go` for component factories
-4. Replace `BuildApplyTree()` with `BuildComponentTree(env *Env) Component`
-5. Replace `ApplyTree()` with simple DFS `applyDFS()`
-6. Delete `Applier` implementations and `tree.go`
-
-### Example: Adding ServiceMeshComponent
-
-```go
-// New file: component_servicemesh.go
-func NewServiceMeshComponent(env *Env, spec ServiceMeshSpec) Component {
-    return &LeafComponent{
-        kind: "ServiceMeshPolicy",
-        name: spec.Name,
-        renderFn: func(env *Env) []*unstructured.Unstructured {
-            return []*unstructured.Unstructured{renderServiceMesh(env, spec)}
-        },
-        specHash: spec.SpecHash,
-        desiredGeneration: env.Generation,
-        labels: withComponent(baseLabels(env), spec.Name),
-    }
-}
-
-// Register in init()
-func init() { registry["servicemesh"] = NewServiceMeshComponent }
-```
-
-**Zero changes to apply logic** — just works.
-
-### Tracking
-
-This is a post-MVP refactor tracked as **Open Item** in `architecture.md`.
+This is tracked as a post-MVP Open Item in `architecture.md`.

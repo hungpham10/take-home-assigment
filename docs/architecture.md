@@ -251,7 +251,7 @@ sequenceDiagram
   B-)R: ApplyNow(ns), best-effort, active pod only
   R->>PG: read desired state
   R->>K: 1 Namespace lt-env-id + quota
-  R->>K: 2 NetworkPolicy default-deny + per-service
+  R->>K: 1 NetworkPolicy default-deny + per-service (3 run-scoped policies per load-test run: egress + ingress + api 6565)
   R->>K: 3 operator CRs (CNPG Cluster / ECK)
   R->>K: 4 restore Job if data_source
   R->>K: 5 mock bindings and Services

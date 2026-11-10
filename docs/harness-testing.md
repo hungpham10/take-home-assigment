@@ -3,7 +3,7 @@
 This document defines the **test strategy and scenario catalogue** of the load-testing platform. It has two complementary halves:
 
 - **Harness tests (§1–§8):** fault-injection and integrity tests that **prove** the platform remains **safe, consistent, and stable** under failures (crash, exception, network error, timeout, partial outage, retries, concurrency).
-- **Functional integration tests (§9–§14):** scenarios that prove the platform **behaves correctly per contract** (happy path, business rules, stable error codes, end-to-end lifecycles) across HTTP → handler → Postgres, fake K8s/runner, nginx, and kind.
+- **Functional integration tests (§9–§15):** scenarios that prove the platform **behaves correctly per contract** (happy path, business rules, stable error codes, end-to-end lifecycles) across HTTP → handler → Postgres, fake K8s/runner, nginx, and kind.
 
 Neither half is a performance test; perf has its own gate (§5, §12.4).
 
@@ -158,7 +158,7 @@ Additional gate for **functional behaviour changes** (definition of done):
 - [ ] New error branch has a stable error code and is asserted via `INT-MATRIX-03`.
 - [ ] Status changes go only through `fn_*_transition` (`INT-LT-27` green).
 - [ ] Failure semantics touched (retry, crash, concurrency) → harness case added/updated in §2.
-- [ ] Column "status" in `docs/mvp-status.md` updated; known gaps in §14 updated.
+- [ ] Column "status" in `docs/mvp-status.md` updated; known gaps in §15 updated.
 
 ## 7. Non-goals (MVP harness)
 
@@ -195,7 +195,7 @@ Implemented per `plans/16-harness-testing-integrity.md` "Implementation scope 20
 
 # Phần II — Functional integration tests
 
-Các mục §9–§14 bên dưới là catalogue kịch bản **functional integration** (viết bằng tiếng Việt, đồng bộ với `mvp-status.md` và `k8s-orchestration.md`). Số mục §1–§8 phía trên được giữ nguyên để không làm gãy tham chiếu từ các tài liệu khác (`k8s-orchestration.md`, `namespace-status-watcher.md`, `architecture.md`).
+Các mục §9–§15 bên dưới là catalogue kịch bản **functional integration** (viết bằng tiếng Việt, đồng bộ với `mvp-status.md` và `k8s-orchestration.md`). Số mục §1–§8 phía trên được giữ nguyên để không làm gãy tham chiếu từ các tài liệu khác (`k8s-orchestration.md`, `namespace-status-watcher.md`, `architecture.md`).
 
 ## 9. Nguyên tắc & hạ tầng test dùng chung
 
@@ -262,7 +262,7 @@ Ba test "sinh tự động" bắt lỗi quên test khi thêm route/transition:
 
 ## 11. Kịch bản integration theo domain
 
-Ký hiệu: ☐ = chưa xác nhận đã có test (xem §14.1); 🔜 = chưa viết được vì tính năng chưa có.
+Ký hiệu: ☐ = chưa xác nhận đã có test (xem §15.1); 🔜 = chưa viết được vì tính năng chưa có.
 
 ### 11.1 Admin & Auth (`pkgs/adminapi`, `pkgs/authz`, `pkgs/secrets`)
 
@@ -442,6 +442,7 @@ Dùng `pkgs/k8s` fake (ghi lại lời gọi theo thứ tự, mô phỏng status
 | `INT-LOOP-08` | `network_policy`: thiếu một policy / `spec_hash` lệch (drift) | Phase `FAILED`/`PROGRESSING` + reason, namespace không READY |
 | `INT-LOOP-09` | Xoá Environment | `READY→DELETING`; K8s Namespace biến mất → Watcher ghi `DELETED` |
 | `INT-LOOP-10` | 4 transition bổ sung của migration 0011 (`APPLYING→READY`, `APPLYING→DEGRADED`, `DATA_LOADING→INVALID`, `DEGRADED→READY`) | Mỗi cái được đi qua ít nhất một lần (bổ sung cho `INT-MATRIX-02`) |
+
 | `INT-LOOP-11` | Watcher ghi `status_observed_at` mỗi lần reconcile/resync | Heartbeat tăng; dừng Watcher → xem `WATCH-05` / `INT-LT-03` |
 | `INT-LOOP-12` | Event của GVR thuộc namespace khác (label khác `managed-by`) | Bị bỏ qua, không enqueue |
 
@@ -550,6 +551,31 @@ Ngưỡng đã định nghĩa: `control-plane.js` (40 rps đọc, p95 < 100ms), 
 | `INT-MIG-03` | Nâng cấp từ snapshot cũ có dữ liệu (trước 0007) | Secrets bị strip, dữ liệu khác nguyên vẹn; token cũ vẫn introspect được |
 | `INT-MIG-04` | Hai instance chạy migration đồng thời | Chỉ một thắng (advisory lock), không áp trùng |
 | `INT-MIG-05` | File migration đã áp bị sửa nội dung (checksum lệch) | Runner từ chối, báo rõ |
+
+## 13. Cross-references & quick ID index
+
+Bảng tra cứu nhanh các ID tham chiếu xuyên phần I (harness, §1–§8) và phần II (functional integration, §9–§15), để không gãy liên kết khi thêm mục mới.
+
+| ID | Ý nghĩa | Nơi định nghĩa |
+|---|---|---|
+| `DB-TXN-*` | SQL/metadata integrity faults | §2.1 |
+| `API-*` | API/application integrity harness | §2.2 |
+| `RUN-*` | Runner/K8s/reconciliation harness | §2.3 |
+| `WATCH-01..06` | Namespace status watcher harness | §2.3.1 |
+| `EXT-*/MOCK-*` | External dependency / data-plane faults | §2.4 |
+| `NGX-*` | Nginx trust-boundary harness | §2.5 |
+| `INT-ADM-*` | Admin & Auth integration | §11.1 |
+| `INT-NS-*` | Namespace lifecycle integration | §11.2 |
+| `INT-SVC-*`/`INT-DB-*`/`INT-DS-*` | Service/OpenAPI/Database/Dataset integration | §11.3 |
+| `INT-SCR-*`/`INT-LT-*` | Script & Loadtest integration | §11.4 |
+| `INT-ENV-*`/`INT-LOOP-*` | Env Reconciler & Status Watcher | §11.5 |
+| `INT-MATRIX-01/02/03` | Cross-cutting matrix (route×principal, transitions, error envelope) | §10 |
+| `INT-K8S-*` | K8s harness (cluster) | §12.2 |
+| `INT-NGX-*` | Nginx integration (compose) | §12.1 |
+| `E2E-*` | E2E smoke | §12.3 |
+| `E2E-FD-*` | E2E full deploy | §12.4 |
+| `PERF-*` | Perf | §12.5 |
+| `INT-MIG-*` | Migration | §12.6 |
 
 ## 14. Chạy test & CI
 

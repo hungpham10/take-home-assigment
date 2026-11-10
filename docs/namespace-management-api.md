@@ -80,7 +80,8 @@ Namespace (environment definition)
     "network_policy": { "applied": true, "blocking": [] },
     "mocks": { "required": false, "ready": 0, "total": 0, "blocking": [] }
   },
-  "blocking_reasons": []
+  "blocking_reasons": [],
+  "ready": true
 }
 ```
 
@@ -137,7 +138,7 @@ Namespace (environment definition)
     "image": "registry.example/orders:1.2.3",
     "replicas": 1,
     "port": 8080,
-    "health_path": "/health"
+    "health": { "path": "/health", "port": 8080 }
   },
   "openapi": {
     "format": "openapi",
@@ -176,7 +177,7 @@ Namespace (environment definition)
   "engine": "postgres",
   "operator": "cloudnative-pg",
   "version": "16",
-  "config": { "storage_size": "2Gi", "instances": 1 },
+  "config": { "storage_gb": 2, "node_count": 1 },
   "data_source": {
     "dataset_id": "ds-orders-seed-v3",
     "mode": "restore",
@@ -232,26 +233,17 @@ Ingress rules must target valid `service_id`/ports in the namespace.
 
 ## 9. Load-test gate (integration)
 
-Load-test create (`POST /api/loadtest/v1/loadtests`, `docs/loadtest-manager-api.md`) **MUST**:
-- reference `namespace_id` that is `ready_for_loadtest=true` (else **`409 Conflict`**, `NAMESPACE_NOT_READY`);
-- specify explicit `targets[]` resolved from namespace service OpenAPI operations (e.g., `service_id` + `operation_id` or `method`+`path`);
-- include required **JS script** definition/file (k6 script, e.g., `filename` + `content` or approved ref).
+Load-test create (`POST /api/loadtest/v1/namespaces/{namespace_id}/loadtests`, `docs/loadtest-manager-api.md`) **MUST**:
+- reference `namespace_id` (path segment) that is `ready_for_loadtest=true` (else **`409 Conflict`**, `NAMESPACE_NOT_READY`);
+- omit `targets[]` from the request body — targets are **derived server-side** from each service's parsed OpenAPI operations;
+- include required **`script_id`** (validated, status `VALIDATED`) referencing a k6 script definition (see `docs/loadtest-manager-api.md`).
 
 **Conceptual example:**
 ```json
-POST /api/loadtest/v1/loadtests
+POST /api/loadtest/v1/namespaces/ns-1a2b3c4d/loadtests
 {
-  "namespace_id": "ns-1a2b3c4d",
   "name": "checkout-api-stress",
-  "targets": [
-    { "service_id": "svc-order", "operation_id": "createOrder" },
-    { "service_id": "svc-order", "method": "GET", "path": "/orders/{id}" }
-  ],
-  "script": {
-    "filename": "checkout.js",
-    "content_type": "application/javascript",
-    "content": "import http from 'k6/http';\nexport default function () { /* ... */ }\n"
-  },
+  "script_id": "scr-7f2e9a1b",
   "load_config": { "vusers": 200, "duration": "10m", "timeout_minutes": 15 }
 }
 ```

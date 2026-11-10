@@ -42,8 +42,8 @@ Each database is a namespace component with a stable `database_id`. Services ref
   "operator": "cloudnative-pg",
   "version": "16",
   "config": {
-    "storage_size": "2Gi",
-    "instances": 1,
+    "storage_gb": 2,
+    "node_count": 1,
     "parameters": {}
   },
   "init_script_ref": "s3://seeds/orders.sql",

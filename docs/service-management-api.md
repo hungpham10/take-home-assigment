@@ -56,9 +56,12 @@ Invalid or missing required OpenAPI fails validation (`422`) and blocks namespac
     "image": "registry.example/orders:1.2.3",
     "replicas": 1,
     "port": 8080,
-    "health_path": "/health",
+    "health": { "path": "/health", "port": 8080 },
     "env": [{ "name": "LOG_LEVEL", "value": "info" }]
   },
+  "config_map": { "LOG_FORMAT": "json" },
+  "service_account": true,
+  "hpa": { "min_replicas": 1, "max_replicas": 5, "cpu_target_percent": 70 },
   "openapi": {
     "format": "openapi",
     "version": "3.0.3",

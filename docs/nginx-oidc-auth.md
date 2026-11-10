@@ -55,7 +55,7 @@ For load-test resources stored/managed by the service:
 - **Ownership**: persist `tenant_id` + `owner_user_id` (from `X-User-Id`) on each load-test/session/run record. Default queries filter by `tenant_id` AND `owner_user_id`.
 - **Admin override**: if the authenticated principal has the **admin role** (normalized from `X-User-Role` / introspection result / configured admin group), allow read/manage across owners **within the same tenant** (and only where appropriate). Never bypass tenant isolation unless explicitly designed.
 - **Never trust client-supplied owner IDs** for scoping; derive identity/role only from nginx-injected headers at the trusted boundary.
-- Return `403` for authenticated but unauthorized access (another user’s resource, non-admin), `401` for missing/invalid auth (handled primarily by nginx; backend should still fail closed if headers absent on protected routes).
+- Return `404` for authenticated access to another user’s resource (anti-existence-leak), `403` only for genuinely unauthorized actions, `401` for missing/invalid auth (handled primarily by nginx; backend should still fail closed if headers absent on protected routes).
 
 ## Implications for Go + go-chi MVP (POC locked)
 - **POC uses OIDC/nginx auth** (`conf/nginx`): nginx authenticates (OIDC session/JWT/`abt_` introspection as applicable) and reflects identity/permissions from OIDC claims/introspection into trusted headers.

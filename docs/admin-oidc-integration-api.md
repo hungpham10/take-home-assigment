@@ -138,7 +138,7 @@ These endpoints support “quản lý chung chung về mặt tài khoản” and
 |---|---|---|
 | `POST` | `/api/admin/v1/users/{user_id}/tokens` | Issue platform base token (`abt_`) for a user/principal; return token once. |
 | `GET` | `/api/admin/v1/users/{user_id}/tokens` | List token metadata (never return secret values). |
-| `DELETE` | `/api/admin/v1/users/{user_id}/tokens/{token_id}` | Revoke token; introspection must return inactive. |
+| `POST` | `/api/admin/v1/tokens/{token_id}/revoke` | Revoke token (self-or-admin); introspection must return inactive. |
 | `POST` | `/api/admin/v1/token/introspect` | Nginx/internal introspection (see §3.3). |
 
 ### 4.4 Audit & health (inferred)
