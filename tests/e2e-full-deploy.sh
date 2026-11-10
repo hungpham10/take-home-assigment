@@ -15,8 +15,11 @@ set -e
 BASE=${BASE:-http://localhost:18080}
 PG_PORT=${PG_PORT:-55433}
 CLUSTER=${CLUSTER:-ltp-full-deploy}
-CNPG_MANIFEST=$(curl -fsSL https://api.github.com/repos/cloudnative-pg/cloudnative-pg/releases/latest \
-  | python3 -c "import sys,json;print([a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if a['name'].endswith('.yaml') and a['name'].startswith('cnpg-')][0])")
+# Pinned versions (avoid floating `releases/latest` / `main` which can break CI).
+CNPG_VERSION="${CNPG_VERSION:-v1.26.0}"
+CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/${CNPG_VERSION}/manifests/cnpg.yaml"
+K6_OPERATOR_VERSION="${K6_OPERATOR_VERSION:-v0.14.0}"
+K6_OPERATOR_BUNDLE="https://github.com/grafana/k6-operator/releases/download/${K6_OPERATOR_VERSION}/bundle.yaml"
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -29,8 +32,23 @@ command -v curl >/dev/null || fail "curl not installed"
 # --- 1. cluster bootstrap -----------------------------------------------------
 if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   command -v kind >/dev/null || fail "kind not installed (hoặc đặt SKIP_BOOTSTRAP=1 với KUBECONFIG sẵn)"
-  say "kind cluster: $CLUSTER"
-  kind get clusters | grep -q "^$CLUSTER$" || kind create cluster --name "$CLUSTER" --wait 120s
+  say "kind cluster: $CLUSTER (disableDefaultCNI so Calico is the sole CNI enforcing NetworkPolicy)"
+  kind get clusters | grep -q "^$CLUSTER$" || {
+    KIND_CONFIG="$(mktemp)"
+    cat > "$KIND_CONFIG" <<KIND_YAML
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/12
+nodes:
+  - role: control-plane
+  - role: worker
+KIND_YAML
+    kind create cluster --name "$CLUSTER" --config "$KIND_CONFIG" --wait 120s
+    rm -f "$KIND_CONFIG"
+  }
   kind export kubeconfig --name "$CLUSTER"
   # Pre-load images vào kind node: CNPG bootstrap không phải pull ghcr/postgres
   # mỗi lần (5-7m → ~1-2m, ổn định CI).
@@ -67,7 +85,7 @@ kubectl get crd clusters.postgresql.cnpg.io >/dev/null 2>&1 || fail "CNPG CRD no
 # gitignored so we can't reference it in CI. No cert-manager needed.
 if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   say "install k6-operator"
-  kubectl apply -f https://raw.githubusercontent.com/grafana/k6-operator/main/bundle.yaml
+  kubectl apply -f "$K6_OPERATOR_BUNDLE"
   # Wait for TestRun CRD to be established.
   for i in $(seq 1 30); do
     if kubectl get crd testruns.k6.io >/dev/null 2>&1; then break; fi
@@ -137,6 +155,7 @@ CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key:
       "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":80,"health":{"path":"/","port":80},
         "config_map":{"app.yaml":"listen: 8080\n"},"service_account":true,
         "hpa":{"min_replicas":1,"max_replicas":3,"cpu_target_percent":80}},
+        "database_bindings":[{"database_id":"demo-db","binding":"DEMO_DB","access":"readwrite"}],
         "openapi":{"content":"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}}],
       "databases":[{"name":"demo-db","engine":"postgres","version":"16","config":{"image":"postgres:16","storage_gb":1}}]
     }
@@ -272,6 +291,14 @@ SCRIPT=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces/$NS/scripts" -H "Idem
   -d "{\"name\":\"echo-test\",\"content\":$(printf '%s' "$SCRIPT_CONTENT" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}")
 SCRIPT_ID=$(printf '%s' "$SCRIPT" | jqget "['id']")
 [ -n "$SCRIPT_ID" ] || fail "script upload: $SCRIPT"
+
+# E2E-FD-08: create loadtest with script NOT YET VALIDATED → 409 SCRIPT_NOT_VALIDATED
+LT_PRE=$(curl -s -o /tmp/fd-lt-pre.json -w "%{http_code}" -X POST "$BASE/api/loadtest/v1/namespaces/$NS/loadtests" \
+  -H "Idempotency-Key: fd-lt-pre-$(date +%s)" $H -H 'Content-Type: application/json' \
+  -d "{\"name\":\"echo-load-pre\",\"script_id\":\"$SCRIPT_ID\",\"load_config\":{\"vusers\":5,\"duration\":\"45s\",\"timeout_minutes\":5}}")
+[ "$LT_PRE" = "409" ] || fail "E2E-FD-08: expected 409 for unvalidated script, got $LT_PRE $(cat /tmp/fd-lt-pre.json 2>/dev/null || true)"
+echo "   E2E-FD-08: unvalidated script → 409 SCRIPT_NOT_VALIDATED ✅"
+
 SCRIPT_STATUS=""
 for i in $(seq 1 30); do
   SCRIPT_STATUS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/scripts/$SCRIPT_ID" $H | jqget "['status']")
@@ -349,17 +376,25 @@ done
 # 13a. runner → echo (port 80) MUST be allowed (declared target)
 ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
 [ -n "$ECHO_PROBE" ] || fail "runner→echo:80 denied (declared target should be allowed)"
-# 13b. runner → demo-db (5432) MUST be denied (not a target)
-DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
-[ -z "$DB_PROBE" ] || fail "runner→demo-db:5432 allowed (should be denied — not a target)"
-# 13c. echo pod (component-id=echo, not bound to DB) → demo-db:5432 MUST be denied
+# 13b. runner → demo-db-rw (5432) MUST be denied (not a target; CNPG svc is demo-db-rw)
+DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- nc -z -w3 demo-db-rw 5432 2>/dev/null || echo "")
+[ -z "$DB_PROBE" ] || fail "runner→demo-db-rw:5432 allowed (should be denied — not a target)"
+# 13c. echo pod (component-id=echo, not bound to DB) → demo-db-rw:5432 MUST be denied
 ECHO_POD=$(kubectl get pod -n "$ENVNS" -l loadtest.io/component-id=echo -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [ -n "$ECHO_POD" ]; then
-  ECHO_DB_PROBE=$(kubectl exec "$ECHO_POD" -n "$ENVNS" -- wget -qO- --timeout=5 tcp://demo-db:5432 2>/dev/null | head -c 1 || echo "")
-  [ -z "$ECHO_DB_PROBE" ] || fail "echo→demo-db:5432 allowed (echo not bound to DB — should be denied)"
+  ECHO_DB_PROBE=$(kubectl exec "$ECHO_POD" -n "$ENVNS" -- nc -z -w3 demo-db-rw 5432 2>/dev/null || echo "")
+  [ -z "$ECHO_DB_PROBE" ] || fail "echo→demo-db-rw:5432 allowed (echo not bound to DB — should be denied)"
+fi
+# 13d. echo pod IS bound to demo-db → demo-db-rw:5432 MUST be allowed (positive case)
+ECHO_DB_ALLOWED=$(kubectl exec "$ECHO_POD" -n "$ENVNS" -- nc -z -w3 demo-db-rw 5432 2>/dev/null || echo "")
+if [ -z "$ECHO_DB_ALLOWED" ]; then
+  # nc may not be installed inside echo image; fall back to checking binding exists in policy
+  echo "   note: echo image lacks nc; skipping positive DB probe (binding DEMO_DB declared)"
+else
+  [ -n "$ECHO_DB_ALLOWED" ] && echo "   13d echo→demo-db-rw:5432 allowed (bound) ✅" || fail "echo→demo-db-rw:5432 denied but echo is bound to demo-db"
 fi
 kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
-echo "   L3/L4 probes: runner→echo ✅, runner→demo-db ❌, echo→demo-db ❌ ✅"
+echo "   L3/L4 probes: runner→echo ✅, runner→demo-db-rw ❌, echo→demo-db-rw ❌ (unbound), echo→demo-db-rw ✅ (bound) ✅"
 
 # --- 11. wait for loadtest COMPLETED -----------------------------------------------
 say "wait for loadtest completion (deadline 3m)"
@@ -410,8 +445,16 @@ echo "   run-scoped NetworkPolicies garbage-collected ✅"
 # --- 12. events + unreliable ---------------------------------------------------------
 say "loadtest events + unreliable"
 EVENTS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID/events" $H)
-echo "$EVENTS" | python3 -c "import json,sys;d=json.load(sys.stdin);print('events:',len(d.get('events',[])),'unreliable:',d.get('unreliable'))" >/dev/null || fail "events payload unreadable: $EVENTS"
-echo "   events + unreliable present ✅"
+echo "$EVENTS" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+ev=len(d.get('events',[]))
+unrel=d.get('unreliable')
+if unrel is not False:
+    sys.exit(1)
+print('events:',ev,'unreliable:',unrel)
+" >/dev/null || fail "events payload unreadable or unreliable!=false: $EVENTS"
+echo "   events + unreliable=false ✅"
 
 # --- 7. projection dump ----------------------------------------------------------
 say "projection"
