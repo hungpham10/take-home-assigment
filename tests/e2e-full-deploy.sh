@@ -127,6 +127,8 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   curl -sf http://localhost:5556/dex/.well-known/openid-configuration >/dev/null 2>&1 || fail "dex discovery không sẵn sàng"
   kubectl -n ltp-system port-forward svc/postgres 5432:5432 >/tmp/ltp-full-deploy-pf-pg.log 2>&1 &
   PF_PG=$!
+  # cho port-forward ổnsten trước khi curl health (tránh connection refused spurio)
+  sleep 3
   # đợi postgres pod xuất hiện
   PG_POD=""
   for i in $(seq 1 30); do
@@ -233,8 +235,11 @@ if [ -z "${H:-}" ]; then
 fi
 
 say "create namespace + database + echo service (create-with-spec, 1 call)"
-CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key: fd-ns-$(date +%s)" \
-  $H -H 'Content-Type: application/json' -d '{
+# retry vì kubectl port-forward có thể mất kết nối sau khi health check passa
+CREATE=""
+for i in $(seq 1 5); do
+  if CREATE=$(curl -s --retry 3 --retry-connrefused --retry-delay 2 -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key: fd-ns-$(date +%s)" \
+    $H -H 'Content-Type: application/json' -d '{
     "name":"full-deploy-env",
     "spec":{
       "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":80,"health":{"path":"/","port":80},
@@ -244,7 +249,13 @@ CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key:
         "openapi":{"content":"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}}],
       "databases":[{"name":"demo-db","engine":"postgres","version":"16","config":{"image":"postgres:16","storage_gb":1}}]
     }
-  }')
+  }') && [ -n "$CREATE" ]; then
+    break
+  fi
+  echo "create namespace retry $i/5" >&2
+  sleep 2
+done
+[ -n "$CREATE" ] || fail "create-with-spec (connection refused after retries)"
 echo "$CREATE" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['namespace']['id']" >/dev/null 2>&1 || fail "create-with-spec: $CREATE"
 NS=$(echo "$CREATE" | jqget "['namespace']['id']")
 ENVNS="lt-env-$NS"
