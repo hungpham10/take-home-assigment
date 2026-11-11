@@ -295,13 +295,16 @@ SCRIPT_ID=$(printf '%s' "$SCRIPT" | jqget "['id']")
 [ -n "$SCRIPT_ID" ] || fail "script upload: $SCRIPT"
 
 # E2E-FD-08: create loadtest with script NOT YET VALIDATED → 409 SCRIPT_NOT_VALIDATED
-# Deterministic: upload script nội dung bắt đầu bằng byte NUL → validator đánh INVALID
-# (Structural: content[0]==0; k6 inspect cũng từ chối). Poll tới INVALID rồi dùng làm
-# script_id cho POST /loadtests → mong đợi 409. Không phụ thuộc timing validate async.
-BAD_SCRIPT_CONTENT=$(printf '\0export default function() { http.get("http://echo:80/"); }')
+# Deterministic: upload script invalid cho CẢ hai validator:
+#   - Structural (không có k6): nội dung bắt đầu bằng byte NUL → content[0]==0
+#   - LocalK6 (có k6): k6 inspect từ chối invalid JS → parse error
+#   → status INVALID bất kể validator nào chạy. Poll tới INVALID rồi dùng làm
+#   script_id cho POST /loadtests → mong đợi 409. Không phụ thuộc timing validate async.
+# Sinh JSON bằng python3 để truyền đáng tin cậy byte NUL (tránh shell printf '%s'
+# cắt chuỗi tại byte NUL).
+BAD_SCRIPT_JSON=$(python3 -c 'import json;print(json.dumps({"name":"echo-bad","content":"\x00this is not valid k6 script"}))')
 BAD_SCRIPT=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces/$NS/scripts" -H "Idempotency-Key: fd-badscript-$(date +%s)" \
-  $H -H 'Content-Type: application/json' \
-  -d "{\"name\":\"echo-bad\",\"content\":$(printf '%s' "$BAD_SCRIPT_CONTENT" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}")
+  $H -H 'Content-Type: application/json' -d "$BAD_SCRIPT_JSON")
 BAD_SCRIPT_ID=$(printf '%s' "$BAD_SCRIPT" | jqget "['id']")
 [ -n "$BAD_SCRIPT_ID" ] || fail "bad script upload: $BAD_SCRIPT"
 
