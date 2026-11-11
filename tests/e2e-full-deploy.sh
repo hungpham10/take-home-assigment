@@ -118,6 +118,12 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   PF_SERVE=$!
   kubectl -n ltp-system port-forward svc/dex 5556:5556 >/tmp/ltp-full-deploy-pf-dex.log 2>&1 &
   PF_DEX=$!
+  # đợi Dex discovery sẵn sàng (tránh 302 khi mint token)
+  for i in $(seq 1 30); do
+    if curl -sf http://localhost:5556/dex/.well-known/openid-configuration >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
+  curl -sf http://localhost:5556/dex/.well-known/openid-configuration >/dev/null 2>&1 || fail "dex discovery không sẵn sàng"
   kubectl -n ltp-system port-forward svc/postgres 5432:5432 >/tmp/ltp-full-deploy-pf-pg.log 2>&1 &
   PF_PG=$!
   # đợi postgres pod xuất hiện
