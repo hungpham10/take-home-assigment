@@ -10,6 +10,8 @@ LTP_DEX_CLIENT_ID, LTP_DEX_CLIENT_SECRET, LTP_DEX_USER, LTP_DEX_PASSWORD.
 import os
 import re
 import sys
+import http.cookiejar
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -24,7 +26,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
         return None
 
-opener = urllib.request.build_opener(NoRedirect)
+
+opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+)
 
 FORM_RE = re.compile(r"(?is)<form[^>]*action=\"([^\"]+)\"")
 INPUT_RE = re.compile(r"(?is)<input\b[^>]*>")
@@ -32,15 +37,28 @@ ATTR_RE = lambda a: re.compile(r"(?is)\b" + a + r"=\"([^\"]*)\"")
 
 
 def get(url):
-    with opener.open(url) as r:
-        return r.status, dict(r.headers), r.read().decode()
+    try:
+        with opener.open(url) as r:
+            return r.status, dict(r.headers), r.read().decode()
+    except urllib.error.HTTPError as e:
+        # Dex trả 302 redirect (chưa có session → form login, hoặc redirect về
+        # callback sau khi POST credentials). Không raise: main() đọc header
+        # Location và tự theo dõi redirect.
+        if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
+            return e.code, dict(e.headers), ""
+        raise
 
 
 def post(url, data):
     body = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
-    with opener.open(req) as r:
-        return r.status, dict(r.headers), r.read().decode()
+    try:
+        with opener.open(req) as r:
+            return r.status, dict(r.headers), r.read().decode()
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
+            return e.code, dict(e.headers), ""
+        raise
 
 
 def parse_form(html):
