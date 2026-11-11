@@ -36,7 +36,7 @@ For protected routes, nginx authenticates (OIDC session / Bearer JWT / `abt_` in
 | Header | Meaning | Required |
 |---|---|---|
 | `X-Tenant-Id` | Resolved tenant identifier | Yes (protected routes) |
-| `X-User-Id` | Authenticated subject (`sub` / introspected user id). `public` only for explicitly public routes. | Yes (protected routes) |
+| `X-User-Id` | Authenticated subject: local `tbl_users.id` (UUID, from `abt_` introspection / legacy header mode) **or** the raw OIDC `sub`. `public` only for explicitly public routes. See §2.1.1. | Yes (protected routes) |
 | `X-User-Role` | Role claim when available (e.g., Bearer-JWT path in current nginx pattern) | No, but used for admin normalization |
 | `X-Client-Id`, `X-Audience-Id` | JWT `azp`/`aud` when available | Optional |
 | `X-User-Email` / `X-Auth-User-Id` / `X-Auth-Email` | Convenience claims in some flows (e.g., docs/OIDC) | Optional |
@@ -45,6 +45,28 @@ For protected routes, nginx authenticates (OIDC session / Bearer JWT / `abt_` in
 - Define a **single normalized rule**: `is_admin = true` when the principal has an admin role.
 - **Canonical mapping (to finalize in implementation):** accept normalized admin from `X-User-Role` (e.g., `admin`) and/or tenant/account role membership resolved server-side (e.g., introspection result, user-role table, configured admin group/claim). Do not rely on client payload.
 - **Known nginx gap (prod/edge path):** `X-User-Role` propagation is not uniform across all auth paths in the current `conf/nginx` pattern (Bearer-JWT sets it; OIDC cookie/id-token and `abt_` introspection may not). `/api/admin/v1` account/role/introspection design must provide enough data to normalize admin consistently; align `conf/nginx` maps/vhosts if header propagation is extended (validate with `scripts/nginx.sh` / `nginx -t`). Treat historical `/api/admin/*` + `oidc_name=m2m` notes in config as caveats — **enforce RBAC in Go**.
+
+### 2.1.1 Resolving `X-User-Id` to a local user (OIDC `sub` is opaque)
+
+OIDC `sub` is **not** a local user id and cannot be treated as one:
+
+- Dex (v2.41) always emits `sub = base64url(protobuf{1: userID, 2: connectorID})`
+  (`server/oauth2.go:genSubject`) — there is no setting to disable it, so even a
+  UUID-shaped `staticPasswords[].userID` arrives wrapped in protobuf+base64.
+- `tbl_namespaces.owner_user_id` is `UUID REFERENCES tbl_users(id)`, so the raw `sub`
+  fails at the first write (`invalid input syntax for type uuid`).
+
+Resolution rule enforced by `authz.RequirePrincipalWithRole(db)` (see `pkgs/authz/identity.go`,
+plan 37):
+
+| `X-User-Id` value | Action |
+|---|---|
+| valid UUID | used as-is (legacy header mode, access tokens, internal callers) |
+| anything else | looked up in `tbl_user_external_identities` (`subject`) joined to `tbl_users` **scoped to `X-Tenant-Id`**; the resulting `tbl_users.id` becomes the principal |
+| lookup miss | `401 identity not recognized` (fail closed — no auto-provisioning) |
+
+Populating the mapping (`tbl_user_external_identities.issuer/subject` → user) is an admin
+provisioning concern; the E2E seeds it from the `sub` of the freshly minted token.
 
 ### 2.3 Authorization rules
 - **Fail closed:** missing required identity headers on a protected route → `401`.

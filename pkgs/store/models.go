@@ -106,6 +106,23 @@ func (UserRole) TableName() string { return "tbl_user_roles" }
 // BeforeCreate fills the UUID primary key app-side.
 func (UserRole) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
 
+// UserExternalIdentity links an IdP subject to a local user
+// (tbl_user_external_identities, plan 37). OIDC `sub` is opaque, so this is the
+// only bridge to tbl_users.id.
+type UserExternalIdentity struct {
+	ID        string    `gorm:"column:id;primaryKey;type:uuid" json:"id"`
+	UserID    string    `gorm:"column:user_id" json:"user_id"`
+	Issuer    string    `gorm:"column:issuer" json:"issuer"`
+	Subject   string    `gorm:"column:subject" json:"subject"`
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+}
+
+// TableName maps UserExternalIdentity to its PostgreSQL table.
+func (UserExternalIdentity) TableName() string { return "tbl_user_external_identities" }
+
+// BeforeCreate fills the UUID primary key app-side.
+func (UserExternalIdentity) BeforeCreate(db *gorm.DB) error { return beforeCreateUUID(db) }
+
 // AccessToken is a hashed abt_ service token (tbl_access_tokens).
 type AccessToken struct {
 	ID             string     `gorm:"column:id;primaryKey;type:uuid" json:"id"`

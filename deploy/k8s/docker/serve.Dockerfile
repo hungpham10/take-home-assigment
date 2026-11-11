@@ -28,7 +28,10 @@ RUN cd /tmp && \
     git clone --depth 1 https://github.com/hamishforbes/lua-ffi-zlib.git && cp -av lua-ffi-zlib/lib/ffi-zlib.lua /usr/local/openresty/lualib/ && rm -rf lua-ffi-zlib
 
 RUN useradd nginx && \
-    mkdir -p /var/run/axum /var/log/nginx /app/secrets /app/scripts && \
+    # /var/run/axum là FILE socket (không phải thư mục) — controller tự tạo
+    # parent dir + socket (pkgs/listener). Tạo sẵn path dạng thư mục ở đây sẽ
+    # làm bind/remove stale socket fail.
+    mkdir -p /var/log/nginx /app/secrets /app/scripts && \
     chown -R nginx:nginx /var/log/nginx
 
 RUN mkdir -p /etc/supervisor/conf.d

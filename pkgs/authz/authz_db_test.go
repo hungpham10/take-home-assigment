@@ -102,3 +102,66 @@ func TestRequirePrincipalWithRole(t *testing.T) {
 		t.Errorf("successful calls = %d, want 2", calls)
 	}
 }
+
+// TestRequirePrincipalWithRoleResolvesExternalSubject covers plan 37: nginx
+// forwards the OIDC `sub`, which is opaque (Dex: base64url protobuf). The
+// middleware must map it to tbl_users.id; unknown subjects fail closed.
+func TestRequirePrincipalWithRoleResolvesExternalSubject(t *testing.T) {
+	db := testutil.TestDB(t)
+
+	tenant := store.Tenant{Name: "B", Slug: "bz" + time.Now().Format("150405.000000000"), Status: "ACTIVE"}
+	if err := db.Create(&tenant).Error; err != nil {
+		t.Fatal(err)
+	}
+	user := store.User{TenantID: tenant.ID, Email: "sub-" + tenant.ID + "@x.co", DisplayName: "U"}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&store.UserRole{UserID: user.ID, Role: "admin"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Opaque subject shaped exactly like Dex emits it (base64url protobuf).
+	// Suffix keeps the row unique — the test DB is shared across runs.
+	subject := "CiQxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTESBWxvY2Fs" + time.Now().Format("150405.000000000")
+	if err := db.Create(&store.UserExternalIdentity{
+		UserID: user.ID, Issuer: "http://dex:5556/dex", Subject: subject,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var got authz.Principal
+	h := authz.RequirePrincipalWithRole(db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = authz.PrincipalOf(r)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Opaque subject → resolved to the local UUID, DB role applied.
+	if rec := run(t, h, tenant.ID, subject, ""); rec.Code != 200 {
+		t.Fatalf("known subject: %d, want 200", rec.Code)
+	}
+	if got.UserID != user.ID {
+		t.Errorf("resolved user id = %q, want %q", got.UserID, user.ID)
+	}
+	if !got.IsAdmin() {
+		t.Errorf("role = %q, want admin from tbl_user_roles", got.Role)
+	}
+
+	// Unmapped subject → fail closed 401.
+	if rec := run(t, h, tenant.ID, "not-a-uuid-and-not-mapped", ""); rec.Code != 401 {
+		t.Errorf("unknown subject: %d, want 401", rec.Code)
+	}
+
+	// Subject mapped in a DIFFERENT tenant must not resolve (tenant isolation).
+	other := store.Tenant{Name: "C", Slug: "cz" + time.Now().Format("150405.000000000"), Status: "ACTIVE"}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	if rec := run(t, h, other.ID, subject, ""); rec.Code != 401 {
+		t.Errorf("cross-tenant subject: %d, want 401", rec.Code)
+	}
+
+	// UUID pass-through keeps working (legacy header mode / access tokens).
+	if rec := run(t, h, tenant.ID, user.ID, ""); rec.Code != 200 {
+		t.Errorf("uuid pass-through: %d, want 200", rec.Code)
+	}
+}

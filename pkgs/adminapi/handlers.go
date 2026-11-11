@@ -133,7 +133,10 @@ func (d Deps) authConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := authConfig{
-		ID:               profile.ID,
+		// id = TENANT id (không phải auth-profile id): nginx dùng thẳng giá trị
+		// này làm X-Tenant-Id, và mọi bảng nghiệp vụ scope theo tbl_tenants.id
+		// (vd tbl_namespaces.tenant_id REFERENCES tbl_tenants(id)).
+		ID:               profile.TenantID,
 		JWTMode:          str(profile.Config, "jwt_mode", "jwks"),
 		OIDCJWKSURL:      deref(profile.JwksURI),
 		JWTSecret:        d.Secrets.Resolve(tenant.Slug, secrets.JWTSecret),

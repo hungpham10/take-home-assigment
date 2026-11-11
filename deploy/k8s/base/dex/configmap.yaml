@@ -37,7 +37,10 @@ data:
       - email: dev-user@example.com
         hash: $2b$10$XyvfzkvT3YcLHB6DWle.3egKeghQ4bLGvR3XchL5OusGICmefH/Ba   # bcrypt("password")
         username: dev-user
-        userID: dev-user
+        # UUID cố định = tbl_users.id được seed trong tests/e2e-full-deploy.sh.
+        # Bắt buộc: id_token.sub = userID này, và nginx set nó thành X-User-Id;
+        # tbl_namespaces.owner_user_id là UUID REFERENCES tbl_users(id).
+        userID: 11111111-1111-4111-8111-111111111111
 
     staticIdentityProviders:
       - id: static

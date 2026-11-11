@@ -121,6 +121,61 @@ curl -H "Host: localhost" -H "Authorization: Bearer $TOKEN" http://localhost:808
 
 `scripts/mint-dex-token.py` drive HTML login của Dex và xuất `id_token` (JWT RS256) — đúng cơ chế `tests/integration/dex.go` (port từ `sources/opsense-rs/scripts/mint-dex-token.py`).
 
+### Lưu ý: header phải là **một** argv của curl
+
+```bash
+# SAI — shell tách "Bearer $TOKEN" thành 2 arg ⇒ curl hiểu `-H Authorization:`
+# (xoá header) và gửi request HTTP/1.1 không có Host ⇒ nginx trả 400
+H="-H Authorization: Bearer $TOKEN -H Host: localhost"; curl $H ...
+
+# ĐÚNG — dùng curl config file (một word, không bị word-split)
+printf 'header = "Authorization: Bearer %s"\nheader = "Host: localhost"\n' "$TOKEN" > /tmp/curl.conf
+curl -K /tmp/curl.conf ...
+```
+
+### Định danh tenant/user trong chế độ bearer
+
+Gateway lấy danh tính từ phía nginx (`conf/nginx/vhost/04-api.conf`):
+
+| Header | Nguồn | Ràng buộc schema |
+|---|---|---|
+| `X-Tenant-Id` | `auth-config` → `auth.id` | **=`tbl_tenants.id`** (`tbl_namespaces.tenant_id` là FK) |
+| `X-User-Id` | JWT `sub` | UUID hoặc external subject — xem dưới |
+
+`tbl_namespaces.owner_user_id REFERENCES tbl_users(id)` là **UUID**, còn `sub` của Dex
+**luôn** là opaque: `base64url(protobuf{userID, connectorID})` (Dex v2.41
+`server/oauth2.go:genSubject`, không tắt được). Vì vậy:
+
+- ConfigMap trong cluster đặt `staticPasswords[].userID: 11111111-1111-4111-8111-111111111111`
+  để `tbl_users.id` cố định, và E2E đọc `sub` từ token vừa mint rồi seed
+  `tbl_user_external_identities(issuer, subject)` trỏ về user đó.
+- Controller resolve `X-User-Id` (plan 37, `pkgs/authz/identity.go`): UUID → dùng nguyên;
+  ngược lại tra `tbl_user_external_identities` trong tenant; không thấy → `401`.
+
+Kiểm tra nhanh:
+
+```bash
+kubectl -n ltp-system exec statefulset/postgres -- \
+  psql -U ltp -d ltp -tAc "SELECT u.id, u.email, uei.subject
+                             FROM tbl_users u
+                             LEFT JOIN tbl_user_external_identities uei ON uei.user_id = u.id"
+```
+
+### Resolver DNS cho Lua (JWKS, OIDC discovery)
+
+nginx dùng cosocket (`lua-resty-http`) để gọi JWKS/OIDC ⇒ cần `resolver` đúng với
+môi trường. `conf/nginx/http.conf` + `www.conf` dùng placeholder `%%NGINX_RESOLVER%%`,
+`scripts/release.sh` thay bằng env (default `127.0.0.11` cho Docker Compose):
+
+```yaml
+# deploy/k8s/base/serve/deployment.yaml
+- name: NGINX_RESOLVER
+  value: kube-dns.kube-system.svc.cluster.local
+```
+
+Quên bước này ⇒ Lua fetch `http://dex:5556/dex/keys` fail ⇒ mọi request bearer trả 401
+(`Invalid Token`) dù JWKS vẫn truy cập được từ ngoài.
+
 ## 6. CLI `sops` subcommand (encrypt/decrypt giá trị nhạy cảm)
 
 ```bash

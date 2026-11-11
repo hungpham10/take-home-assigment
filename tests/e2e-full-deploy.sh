@@ -156,8 +156,28 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
     LTP_DEX_PASSWORD=password \
     python3 scripts/mint-dex-token.py --print --login)
   [ -n "$TOKEN" ] || fail "mint Dex bearer token"
-  H="-H Authorization: Bearer $TOKEN -H Host: localhost"
-  trap 'kill $PF_SERVE $PF_DEX $PF_PG 2>/dev/null || true' EXIT
+  # Header phải là MỘT argv của curl ⇒ dùng config file (-K).
+  # Viết `H="-H Authorization: Bearer $TOKEN -H Host: localhost"` rồi dùng $H
+  # (không quote) sẽ bị word-split: curl nhận `-H Authorization:` (xoá header)
+  # và `-H Host:` (xoá Host) ⇒ HTTP/1.1 thiếu Host ⇒ nginx trả 400 mặc định.
+  CURL_CONF=/tmp/ltp-full-deploy-curl.conf
+  printf 'header = "Authorization: Bearer %s"\nheader = "Host: localhost"\n' "$TOKEN" > "$CURL_CONF"
+  chmod 600 "$CURL_CONF"
+  H="-K $CURL_CONF"
+  trap 'kill $PF_SERVE $PF_DEX $PF_PG 2>/dev/null || true; rm -f "$CURL_CONF"' EXIT
+
+  # nginx chuyển id_token.sub thành X-User-Id. Dex LUÔN trả sub dạng opaque
+  # (base64url protobuf{userID, connectorID}), nên controller map subject →
+  # tbl_users.id qua tbl_user_external_identities (plans/37). Đọc thẳng sub từ
+  # token vừa mint thay vì hardcode chuỗi protobuf của Dex.
+  SUBJECT=$(TOKEN="$TOKEN" python3 -c '
+import base64, json, os
+payload = os.environ["TOKEN"].split(".")[1]
+payload += "=" * (-len(payload) % 4)
+print(json.loads(base64.urlsafe_b64decode(payload)).get("sub", ""))
+')
+  [ -n "$SUBJECT" ] || fail "decode id_token.sub"
+  echo "   sub=$SUBJECT"
 else
   say "control-plane postgres (:$PG_PORT)"
   docker rm -f ltp-full-deploy-pg >/dev/null 2>&1 || true
@@ -198,6 +218,14 @@ say "seed tenant fixture"
 # auth qua X-Tenant-Id/X-User-Id header.
 if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   TENANT_HOST="localhost"
+  # user id PHẢI = Dex staticPasswords[].userID (deploy/k8s/base/dex/configmap.yaml):
+  # id_token.sub → X-User-Id → tbl_namespaces.owner_user_id UUID REFERENCES tbl_users(id).
+  USER_UUID="11111111-1111-4111-8111-111111111111"
+  USER_CTE=", u AS (
+    INSERT INTO tbl_users (id, tenant_id, email, display_name)
+    SELECT '$USER_UUID'::uuid, id, 'dev-user@example.com', 'FullDeploy' FROM t
+    ON CONFLICT (id) DO UPDATE SET display_name='FullDeploy' RETURNING id, tenant_id
+  )"
   AUTH_PROFILE=", p AS (
     INSERT INTO tbl_tenant_auth_profiles (tenant_id, name, issuer, jwks_uri, config)
     SELECT id, 'default', 'http://dex:5556/dex', 'http://dex:5556/dex/keys',
@@ -206,20 +234,25 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
     ON CONFLICT (tenant_id, name) DO UPDATE
       SET issuer = EXCLUDED.issuer, jwks_uri = EXCLUDED.jwks_uri,
           config = EXCLUDED.config, updated_at = now()
+  ), i AS (
+    INSERT INTO tbl_user_external_identities (user_id, issuer, subject)
+    SELECT id, 'http://dex:5556/dex', '$SUBJECT' FROM u
+    ON CONFLICT (issuer, subject) DO UPDATE SET user_id = EXCLUDED.user_id
   )"
 else
   TENANT_HOST="fulldeploy.local"
+  USER_CTE=", u AS (
+    INSERT INTO tbl_users (tenant_id, email, display_name)
+    SELECT id, 'fulldeploy@local', 'FullDeploy' FROM t
+    ON CONFLICT (tenant_id, email) DO UPDATE SET display_name='FullDeploy' RETURNING id, tenant_id
+  )"
   AUTH_PROFILE=""
 fi
 SEED=$(psql -tAc "
   WITH t AS (
     INSERT INTO tbl_tenants (name, slug) VALUES ('FullDeploy', 'fulldeploy')
     ON CONFLICT (slug) DO UPDATE SET name='FullDeploy' RETURNING id
-  ), u AS (
-    INSERT INTO tbl_users (tenant_id, email, display_name)
-    SELECT id, 'fulldeploy@local', 'FullDeploy' FROM t
-    ON CONFLICT (tenant_id, email) DO UPDATE SET display_name='FullDeploy' RETURNING id, tenant_id
-  ), r AS (
+  )$USER_CTE, r AS (
     INSERT INTO tbl_user_roles (user_id, role) SELECT id, 'user' FROM u
     ON CONFLICT (user_id, role) DO NOTHING
   ), h AS (

@@ -12,11 +12,23 @@ set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OVERLAY="$BASE_DIR/deploy/k8s/overlays/kind"
 
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
 command -v kubectl >/dev/null || fail "kubectl not installed"
 [ -n "${KUBECONFIG:-}" ] || KUBECONFIG="$HOME/.kube/config"
 export KUBECONFIG
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# --- 1. guard: UDS path trong conf/nginx phải là FILE socket /var/run/axum ---
+# Controller bind `unix:/var/run/axum` (conf/supervisor/ltp.conf) và pkgs/listener
+# tự mkdir parent + rm stale socket. Nếu path đó bị tạo thành THƯ MỤC
+# (mkdir trong entrypoint, emptyDir mount vào /var/run/axum, hay ai đó đổi sang
+# /var/run/axum/controller.sock) thì controller không bind được và mọi request
+# /api/* chết trước handler (plans/36 Fix log #2). Lỗi gần như vô hình trong log.
+BAD_SOCKET=$(grep -rn 'unix:/var/run/axum/' "$BASE_DIR/conf/nginx" || true)
+if [ -n "$BAD_SOCKET" ]; then
+  echo "$BAD_SOCKET" >&2
+  fail "unix socket phải là /var/run/axum (file), không phải thư mục (xem docs/nginx-oidc-auth.md)"
+fi
 
 # --- 2. apply overlay kind (tạo namespace ltp-system, mock-system, rồi các workload) ---
 echo "== apply k8s overlay kind =="

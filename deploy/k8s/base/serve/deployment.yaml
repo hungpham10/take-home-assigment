@@ -61,6 +61,10 @@ spec:
               value: main
             - name: NGINX_DIR
               value: /usr/local/openresty/nginx/conf
+            # resolver cho cosocket trong Lua (JWKS/OIDC). Docker Compose dùng
+            # 127.0.0.11 — trong cluster phải là DNS của kube-dns.
+            - name: NGINX_RESOLVER
+              value: kube-dns.kube-system.svc.cluster.local
             - name: ENVIRONMENT
               value: dev
             - name: HTTP_PROTOCOL
@@ -91,8 +95,9 @@ spec:
             - containerPort: 8080   # nginx
             - containerPort: 8090   # mock-service (internal)
           volumeMounts:
-            - name: axum-socket
-              mountPath: /var/run/axum
+            # KHÔNG mount emptyDir vào /var/run/axum: path đó phải là FILE
+            # socket do controller tạo (mount sẽ biến nó thành thư mục).
+            # nginx + controller cùng container (AIO) nên không cần volume chia sẻ.
             - name: scripts-dir
               mountPath: /tmp/ltp-scripts
             - name: sops-secrets
@@ -123,8 +128,6 @@ spec:
               cpu: 500m
               memory: 512Mi
       volumes:
-        - name: axum-socket
-          emptyDir: {}
         - name: scripts-dir
           emptyDir: {}
         - name: sops-secrets

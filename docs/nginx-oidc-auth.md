@@ -1,6 +1,20 @@
 # Nginx OIDC / Identity Pattern (`conf/nginx`) — notes for per-user APIs
 
-This note summarizes the **OIDC/JWT + tenant** pattern implemented in `conf/nginx` (OpenResty + Lua). It is **reference behavior from this config set** (upstream in this config is `http://backend` / unix socket `/var/run/axum`); the MVP in this repo will be a **Go + go-chi** backend behind nginx, so the same **trust-boundary/header contract** can be applied.
+This note summarizes the **OIDC/JWT + tenant** pattern implemented in `conf/nginx` (OpenResty + Lua). It is **reference behavior from this config set** (upstream in this config is `http://backend` → unix socket `/var/run/axum`; the MVP in this repo will be a **Go + go-chi** backend behind nginx, so the same **trust-boundary/header contract** can be applied).
+
+> ⚠️ **`/var/run/axum` là FILE unix socket, không phải thư mục.** `upstream backend`
+> (`http.conf`) và **mọi** `httpc:connect("unix:…")` trong Lua phải cùng trỏ
+> `/var/run/axum`; controller bind đúng path đó và `pkgs/listener` tự mkdir parent +
+> xoá stale socket + chmod 666. Nếu path này bị tạo thành thư mục (`mkdir` trong
+> entrypoint, `emptyDir` mount vào `/var/run/axum`, hoặc đổi thành
+> `/var/run/axum/controller.sock`) ⇒ controller không bind được ⇒ nginx
+> `Connection refused` ⇒ `/auth-config` fail ⇒ mọi request `/api/*` chết trước handler.
+> `scripts/k8s-apply.sh` có guard chặn lỗi này.
+
+> ⚠️ **DNS cho cosocket.** Lua gọi JWKS/OIDC discovery bằng `lua-resty-http`, nên cần
+> `resolver` đúng môi trường (`resolver 127.0.0.11` chỉ đúng với Docker Compose). Conf dùng
+> placeholder `%%NGINX_RESOLVER%%`, `scripts/release.sh` thay bằng env `NGINX_RESOLVER`
+> (default `127.0.0.11`; k8s: `kube-dns.kube-system.svc.cluster.local`).
 
 The admin/control-plane endpoints called by nginx and the canonical owner/admin account contract are specified in [`docs/admin-oidc-integration-api.md`](admin-oidc-integration-api.md) (`/api/admin/v1`).
 

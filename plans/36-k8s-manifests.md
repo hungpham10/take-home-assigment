@@ -62,6 +62,25 @@ docs/k8s-deployment.md                # MỚI: hướng dẫn deploy k8s + SOPS
 - UDS `unix:/var/run/axum` giữa nginx và controller giữ nguyên.
 - Earthly build image `serve`/`mock-service` (tag `:local`) — không push registry trong plan này (overlay `kind/` dùng `imagePullPolicy: IfNotPresent`).
 
+## Fix log — lần chạy CI in-cluster đầu tiên (2026-11-11)
+
+Job `Full Deploy E2E (in-cluster)` deploy thành công toàn bộ platform nhưng fail ở
+`create-with-spec` với `400 Bad Request`. Log `serve` cho thấy **đường Lua auth của
+nginx chưa từng được test** (nhánh `DEPLOY_MODE` cũ nói chuyện trực tiếp controller
+ở `:8090`, không qua gateway), nên 5 lỗi sau lộ ra cùng lúc:
+
+| # | Lỗi | Nguyên nhân | Sửa |
+|---|---|---|---|
+| 1 | `400 Bad Request` (trang mặc định openresty, không có upstream) | `H="-H Authorization: Bearer $TOKEN -H Host: localhost"` bị shell word-split → curl nhận `-H Authorization:` (xoá header) + `Host:` (xoá header) ⇒ HTTP/1.1 request **không có `Host`** | `tests/e2e-full-deploy.sh`: truyền header qua curl config file (`-K`), một word duy nhất |
+| 2 | `connect() to unix:/var/run/axum failed (111: Connection refused)` | `/var/run/axum` bị tạo thành **thư mục** (`mkdir -p` trong entrypoint + `emptyDir` mount vào đúng path) nên controller không bind được; commit trước đó workaround bằng cách đổi sang `/var/run/axum/controller.sock` | sửa **gốc**: `/var/run/axum` là file socket — bỏ `mkdir -p /var/run/axum` (entrypoint + Dockerfile), bỏ `emptyDir` mount; `ADDR`/`upstream`/Lua giữ `unix:/var/run/axum` (đúng `docs/packaging-deployment.md`, plans/34) |
+| 3 | JWKS `http://dex:5556/dex/keys` không resolve trong cluster | `resolver 127.0.0.11` hardcode DNS của Docker | placeholder `%%NGINX_RESOLVER%%` (sed trong `release.sh`, default `127.0.0.11`) + env `NGINX_RESOLVER=kube-dns.kube-system.svc.cluster.local` |
+| 4 | `X-Tenant-Id` = id của **auth profile** ⇒ FK `tbl_namespaces.tenant_id` fail | `pkgs/adminapi` trả `ID: profile.ID` (đúng như reference `sys_oidc.id`), nhưng schema repo này scope theo `tbl_tenants.id` và docs nói `id` là tenant context | `ID: profile.TenantID` + assert trong `handlers_test.go` |
+| 5 | `X-User-Id` = `CiQxMTEx…` ⇒ `invalid input syntax for type uuid` | Dex v2.41 **luôn** trả `sub = base64url(protobuf{userID, connectorID})` (không tắt được), trong khi `tbl_namespaces.owner_user_id UUID REFERENCES tbl_users(id)` | plan 37: controller resolve `X-User-Id` qua `tbl_user_external_identities` (UUID pass-through); E2E decode `sub` từ token rồi seed mapping; Dex ConfigMap vẫn đặt `userID` = UUID cố định |
+
+Regression guard: `scripts/k8s-apply.sh` fail sớm nếu `conf/nginx/**` còn trỏ
+`unix:/var/run/axum/…` (path con) — dấu hiệu `/var/run/axum` đang bị dùng như thư mục.
+Lỗi #2 rất khó thấy: chỉ 500/`Connection refused` trong log pod.
+
 ## Definition of done
 - `go test ./...` green; `golangci-lint run` 0 issues
 - `sh -n tests/e2e-full-deploy.sh scripts/k8s-apply.sh` OK

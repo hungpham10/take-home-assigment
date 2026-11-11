@@ -21,6 +21,10 @@ func New(addr string) (net.Listener, error) {
 			}
 		}
 		// unix sockets persist on disk; a stale one makes bind fail with EADDRINUSE.
+		if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+			return nil, fmt.Errorf("listener: unix %s is a directory, want a socket file "+
+				"(check for `mkdir -p` on that path or an emptyDir mounted there)", path)
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("listener: remove stale socket %s: %w", path, err)
 		}
