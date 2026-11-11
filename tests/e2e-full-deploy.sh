@@ -218,8 +218,12 @@ say "seed tenant fixture"
 # auth qua X-Tenant-Id/X-User-Id header.
 if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   TENANT_HOST="localhost"
+  # Dex phải là FQDN: resolver của nginx (cosocket) không dùng search domain
+  # trong /etc/resolv.conf ⇒ query "dex" trả SERVFAIL ("dex could not be resolved
+  # (2: Server failure)") dù pod resolve được nhờ ndots.
+  DEX_URL="http://dex.ltp-system.svc.cluster.local:5556/dex"
   # user id PHẢI = Dex staticPasswords[].userID (deploy/k8s/base/dex/configmap.yaml):
-  # id_token.sub → X-User-Id → tbl_namespaces.owner_user_id UUID REFERENCES tbl_users(id).
+  # id_token.sub → X-User-Id → resolve qua tbl_user_external_identities (plans/37).
   USER_UUID="11111111-1111-4111-8111-111111111111"
   USER_CTE=", u AS (
     INSERT INTO tbl_users (id, tenant_id, email, display_name)
@@ -228,15 +232,15 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   )"
   AUTH_PROFILE=", p AS (
     INSERT INTO tbl_tenant_auth_profiles (tenant_id, name, issuer, jwks_uri, config)
-    SELECT id, 'default', 'http://dex:5556/dex', 'http://dex:5556/dex/keys',
-           '{\"jwt_mode\":\"jwks\",\"oidc_jwks_url\":\"http://dex:5556/dex/keys\",\"oidc_issuer\":\"http://dex:5556/dex\",\"oidc_client_id\":\"ltp-test\",\"oidc_client_secret\":\"ltp-dev-shared-secret-32-bytes-min!!\",\"oidc_expected_alg\":\"RS256\",\"session_secret\":\"global-dev-session-secret-32-bytes!\"}'::jsonb
+    SELECT id, 'default', '$DEX_URL', '$DEX_URL/keys',
+           '{\"jwt_mode\":\"jwks\",\"oidc_jwks_url\":\"$DEX_URL/keys\",\"oidc_issuer\":\"$DEX_URL\",\"oidc_client_id\":\"ltp-test\",\"oidc_client_secret\":\"ltp-dev-shared-secret-32-bytes-min!!\",\"oidc_expected_alg\":\"RS256\",\"session_secret\":\"global-dev-session-secret-32-bytes!\"}'::jsonb
     FROM t
     ON CONFLICT (tenant_id, name) DO UPDATE
       SET issuer = EXCLUDED.issuer, jwks_uri = EXCLUDED.jwks_uri,
           config = EXCLUDED.config, updated_at = now()
   ), i AS (
     INSERT INTO tbl_user_external_identities (user_id, issuer, subject)
-    SELECT id, 'http://dex:5556/dex', '$SUBJECT' FROM u
+    SELECT id, '$DEX_URL', '$SUBJECT' FROM u
     ON CONFLICT (issuer, subject) DO UPDATE SET user_id = EXCLUDED.user_id
   )"
 else

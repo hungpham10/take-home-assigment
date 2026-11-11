@@ -176,6 +176,14 @@ môi trường. `conf/nginx/http.conf` + `www.conf` dùng placeholder `%%NGINX_R
 Quên bước này ⇒ Lua fetch `http://dex:5556/dex/keys` fail ⇒ mọi request bearer trả 401
 (`Invalid Token`) dù JWKS vẫn truy cập được từ ngoài.
 
+> ⚠️ **Dùng FQDN trong URL, không dùng tên ngắn.** `resolver` của nginx (cosocket)
+> **không** áp dụng search domain/ndots trong `/etc/resolv.conf`; query `dex` trả
+> `SERVFAIL` ⇒ `Invalid Token … failed fetching jwks: dex could not be resolved
+> (2: Server failure)`. Trong cluster dùng
+> `http://dex.ltp-system.svc.cluster.local:5556/dex` (issuer + jwks_uri +
+> `oidc_jwks_url` trong auth profile). Docker Compose thì tên ngắn `dex` vẫn đúng vì
+> embedded DNS resolve trực tiếp.
+
 ## 6. CLI `sops` subcommand (encrypt/decrypt giá trị nhạy cảm)
 
 ```bash
