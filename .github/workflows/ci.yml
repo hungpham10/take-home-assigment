@@ -206,7 +206,7 @@ jobs:
           kubectl version --client
       - name: Install earthly (0.8.x, khớp Earthfile VERSION 0.8)
         run: |
-          curl -Lo ./earthly https://github.com/earthly/earthly/releases/download/v0.8.17/earthly-linux-amd64
+          curl -Lo ./earthly https://github.com/earthly/earthly/releases/download/v0.8.16/earthly-linux-amd64
           chmod +x ./earthly
           sudo mv ./earthly /usr/local/bin/earthly
           earthly version
