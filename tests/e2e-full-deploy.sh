@@ -107,8 +107,9 @@ fi
 
 # --- 2. control-plane postgres + controller -----------------------------------
 if [ "$DEPLOY_MODE" = "in-cluster" ]; then
-  say "build images (earthly) + apply k8s overlay kind"
-  earthly +integration-images
+  say "build images (docker build) + apply k8s overlay kind"
+  docker build -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
+  docker build -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
   kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name "$CLUSTER" 2>/dev/null || true
   export SOPS_AGE_KEY_CONTENT="${SOPS_AGE_KEY_CONTENT:-}"
   POSTGRES_PASSWORD=ltp scripts/k8s-apply.sh
