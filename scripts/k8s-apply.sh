@@ -18,7 +18,12 @@ export KUBECONFIG
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# --- 0. secret postgres-credentials (control-plane DB, không commit) ---
+# --- 2. apply overlay kind (tạo namespace ltp-system, mock-system, rồi các workload) ---
+echo "== apply k8s overlay kind =="
+kubectl apply -k "$OVERLAY"
+
+# --- 3. secret postgres-credentials (control-plane DB, không commit) ---
+# Namespace ltp-system đã tồn tại sau bước apply.
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-ltp}"
 kubectl -n ltp-system create secret generic postgres-credentials \
   --from-literal=POSTGRES_USER=ltp \
@@ -26,7 +31,7 @@ kubectl -n ltp-system create secret generic postgres-credentials \
   --from-literal=POSTGRES_DB=ltp \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-# --- 1. secret sops-age-key (release.sh giải mã secrets.enc.yaml tại boot) ---
+# --- 4. secret sops-age-key (release.sh giải mã secrets.enc.yaml tại boot) ---
 if [ -z "${SOPS_AGE_KEY_CONTENT:-}" ]; then
   fail "SOPS_AGE_KEY_CONTENT chưa set (toàn bộ nội dung file age keys.txt). Xem docs/k8s-deployment.md §1."
 fi
@@ -34,11 +39,7 @@ kubectl -n ltp-system create secret generic sops-age-key \
   --from-literal=SOPS_AGE_KEY_CONTENT="$SOPS_AGE_KEY_CONTENT" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
-# --- 2. apply overlay kind ---
-echo "== apply k8s overlay kind =="
-kubectl apply -k "$OVERLAY"
-
-# --- 3. rollout status ---
+# --- 5. rollout status ---
 echo "== rollout status =="
 for res in "sts/postgres -n ltp-system" \
            "deploy/valkey -n ltp-system" \
