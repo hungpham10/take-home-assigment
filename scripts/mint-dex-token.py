@@ -109,7 +109,7 @@ def main():
             continue
         form = parse_form(body)
         if not form:
-            sys.exit(f"unexpected page at {current} (status {st})")
+            sys.exit(f"unexpected page at {current} (status {st})\nBODY: {body[:600]}")
 
     if not code:
         sys.exit("no authorization code captured")
