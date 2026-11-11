@@ -53,7 +53,7 @@ docs/k8s-deployment.md                # MỚI: hướng dẫn deploy k8s + SOPS
 - `docs/packaging-deployment.md`, `docs/mvp-status.md`: trỏ về `docs/k8s-deployment.md`
 
 ## RBAC `serve` ClusterRole (theo đúng code đã dùng)
-`namespaces` CRUD · `deployments/services/configmaps/secrets/serviceaccounts` CRUD · `networkpolicies/ingresses` CRUD · `pods` get/list/watch/delete · `jobs` get/list/watch/delete · `clusters.postgresql.cnpg.io` + `/status` · `elasticsearch.k8s.elastic.co` · `testruns.k6.io` + `/status` · `horizontalpodautoscalers` · `leases` (chỉ khi `HA_ENABLED=true`) · `events` create/patch.
+`namespaces` CRUD · `apps/deployments` CRUD (Env Reconciler render + Status Watcher watch) · `services/configmaps/secrets/serviceaccounts` CRUD · `networkpolicies/ingresses` CRUD · `pods` get/list/watch/delete · `jobs` get/list/watch/delete · `clusters.postgresql.cnpg.io` + `/status` · `elasticsearch.k8s.elastic.co` · `testruns.k6.io` + `/status` · `horizontalpodautoscalers` · `leases` (chỉ khi `HA_ENABLED=true`) · `events` create/patch.
 
 ## Khai báo và boundary
 - KHÔNG sửa `conf/nginx/vhost/02-openid.conf` (bearer-only).
@@ -76,6 +76,8 @@ nginx chưa từng được test** (nhánh `DEPLOY_MODE` cũ nói chuyện trự
 | 3 | JWKS `http://dex:5556/dex/keys` không resolve trong cluster | `resolver 127.0.0.11` hardcode DNS của Docker | placeholder `%%NGINX_RESOLVER%%` (sed trong `release.sh`, default `127.0.0.11`) + env `NGINX_RESOLVER=kube-dns.kube-system.svc.cluster.local`. Lưu ý: resolver của nginx **không** áp dụng search domain trong `/etc/resolv.conf` ⇒ `dex` trả `SERVFAIL` (`dex could not be resolved (2: Server failure)`), phải dùng FQDN `dex.ltp-system.svc.cluster.local` trong auth profile |
 | 4 | `X-Tenant-Id` = id của **auth profile** ⇒ FK `tbl_namespaces.tenant_id` fail | `pkgs/adminapi` trả `ID: profile.ID` (đúng như reference `sys_oidc.id`), nhưng schema repo này scope theo `tbl_tenants.id` và docs nói `id` là tenant context | `ID: profile.TenantID` + assert trong `handlers_test.go` |
 | 5 | `X-User-Id` = `CiQxMTEx…` ⇒ `invalid input syntax for type uuid` | Dex v2.41 **luôn** trả `sub = base64url(protobuf{userID, connectorID})` (không tắt được), trong khi `tbl_namespaces.owner_user_id UUID REFERENCES tbl_users(id)` | plan 37: controller resolve `X-User-Id` qua `tbl_user_external_identities` (UUID pass-through); E2E decode `sub` từ token rồi seed mapping; Dex ConfigMap vẫn đặt `userID` = UUID cố định |
+| 6 | `Invalid Token … failed fetching jwks: dex could not be resolved (2: Server failure)` | `resolver` của cosocket không dùng search domain/ndots ⇒ tên ngắn `dex` trả SERVFAIL | auth profile dùng FQDN `http://dex.ltp-system.svc.cluster.local:5556/dex` |
+| 7 | Service kẹt `cluster_error`, namespace không READY | ClusterRole `serve` thiếu `apps/deployments` ⇒ Env Reconciler `patch Deployment/echo` bị 403 (`deployments.apps … is forbidden`) | thêm rule `apiGroups: ["apps"], resources: ["deployments"]` vào `deploy/k8s/base/serve/rbac.yaml` |
 
 Regression guard: `scripts/k8s-apply.sh` fail sớm nếu `conf/nginx/**` còn trỏ
 `unix:/var/run/axum/…` (path con) — dấu hiệu `/var/run/axum` đang bị dùng như thư mục.
