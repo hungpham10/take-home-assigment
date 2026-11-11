@@ -25,6 +25,41 @@ K6_OPERATOR_BUNDLE="https://raw.githubusercontent.com/grafana/k6-operator/${K6_O
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Mint Dex id_token (bearer token) theo OIDC code flow, dùng curl theo dõi
+# redirect từng bước (không phụ thuộc parse HTML form của Dex).
+# Env: LTP_DEX_ISSUER, LTP_DEX_CLIENT_ID, LTP_DEX_CLIENT_SECRET,
+#      LTP_DEX_USER, LTP_DEX_PASSWORD.
+mint_dex_token() {
+  local jar=/tmp/dex-cookies.txt
+  rm -f "$jar"
+  local issuer="${LTP_DEX_ISSUER:-http://localhost:5556/dex}"
+  local cid="${LTP_DEX_CLIENT_ID:-ltp-test}"
+  local csecret="${LTP_DEX_CLIENT_SECRET:-}"
+  local user="${LTP_DEX_USER:-dev-user@example.com}"
+  local pass="${LTP_DEX_PASSWORD:-password}"
+  local redirect_uri="http%3A%2F%2Flocalhost%3A8080%2Fcallback"
+  local disc token_ep authz loc code
+  disc=$(curl -s -c "$jar" -b "$jar" "$issuer/.well-known/openid-configuration") || return 1
+  token_ep=$(printf '%s' "$disc" | python3 -c "import sys,json;print(json.load(sys.stdin)['token_endpoint'])")
+  authz=$(printf '%s' "$disc" | python3 -c "import sys,json;print(json.load(sys.stdin)['authorization_endpoint'])")
+  # B1: GET authorize → Dex 302 về trang login.
+  loc=$(curl -s -c "$jar" -b "$jar" -D - -o /dev/null \
+    "$authz?response_type=code&client_id=$cid&redirect_uri=$redirect_uri&scope=openid+email+profile+offline_access" \
+    | tr -d '\r' | awk -F': ' 'tolower($1)=="location"{print $2}')
+  [ -n "$loc" ] || return 1
+  # B2: POST credentials → Dex 302 về callback (Location có ?code=...).
+  curl -s -c "$jar" -b "$jar" -o /dev/null -X POST -d "login=$user&password=$pass" "$loc" >/dev/null
+  loc=$(curl -s -c "$jar" -b "$jar" -D - -o /dev/null "$loc" \
+    | tr -d '\r' | awk -F': ' 'tolower($1)=="location"{print $2}')
+  [ -n "$loc" ] || return 1
+  code=$(printf '%s' "$loc" | python3 -c "import sys,urllib.parse;print(urllib.parse.parse_qs(urllib.parse.urlparse(sys.stdin.read().strip()).query).get('code',[''])[0])")
+  [ -n "$code" ] || return 1
+  # B3: exchange code → id_token.
+  curl -s -X POST "$token_ep" \
+    -d "grant_type=authorization_code&code=$code&redirect_uri=$redirect_uri&client_id=$cid&client_secret=$csecret" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['id_token'])"
+}
 jqget() { python3 -c "import sys,json;d=json.load(sys.stdin);v=d$1;print('' if v is None else ('true' if v is True else ('false' if v is False else str(v))))"; }
 
 # --- 0. tooling ---------------------------------------------------------------
@@ -144,12 +179,7 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   done
   [ -n "$HEALTH_OK" ] || { echo "--- serve pf log ---"; tail -20 /tmp/ltp-full-deploy-pf-serve.log >&2 || true; fail "serve health (60s)"; }
   # bearer token từ Dex (host-side qua port-forward 5556)
-  TOKEN=$(LTP_DEX_ISSUER=http://localhost:5556/dex \
-    LTP_DEX_CLIENT_ID=ltp-test \
-    LTP_DEX_CLIENT_SECRET='ltp-dev-shared-secret-32-bytes-min!!' \
-    LTP_DEX_USER=dev-user@example.com \
-    LTP_DEX_PASSWORD=password \
-    python3 scripts/mint-dex-token.py)
+  TOKEN=$(mint_dex_token)
   [ -n "$TOKEN" ] || fail "mint Dex bearer token"
   H="-H Authorization: Bearer $TOKEN -H Host: localhost"
   trap 'kill $PF_SERVE $PF_DEX $PF_PG 2>/dev/null || true' EXIT
