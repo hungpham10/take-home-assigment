@@ -159,3 +159,11 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 
 - **Hierarchical apply (plans/26 bổ sung)**: `Applier` interface (`Kind/Name/Apply/Children`) — apply cây ngoài→trong qua `ApplyTree`; `applyNamespace` (K8S) gọi `ApplyNow` ngay sau desired-state commit (best-effort, watcher + loop tự converge). Tick batch 100/ lần + ưu tiên `status_observed_at NULLS FIRST`; tests dọn namespace sau run (backlog 1133 ns cũ từng stall Tick). Tests: INT-ENV-08 (apply order), INT-ENV-09 (aggregation all-children-ready).
 - **Centralize state machines (plans/26, phản hồi review)**: `pkgs/store/{namespace,loadtest,script,dataset}_lifecycle.go` — status constants + typed wrappers + bảng caller-owner; mọi call-site migrated (loadtest 10, namespace 5, dataset 3, script 2); **lint-transitions guard** trong CI chặn raw `store.Transition` ngoài `pkgs/store/` — thêm/sửa trạng thái chỉ review 1 file.
+
+### plans/34 — AIO serve image + Dex compose + integration tests (2026-11-11)
+
+- **Earthfile rewrite** (pattern `sources/opsense-rs/Earthfile`): `+build` 2 binary (fast path `bin/` host, fallback go build); `+serve` image AIO openresty-fat (nginx + supervisor + controller **unix socket** `unix:/var/run/axum` + mock-service :8090 + alloy); `+mock-service` image riêng (data-plane); `+integration-images` build local no-push.
+- **Controller unix socket (TDD)**: `ADDR=unix:/var/run/axum` → `net.Listen("unix")` + rm stale socket + chmod 666; TCP giữ nguyên. nginx `conf/nginx` KHÔNG đổi.
+- **docker-compose**: postgres + valkey (noeviction, session lua) + dex v2.41.1 (conf/dex/config.dev.yaml, issuer localhost:5556/dex) + loadtest-serve (SOPS mount, healthcheck /health).
+- **Integration test** pattern opsense-rs: `tests/integration/` (tag `integration`) — dex login flow Go port, health smoke qua nginx, oauth flow qua gateway `/login`+`/callback`; skip khi không có stack, fail hard khi `LTP_INTEGRATION=1`. `scripts/mint-dex-token.py` host CLI. Makefile `test-integration`/`test-integration-down`/`up`/`down`.
+- Chi tiết: `docs/packaging-deployment.md`, `plans/34-aio-serve-image.md`.

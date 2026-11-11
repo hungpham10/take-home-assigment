@@ -36,203 +36,180 @@ Mock execution is a **separate deployable data plane** (`mock-service`), while c
 | Contract source for API mocks | **Service `openapi`** (required) + service mock metadata | Mock is a behavior view over the OpenAPI contract; do not redefine API shape outside OpenAPI except mock behavior. |
 | Data/cloud dependency mock metadata | **Database component** `mock` metadata | Covers database-like/cloud-like dependency behavior needed by tests (latency, operation/result profiles, connection/IO semantics at metadata level). Exact adapters are Mock Service implementation detail. |
 | Capacity pools, reservations, runtime placement | **Mock Service** | Finite-resource admission, pool units, no overbooking. |
-| Runtime config materialization, endpoint/DNS, latency injection, reconcile | **Mock Service operator/runtime** | Level-triggered, idempotent, generation-aware. |
-| Readiness contribution | **Namespace/Environment status** (controller projection) | Namespace cannot be `ready_for_loadtest=true` if required mock components/bindings are not ready under policy. |
+| Runtime config materialization, endpoint/DNS, … | **Mock Service** | Materialize namespace mock metadata → runtime config; atomic snapshot swap. |
 
-## 3. Where mock metadata is defined
+## 3. Service mock metadata (MVP: HTTP services only)
 
-### 3.1 Service mock metadata (API dependency / mockable service behavior)
-
-Service definitions already require `openapi` (see `docs/service-management-api.md`). Service mock metadata declares how that service/dependency is mocked when the namespace uses mock mode for it.
+`mock` is optional metadata on the service definition (canonical storage in namespace service component). It describes **API mock behavior**; execution is delegated to the separate Mock Service (`docs/mock-service-api.md`).
 
 ```json
 {
-  "service_id": "svc-payment",
-  "name": "payment-service",
-  "openapi": { "format": "openapi", "version": "3.0.3", "source": "inline", "content_type": "application/yaml", "content": "..." },
-  "mock": {
-    "enabled": true,
-    "mode": "openapi-behavior",
-    "provider": "mock-service",
-    "pool_class": "general",
-    "defaults": { "seed": 42, "request_validation": "lenient" },
-    "operations": [
-      {
-        "operation_id": "authorizePayment",
-        "responses": [
-          {
-            "name": "authorized",
-            "match": { "status": 201 },
-            "weight": 95,
-            "latency": { "distribution": "lognormal", "p50_ms": 40, "p95_ms": 120, "p99_ms": 180, "min_ms": 5, "max_ms": 500 },
-            "body": { "source": "schema_example", "example": "authorized" }
-          },
-          {
-            "name": "upstream-timeout",
-            "match": { "status": 503 },
-            "weight": 5,
-            "latency": { "distribution": "fixed", "ms": 900 },
-            "headers": { "Retry-After": "1" },
-            "body": { "source": "inline", "content": { "error": "upstream_timeout" } }
-          }
-        ]
-      }
-    ],
-    "capacity_request": { "rps_units": 500, "concurrent_connections": 200 }
-  }
-}
-```
-
-**Rules:** `mock.operations[*]` must resolve to service OpenAPI operations (`operationId` preferred, or method+path). Unknown operations/invalid latency/weights fail validation (`422`).
-
-### 3.2 Database mock metadata (data/cloud dependency behavior)
-
-Database components may declare mocking metadata for test environments where a real managed database/cloud dependency is replaced or simulated by Mock Service behavior. This is **metadata for mocking the dependency behavior**, not a replacement for real database provisioning contracts.
-
-```json
-{
-  "database_id": "db-orders",
-  "name": "orders-primary",
-  "engine": "postgres",
-  "operator": "cloudnative-pg",
-  "ephemeral": { "enabled": true, "mode": "per-loadtest" },
-  "mock": {
-    "enabled": true,
-    "provider": "mock-service",
-    "pool_class": "general",
-    "profile": "postgres-compatible",
-    "defaults": { "seed": 42 },
-    "operations": [
-      { "op": "connect", "latency": { "distribution": "lognormal", "p50_ms": 8, "p95_ms": 25, "p99_ms": 60 } },
-      { "op": "query_read", "match": { "shape": "select_by_id" }, "latency": { "distribution": "lognormal", "p50_ms": 3, "p95_ms": 12, "p99_ms": 30 }, "result": { "source": "template", "rows": 1 } },
-      { "op": "query_write", "latency": { "distribution": "lognormal", "p50_ms": 6, "p95_ms": 20, "p99_ms": 45 }, "result": { "source": "template", "affected_rows": 1 } },
-      { "op": "transient_failure", "weight": 1, "latency": { "distribution": "fixed", "ms": 120 }, "error": { "class": "timeout" } }
-    ],
-    "capacity_request": { "rps_units": 300, "concurrent_connections": 100 }
-  }
-}
-```
-
-**Notes:**
-- Database/cloud mock `profile`/`op` vocabulary is implementation-defined but must be **validated and versioned**. MVP should start with a small, explicit operation set (e.g., connect/read/write/error) rather than arbitrary SQL emulation unless explicitly scoped.
-- “Cloud mocking” (object store, queue, cache, managed DB behavior, etc.) is modeled as **dependency profiles + operation latency/result metadata** owned by the component definition; runtime adapters live in Mock Service.
-- If `mock.enabled=true`, namespace apply/readiness must make it unambiguous whether the dependency uses **real provisioning**, **mock runtime**, or **disabled** — do not allow ambiguous dual-active mode.
-
-## 4. Latency/duration model (service and database mocks)
-
-Latency/duration is first-class for both service API responses and database/cloud operations.
-
-| Field concept | Meaning |
-|---|---|
-| `distribution` | `fixed`, `uniform`, `normal`, `lognormal`, `step/histogram` (finalize exact set). |
-| percentile inputs | `p50_ms`, `p95_ms`, `p99_ms` and/or min/max; runtime derives internal parameters, clamps to bounds. |
-| `weight` | Relative selection weight for variants/outcomes (normalize; total > 0). |
-| `seed` | Reproducible draws/selection for a config generation/scope. |
-| `max_ms` guardrail | Platform-enforced cap; never unbounded waits. |
-
-**Runtime rules:**
-- Delays use **non-blocking timers** (no blocked OS threads per request); in-flight/waiting work still counts against pool connection/concurrency capacity.
-- **Overhead baseline:** Mock Service measures processing overhead at `latency=0` (per profile/operation class) and exposes metrics. Load-test analysis must account for mock overhead; use **performance-isolated pools** for strict latency assertions.
-- In-flight requests complete under the old config snapshot; new requests use the new snapshot after atomic swap.
-
-## 5. Separate Mock Service runtime (execution layer)
-
-Mock Service is a dedicated runtime/control plane component:
-- **Stateless/shared runtime pods** in capacity pools (not 1 pod per mock definition/binding).
-- **Mock operator** reconciles namespace component mock metadata (desired) to runtime config/endpoints/reservations (observed).
-- **Admission/ledger** enforces finite capacity with ACID reservations.
-- **Config delivery:** versioned snapshots, `generation`/`observed_generation`, atomic swap.
-- **Exposure:** cluster-internal DNS/service endpoints preferred; access allowed only by NetworkPolicy and namespace dependency policy. Ingress/public exposure is opt-in and policy-controlled.
-
-### 5.1 Capacity pools
-- **Pool units (benchmark-derived):** `rps_units`, `concurrent_connections`, memory/CPU profile, safety factor (e.g., 60–70% of measured max), `benchmark_version`.
-- **Classes:** `general` (functional deps) and `perf-isolated` (latency-sensitive performance tests). Binding/component can request pool class.
-- **Admission:** insufficient capacity => `409 INSUFFICIENT_MOCK_CAPACITY` (MVP) or explicit queued admission if later designed with TTL/fairness.
-
-## 6. ACID, async, idempotency, reconcile
-
-Mutating control-plane operations are **consistent and async**:
-1. Validate authz/schema/refs/latency/operation compatibility.
-2. In one Postgres transaction: persist desired metadata/materialized intent reference, create/update **reservation** (with pool row lock / `SELECT ... FOR UPDATE` strategy), append outbox/state intent, store **idempotency** record.
-3. Return `202`/status handle where apply is async.
-4. **Level-triggered operator** converges runtime to desired generation; retries are idempotent.
-5. **Reservation release** happens only after runtime/K8s resources/config/routes are confirmed removed. A reaper reconciles ledger vs runtime/K8s to detect leaks.
-
-**Optimistic concurrency:** component/namespace updates use `version`/ETag/`If-Match` where applicable. Active runs: mock-affecting changes create new generation and follow namespace/run policy (block, snapshot-by-generation, or controlled rollout) — do not mutate behavior of an in-flight measured run implicitly.
-
-## 7. Control-plane API (controller) and runtime boundary
-
-Namespace/component CRUD remains the primary place to **define mock metadata**. The controller exposes control-plane/visibility APIs; `mock-service` runtime endpoints are cluster-internal data-plane endpoints (not listed as public `/api/loadtest/v1` routes):
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/loadtest/v1/mock-runtime/status` | Aggregate runtime/operator health (projection-backed). |
-| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/mock-status` | Materialized status of mock components/bindings derived from namespace service/database mock metadata (`generation`, `observed_generation`, endpoints, conditions, pool). |
-| `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/mocks/reconcile` | Request/trigger reconcile for namespace mock metadata (`202`, idempotent). Usually also driven by namespace apply. |
-| `GET` | `/api/loadtest/v1/mock-pools` | List capacity pools/classes (projection-backed). |
-| `GET` | `/api/loadtest/v1/mock-pools/{pool_id}` | Pool utilization/reservations/health. |
-| `GET/PUT` | `/api/loadtest/v1/mock-pools/{pool_id}` (admin-guarded mutation; read may be ops/admin-scoped) | Manage pool profiles/capacity metadata (guarded; benchmark-versioned). Finalize path/role split in implementation. |
-
-*Optional (if needed later):* internal read models for compiled mock bindings; avoid making standalone `/mocks` definitions the canonical source if metadata is already owned by namespace components. Snapshot/binding contract (`schema_version`, generation, compatibility/rollback) must be finalized before implementation.
-
-**Status codes (key):** `200/201/202` success/accepted, `400/422` validation, `401/403/404` authz, `409` (`INSUFFICIENT_MOCK_CAPACITY`, `CONFLICT`, version/state), `429` quota.
-
-## 7.1 Snapshot contract (draft)
-
-Controller → `mock-service` (internal contract, not user-facing API):
-
-```json
-{
-  "schema_version": "1",
-  "namespace_id": "ns-1a2b3c4d",
-  "k8s_namespace": "lt-env-ns-1a2b3c4d",
+  "enabled": true,
   "generation": 12,
-  "issued_at": "2026-11-07T00:00:00Z",
   "pool_class": "general",
-  "bindings": [
+  "routes": [
     {
-      "binding_id": "mb-svc-payment",
-      "kind": "service-openapi",
-      "service_id": "svc-payment",
-      "base_path": "/",
-      "operations": [
-        { "operation_id": "authorizePayment", "responses": [ { "name":"authorized", "weight":95, "latency":{"distribution":"lognormal","p50_ms":40,"p95_ms":120,"p99_ms":180}, "body":{"source":"schema_example"} } ] }
+      "method": "POST",
+      "path": "/payments",
+      "variants": [
+        {
+          "weight": 95,
+          "status": 200,
+          "body": { "source": "schema_example" },
+          "latency": { "distribution": "lognormal", "p50_ms": 40, "p95_ms": 120, "p99_ms": 180 }
+        },
+        {
+          "weight": 5,
+          "status": 503,
+          "error": "upstream_timeout",
+          "latency": { "distribution": "fixed", "ms": 900 }
+        }
       ]
     }
   ]
 }
 ```
 
-**Rules:** `mock-service` rejects unsupported `schema_version` (reports error/`DEGRADED`), applies snapshots atomically, and reports `observed_generation`/health. Do not embed secrets; resolve refs via controller-approved mechanisms.
+**MVP fields:**
+- `enabled`: enable/disable mock behavior for this component
+- `generation`: monotonically increasing version (controller increments on mock change)
+- `pool_class`: `general` (MVP) or `perf-isolated` (future)
+- `routes[]`: per method+path, one or more weighted variants
+- `variants[]`: weighted outcomes with `weight`, `status`, `body` (JSON template), `latency`, optional `error`
+- `latency`: `fixed` (ms) or `lognormal` (p50/p95/p99/min/max ms)
 
-## 8. Integration with namespace readiness, load tests, and NetworkPolicy
+**Database mock metadata:** Not in MVP. Database/cloud profiles (`profile: "postgres-compatible"`) are a future extension.
 
-- **Readiness gate:** namespace `ready_for_loadtest=true` only when required services/databases/ingress/dependencies/network policy **and required mock components** are ready. Mock metadata invalid or runtime not reconciled => `INVALID/DEGRADED`, and load-test create returns `409 NAMESPACE_NOT_READY`.
-- **Load tests:** continue to target namespace service OpenAPI operations (`targets[]`) and include the k6 JS script. Mocks may satisfy dependencies, but **runner egress/NetworkPolicy must still be enforced** at the network layer; `targets[]` is not advisory. Runner gets no platform/K8s credentials.
-- **NetworkPolicy:** allow SUT/runner access only to declared/approved mock endpoints and dependencies; Mock Service runtime endpoints follow dependency-derived policy. Database mock connectivity must fit the same namespace network model.
+## 4. Snapshot contract (controller → mock-service)
 
-## 9. Security and validation
+Internal contract, not user-facing API. Versioned `schema_version = "v1"`.
 
-- Tenant isolation always; owner-only by default; **admin may manage across owners within the same tenant** (not cross-tenant), per platform rules. Never trust client-supplied owner/tenant IDs.
+```json
+{
+  "schema_version": "v1",
+  "namespace_id": "ns-1a2b3c4d",
+  "generation": 12,
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/payments",
+      "variants": [
+        {
+          "weight": 95,
+          "status": 200,
+          "body": { "authorized": true, "id": "pay_123" },
+          "latency": { "distribution": "lognormal", "p50_ms": 40, "p95_ms": 120, "p99_ms": 180, "min_ms": 10, "max_ms": 500 }
+        },
+        {
+          "weight": 5,
+          "status": 503,
+          "error": "upstream_timeout",
+          "latency": { "distribution": "fixed", "ms": 900 }
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Rules:**
+- `mock-service` rejects unsupported `schema_version` (reports error/`DEGRADED`)
+- Applies snapshots atomically with generation fencing (stale generations rejected)
+- Reports `observed_generation` via `GET /health`
+- No secrets embedded; refs resolved via controller-approved mechanisms
+
+## 5. Controller-side wiring (`mockcontrol`)
+
+The controller (`loadtest-controller`) reconciles mock metadata into Kubernetes resources for each mock-enabled service component:
+
+| Resource | Name | Purpose |
+|---|---|---|
+| ConfigMap | `mock-binding-<service_name>` | Carries `snapshot.json` + `pool_class`; mounted by mock-service; watched by status watcher for generation fencing |
+| Service | `mock-<service_name>` (ExternalName) | Points to `mock-service.mock-system.svc.cluster.local`; SUT traffic routed via DNS |
+| Deployment env | `MOCK_<SERVICE_NAME>_URL` | Injected into SUT container env; value `http://mock-service.mock-system.svc.cluster.local` |
+
+**Render order:** Applied in envreconciler step 5 (after NetworkPolicy, before Deployments) per `docs/k8s-orchestration.md` §4.1.
+
+## 6. Mock Service runtime (`mockruntime` + `cmds/mock-service`)
+
+Separate deployable binary: **no PostgreSQL, no authz, no public ingress**.
+
+**Endpoints:**
+- `GET /health` → `{ "status": "healthy", "observed_generation": 12 }`
+- `ANY /<path>` → Matches snapshot routes by exact `method` + `path`; picks weighted variant; injects latency; returns status/body/error
+
+**Latency injection (hot path, no heavy math):**
+- `fixed`: sleeps `ms` milliseconds
+- `lognormal`: triangular interpolation between `p50_ms` and `p95_ms` (mode = p50), clamped to `min_ms`/`max_ms`
+
+**Snapshot loading:**
+- `ApplySnapshot(s *Snapshot)`: validates `schema_version == "v1"`, rejects negative/older generations, atomically swaps
+- `LoadFile(rt, path)`: reads JSON file (for local dev or ConfigMap mount)
+
+**Configuration:**
+- `ADDR` (default `:8090`)
+- `MOCK_SNAPSHOT_FILE` (optional initial snapshot for local mode)
+
+## 7. Namespace integration & readiness
+
+**Readiness gate:** Namespace `ready_for_loadtest=true` only when required services/databases/ingress/dependencies/network policy **and required mock components** are ready.
+
+**Status watcher evaluator (`evalMocks`):**
+- For each service with `mock.enabled=true`:
+  1. Check ConfigMap `mock-binding-<svc>` exists in `lt-env-<ns>`
+  2. Verify annotation `spec_hash == "mock-gen-<desired_generation>"`
+  3. Phase:
+     - `READY` + `ObservedGeneration = desired` if annotation matches
+     - `PROGRESSING` reason `mock_generation_pending` if annotation mismatch
+     - `PENDING` reason `mock_binding_missing` if ConfigMap absent
+     - `UNKNOWN` reason `cluster_error` on API error
+
+**Load tests:** Continue to target namespace service OpenAPI operations (`targets[]`) and include the k6 JS script. Mocks may satisfy dependencies, but **runner egress/NetworkPolicy must still be enforced** at the network layer; `targets[]` is not advisory.
+
+**NetworkPolicy:** Allow SUT/runner access only to declared/approved mock endpoints and dependencies. Mock Service runtime endpoints follow dependency-derived policy (see `docs/network-policy.md` §3.2, §8). SUT→mock via ExternalName Service (port 80 → container 8090 post-DNAT).
+
+## 8. Security and validation
+
+- Tenant isolation always; owner-only by default; **admin may manage across owners within the same tenant** (not cross-tenant), per platform rules.
 - Validate mock metadata size/complexity (operation count, body templates, regex/predicates), latency bounds, weights, and OpenAPI operation resolution.
 - No raw secrets in mock metadata/responses; use secret refs.
 - Metrics/logs redact sensitive payloads; status/diagnostics are authz-scoped.
+- Mock Service: cluster-internal only, no ingress, no user RBAC, no PG writes.
 
-## 10. Implementation phases (recommended)
+## 9. API Endpoints (Control Plane)
 
-1. **Finalize metadata schema:** `service.mock` and `database.mock` MVP fields, allowed latency distributions, operation/profile vocabularies, and 2–3 real examples.
-2. **Benchmark Mock Service runtime:** `rps_per_core`, `conns_per_gb`, latency=0 overhead by profile; version benchmark data.
-3. **Ledger + admission:** ACID reservation/idempotency/outbox and pool admission.
-4. **Runtime + operator:** materialize namespace mock metadata -> runtime config, endpoint/DNS, atomic snapshot swap, reconcile, metrics.
-5. **Namespace integration:** validation/apply/readiness hooks, NetworkPolicy exposure, runner egress alignment, load-test compatibility.
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/loadtest/v1/namespaces/{namespace_id}/mock-status` | Aggregated mock readiness for namespace (projection-backed from `tbl_component_status`). |
+| `POST` | `/api/loadtest/v1/namespaces/{namespace_id}/mocks/reconcile` | Trigger mock reconciliation (`202`); admin/owner. |
+| `GET` | `/api/loadtest/v1/mock-pools` | List capacity pools/classes (projection-backed). **Not yet implemented.** |
+| `GET` | `/api/loadtest/v1/mock-pools/{pool_id}` | Pool utilization/reservations/health. **Not yet implemented.** |
 
-## 11. Open decisions
+**Status codes:** `200/201/202` success/accepted, `400/422` validation, `401/403/404` authz, `409` (`INSUFFICIENT_MOCK_CAPACITY` — future, `CONFLICT`, version/state), `429` quota.
 
-1. **Canonical metadata shape:** exact `service.mock` / `database.mock` schema and MVP operation/profile vocabulary (especially database/cloud adapters).
-2. **Real vs mock mode:** per component, can a dependency be `real`, `mock`, or `hybrid`? How is ambiguity prevented at apply time?
-3. **Binding materialization:** are runtime bindings persisted as explicit rows derived from namespace components, or computed/projection-only?
-4. **Protocol scope:** HTTP/OpenAPI service mocks in MVP; database/cloud profiles supported in MVP vs staged.
-5. **Stateful behavior:** stateless MVP; stateful/sessionful mock scenarios as extension.
-6. **Pool selection/capacity request:** who sets `capacity_request` (user spec vs platform default vs admission estimate), and how are units normalized?
-7. **Active-run behavior:** snapshot-by-generation for running load tests vs block mock-affecting apply.
-8. **Endpoint addressing:** internal DNS/service naming convention and NetworkPolicy templates for mock endpoints.
+## 10. Open decisions / Future work
+
+1. **Mock pools/ledger/admission**: `INSUFFICIENT_MOCK_CAPACITY` gate, pool capacity units, reservation ledger (ACID/idempotent).
+2. **Database mock profiles**: `profile: "postgres-compatible"` with operation/shape-based latency & result templates.
+3. **Capacity request in mock def**: `rps_units`, `concurrent_connections` per component; normalized pool units.
+4. **Active-run snapshot behavior**: Snapshot-by-generation for running load tests vs block mock-affecting apply.
+5. **Stateful/sessionful mocks**: MVP is stateless; session affinity as extension.
+6. **Protocol scope**: HTTP/OpenAPI in MVP; database/cloud profiles staged.
+7. **Endpoint addressing**: Internal DNS convention (`mock-<svc>.<lt-env-ns>.svc.cluster.local`) and NetworkPolicy templates.
+
+## 11. Implementation status (as of 2026-11-11)
+
+| Phase | Feature | Status |
+|---|---|---|
+| 1 | Metadata schema (`service.mock` JSONB, `mockruntime` types) | ✅ Complete |
+| 2 | Benchmark Mock Service runtime | ❌ Not done |
+| 3 | Ledger + admission | ❌ Not done |
+| 4 | Runtime + operator (`mock-service`, `mockcontrol`, `mockruntime`) | ✅ Complete |
+| 5 | Namespace integration (watcher evaluator, readiness) | ✅ Complete |
+
+**Files:**
+- `pkgs/mockruntime/runtime.go` — data plane HTTP router, variant selection, latency injection
+- `pkgs/mockcontrol/bindings.go` — controller ConfigMap + ExternalName Service + env injection
+- `cmds/mock-service/main.go` — separate binary entrypoint
+- `pkgs/statuswatcher/watcher.go` — `evalMocks` generation-fenced evaluator
+- `pkgs/envreconciler/reconciler.go` — applies mock bindings in step 5
