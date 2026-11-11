@@ -34,6 +34,17 @@ func main() {
 }
 
 func run() error {
+	// CLI subcommand: sops encrypt/decrypt (chỉ cần LTP_MASTER_KEY, không cần
+	// DB). Thực thi trước config.FromEnv() để không bị choke khi
+	// DATABASE_DSN chưa set.
+	if len(os.Args) > 1 && os.Args[1] == "sops" {
+		sopsCmd := secrets.SopsSubcommand{}
+		if err := sopsCmd.Run(os.Args[2:]); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
@@ -108,7 +119,7 @@ func run() error {
 	srv := &http.Server{
 		Addr: cfg.Addr,
 		Handler: server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run, K8s: k8sClient, K8S: cfg.K8SEnabled, StaleAfter: time.Duration(cfg.WatcherStalenessThreshold) * time.Second,
-			Net:   net,
+			Net:      net,
 			ApplyNow: applyNowFn(db, cfg.K8SAPIURL, func() bool { return leaderGate == nil || leaderGate.IsLeader() }, net)}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

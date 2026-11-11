@@ -69,3 +69,20 @@ docker compose up -d --wait          # postgres + valkey + dex + serve
 curl http://localhost:8080/health    # qua nginx → UDS → controller
 make test-integration                # full suite
 ```
+
+## 5. Deploy lên Kubernetes (kind / multi-cluster sau)
+
+Manifest kustomize tại `deploy/k8s/` (base + overlay `kind/`), RBAC least-privilege cho controller, và secrets 2 tầng (SOPS/age file-level + `pkgs/secrets` field-level AES-256-GCM).
+
+- Hướng dẫn chi tiết: `docs/k8s-deployment.md` (sinh age key, mã hoá secrets, deploy, port-forward, bearer token từ Dex, CLI `sops` encrypt/decrypt, CI job).
+- Plan chi tiết: `plans/36-k8s-manifests.md`.
+
+```sh
+earthly +integration-images
+kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name ltp
+kubectl apply -k deploy/k8s/overlays/kind
+kubectl -n ltp-system rollout status deploy/serve --timeout=180s
+kubectl -n ltp-system port-forward svc/serve 8080:8080 &
+TOKEN=$(python3 scripts/mint-dex-token.py)
+curl -H "Host: localhost" -H "Authorization: Bearer $TOKEN" http://localhost:8080/health
+```

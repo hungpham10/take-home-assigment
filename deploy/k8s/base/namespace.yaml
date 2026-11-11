@@ -1,0 +1,18 @@
+# Namespace nền tảng (control plane) + namespace mock-service (data-plane).
+# mock-system BẮT BUỘC: pkgs/mockcontrol.MockServiceDNS() hardcode
+#   mock-service.mock-system.svc.cluster.local (NetworkPolicy egress trỏ tới đây).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ltp-system
+  labels:
+    loadtest.io/managed-by: loadtest-controller
+    environment: dev
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mock-system
+  labels:
+    loadtest.io/managed-by: loadtest-controller
+    environment: dev

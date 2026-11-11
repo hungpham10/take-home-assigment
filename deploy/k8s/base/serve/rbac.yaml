@@ -1,0 +1,69 @@
+# Least-privilege RBAC cho controller (chạy trong serve pod, in-cluster config).
+# Các kind khớp chính xác những gì pkgs/envreconciler + pkgs/statuswatcher +
+# pkgs/runner sử dụng (xem GVK list trong code). Không wildcard.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: serve
+  labels:
+    app: serve
+    loadtest.io/managed-by: loadtest-controller
+rules:
+  # Namespace test (lt-env-*) — controller tạo/xoá khi apply/delete namespace.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Component tree trong env namespace.
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # NetworkPolicy (run-scoped) + Ingress.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods (status fallback khi TestRun.stage kẹt) + Jobs (k6-operator runner/starter).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "delete"]
+  # CNPG Cluster (env DB) + ECK Elasticsearch.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["elasticsearch.k8s.elastic.co"]
+    resources: ["elasticsearches"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # k6-operator TestRun (+status subresource để cập nhật stage).
+  - apiGroups: ["k6.io"]
+    resources: ["testruns", "testruns/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # HPA.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events (status watcher ghi sự kiện).
+  - apiGroups: ["events"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  # HA leader election (chỉ khi HA_ENABLED=true; không có thì không dùng).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: serve
+  labels:
+    app: serve
+    loadtest.io/managed-by: loadtest-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: serve
+subjects:
+  - kind: ServiceAccount
+    name: serve
+    namespace: ltp-system
