@@ -176,6 +176,22 @@ func TestINT_SVC_MockValidation(t *testing.T) {
 		t.Errorf("binding shape: (%d, %s), want 422", rec.Code, rec.Body.String())
 	}
 
+	// database_bindings with documented `binding` alias → 201 (backward compat)
+	goodBindings := serviceFull("bound-alias")
+	goodBindings["database_bindings"] = []map[string]any{{"binding": "DEMO_DB", "database_id": "db-x"}}
+	rec = testutil.Do(t, h, http.MethodPost, nsBase+"/services", principal, goodBindings)
+	if rec.Code != 201 {
+		t.Errorf("binding alias: %d %s, want 201", rec.Code, rec.Body.String())
+	}
+
+	// database_bindings with canonical `name` → 201
+	goodName := serviceFull("bound-name")
+	goodName["database_bindings"] = []map[string]any{{"name": "DEMO_DB", "database_id": "db-x"}}
+	rec = testutil.Do(t, h, http.MethodPost, nsBase+"/services", principal, goodName)
+	if rec.Code != 201 {
+		t.Errorf("binding name: %d %s, want 201", rec.Code, rec.Body.String())
+	}
+
 	// dependencies referencing an unknown service → 422
 	badDeps := serviceFull("dependent")
 	badDeps["dependencies"] = []map[string]any{{"service_id": "svc-ghost"}}

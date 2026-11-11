@@ -44,8 +44,12 @@ type mockDef struct {
 
 // bindingDef is one database_bindings[] entry. database_id existence is
 // validated in plan 18 PR C — here only the shape (binding name) is required.
+// `name` is canonical; `binding` is an accepted alias (documented in
+// docs/service-management-api.md & docs/namespace-management-api.md) so
+// existing clients keep working.
 type bindingDef struct {
 	Name       string `json:"name"`
+	Binding    string `json:"binding"`
 	DatabaseID string `json:"database_id"`
 }
 
@@ -95,15 +99,16 @@ func validateServiceDefinition(db *gorm.DB, nsID string, s serviceSpec, summary 
 		}
 	}
 	// database_bindings: shape only (binding name required; database_id
-	// existence comes with plan 18 PR C).
+	// existence comes with plan 18 PR C). Accept `name` (canonical) or
+	// `binding` (documented alias).
 	if len(s.DatabaseBindings) > 0 {
 		var bindings []bindingDef
 		if err := json.Unmarshal(s.DatabaseBindings, &bindings); err != nil {
 			return specErr{"database_bindings must be an array"}
 		}
 		for _, b := range bindings {
-			if b.Name == "" {
-				return specErr{"database_bindings[].name is required"}
+			if b.Name == "" && b.Binding == "" {
+				return specErr{"database_bindings[].name (or binding) is required"}
 			}
 		}
 	}
