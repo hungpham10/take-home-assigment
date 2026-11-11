@@ -201,7 +201,7 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   AUTH_PROFILE=", p AS (
     INSERT INTO tbl_tenant_auth_profiles (tenant_id, name, issuer, jwks_uri, config)
     SELECT id, 'default', 'http://dex:5556/dex', 'http://dex:5556/dex/keys',
-           '{\"jwt_mode\":\"jwks\",\"oidc_expected_alg\":\"RS256\"}'::jsonb
+           '{\"jwt_mode\":\"jwks\",\"oidc_jwks_url\":\"http://dex:5556/dex/keys\",\"oidc_issuer\":\"http://dex:5556/dex\",\"oidc_client_id\":\"ltp-test\",\"oidc_client_secret\":\"ltp-dev-shared-secret-32-bytes-min!!\",\"oidc_expected_alg\":\"RS256\",\"session_secret\":\"global-dev-session-secret-32-bytes!\"}'::jsonb
     FROM t
     ON CONFLICT (tenant_id, name) DO UPDATE
       SET issuer = EXCLUDED.issuer, jwks_uri = EXCLUDED.jwks_uri,
