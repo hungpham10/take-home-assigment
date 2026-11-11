@@ -167,3 +167,11 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 - **docker-compose**: postgres + valkey (noeviction, session lua) + dex v2.41.1 (conf/dex/config.dev.yaml, issuer localhost:5556/dex) + loadtest-serve (SOPS mount, healthcheck /health).
 - **Integration test** pattern opsense-rs: `tests/integration/` (tag `integration`) — dex login flow Go port, health smoke qua nginx, oauth flow qua gateway `/login`+`/callback`; skip khi không có stack, fail hard khi `LTP_INTEGRATION=1`. `scripts/mint-dex-token.py` host CLI. Makefile `test-integration`/`test-integration-down`/`up`/`down`.
 - Chi tiết: `docs/packaging-deployment.md`, `plans/34-aio-serve-image.md`.
+
+### plans/36 — Deploy lên Kubernetes (kind) + full test in-cluster (2026-11-11)
+
+- **Manifest**: `deploy/k8s/` (base: ltp-system, mock-system, postgres StatefulSet, valkey, dex, mock-service, serve AIO Deployment/Service/SA/RBAC/SOPS secrets; overlays: `kind/`, khung `prod/`).
+- **Secrets 2 tầng**: SOPS + age (`deploy/k8s/base/serve/secrets.enc.yaml`, commit được) mount qua ConfigMap + `SOPS_AGE_KEY_CONTENT` Secret → `scripts/release.sh` giải mã boot; `pkgs/secrets` field-level AES-256-GCM (`LTP_MASTER_KEY`) cho giá trị trong DB.
+- **CLI**: `loadtest-controller sops encrypt|decrypt` (hex blob, pattern `opsense-rs sops.rs`) — sinh/verify `token_encrypted` khi seed SQL.
+- **Test**: CI job `Full Deploy E2E (in-cluster)` — Earthly build → kind load → kustomize apply → `tests/e2e-full-deploy.sh DEPLOY_MODE=in-cluster` (bearer token từ `scripts/mint-dex-token.py`) → `tests/integration` qua port-forward.
+- Chi tiết: `docs/k8s-deployment.md`, `plans/36-k8s-manifests.md`.

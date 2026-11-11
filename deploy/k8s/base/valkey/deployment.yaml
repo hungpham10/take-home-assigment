@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: ltp-system
+  labels:
+    app: valkey
+    loadtest.io/managed-by: loadtest-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: valkey
+  template:
+    metadata:
+      labels:
+        app: valkey
+    spec:
+      containers:
+        - name: valkey
+          image: valkey/valkey:9-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - valkey-server
+            - --save
+            - ""
+            - --maxmemory
+            - 512mb
+            - --maxmemory-policy
+            - noeviction
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: [valkey-cli, ping]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: [valkey-cli, ping]
+            initialDelaySeconds: 30
+            periodSeconds: 10

@@ -109,6 +109,11 @@ func TestINT_ADM_03_04_05_06_07_AuthConfigShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := body.Auth
+	// id phải là TENANT id (nginx set thẳng thành X-Tenant-Id), không phải
+	// auth-profile id — xem plans/36 "Fix log" #4.
+	if a.ID != tenantID {
+		t.Errorf("auth.id = %q, want tenant id %q", a.ID, tenantID)
+	}
 	if a.OIDCIssuer != "http://dex:5556/dex" || a.OIDCClientID != "cid" ||
 		a.OIDCClientSecret != "s3cr3t" || a.SessionSecret != "sess" ||
 		a.JWTMode != "jwks" || a.OIDCExpectedAlg != "RS256" {

@@ -1,0 +1,16 @@
+resources:
+  - namespace.yaml
+  - postgres/statefulset.yaml
+  - postgres/service.yaml
+  - valkey/deployment.yaml
+  - valkey/service.yaml
+  - dex/configmap.yaml
+  - dex/deployment.yaml
+  - dex/service.yaml
+  - mock-system/service.yaml
+  - mock-system/deployment.yaml
+  - serve/serviceaccount.yaml
+  - serve/rbac.yaml
+  - serve/secrets-configmap.yaml
+  - serve/deployment.yaml
+  - serve/service.yaml

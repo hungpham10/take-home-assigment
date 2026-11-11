@@ -181,6 +181,65 @@ jobs:
           kubectl get ns,deploy,svc,pods -A || true
           kubectl get cluster -A || true
 
+  # Full Deploy E2E in-cluster: platform (serve AIO + Dex + valkey + postgres
+  # + mock-service) chạy trên kind qua kustomize manifests (deploy/k8s/),
+  # controller dùng in-cluster config (RUNNER_MODE=k8s). Test bằng bearer token
+  # từ Dex (không mở browser). Tương đương plans/36.
+  full-deploy-incluster:
+    name: Full Deploy E2E (in-cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install kind + kubectl
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          curl -Lo ./kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          kind --version
+          kubectl version --client
+      - name: Build Go binaries
+        run: |
+          go build -o bin/loadtest-controller ./cmds/loadtest-controller
+          go build -o bin/mock-service ./cmds/mock-service
+      - name: Build serve + mock-service images (docker build)
+        run: |
+          docker build -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
+          docker build -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
+      - name: Create kind cluster (with retry)
+        run: |
+          for i in $(seq 1 3); do
+            echo "Attempt $i: creating kind cluster ltp-full-deploy-incluster"
+            if kind create cluster --name ltp-full-deploy-incluster --wait 120s; then
+              echo "Kind cluster created successfully"
+              break
+            fi
+            echo "Attempt $i failed, waiting 10s before retry..."
+            kind delete cluster --name ltp-full-deploy-incluster 2>/dev/null || true
+            sleep 10
+          done
+          kind export kubeconfig --name ltp-full-deploy-incluster
+          kubectl get nodes
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Run full deploy E2E (in-cluster)
+        env:
+          SKIP_BOOTSTRAP: "0"
+          DEPLOY_MODE: "in-cluster"
+          SOPS_AGE_KEY_CONTENT: ${{ secrets.SOPS_AGE_KEY_CONTENT }}
+        run: ./tests/e2e-full-deploy.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods,testruns,clusters -A || true
+          kubectl -n k6-operator-system logs deploy/k6-operator-controller-manager --tail=200 2>&1 || true
+          kubectl -n ltp-system logs deploy/serve --all-containers --tail=100 2>&1 || true
+
   # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
   # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
   # sources/opsense-rs/.github/workflows/ci.yml (service container + health

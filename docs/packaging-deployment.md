@@ -27,9 +27,13 @@ Registry/tag: `ghcr.io/hungpham10/loadtest-platform/{serve,mock-service}:${VERSI
 | `alloy` | `/app/alloy.sh` | metrics scrape `localhost:8080` (gateway), `USE_ALLOY` toggle |
 
 Entrypoint chain (`scripts/entrypoint.sh` → `scripts/release.sh`):
-`mkdir -p /var/run/axum` → `decrypt_secrets` (SOPS age, `/app/secrets/secrets.<APP_ENV>.enc.yaml`) →
+`decrypt_secrets` (SOPS age, `/app/secrets/secrets.<APP_ENV>.enc.yaml`) →
 `prepare` (không chạy SQL — **controller tự migrate qua embedded SQL** `embed.go`; chỉ đợi PostgreSQL sẵn sàng
-nếu `POSTGRES_HOST` set) → `boot` (sed placeholders `%%HTTP_SERVER%%`, `%%NGINX_LOG%%` trong conf nginx) → `exec supervisord -n`.
+nếu `POSTGRES_HOST` set) → `boot` (sed placeholders `%%HTTP_SERVER%%`, `%%NGINX_LOG%%`, `%%NGINX_RESOLVER%%` trong conf nginx) → `exec supervisord -n`.
+
+> `/var/run/axum` là **file unix socket**, do `pkgs/listener` tạo (mkdir parent + xoá stale + chmod 666).
+> Không `mkdir -p /var/run/axum` và không mount volume vào path này — biến nó thành thư mục sẽ làm
+> controller bind fail. Chi tiết: `docs/k8s-deployment.md`, `docs/nginx-oidc-auth.md`.
 
 ## 2. Dex dev stack (docker-compose.yml)
 
@@ -68,4 +72,21 @@ earthly +integration-images          # build 2 image local
 docker compose up -d --wait          # postgres + valkey + dex + serve
 curl http://localhost:8080/health    # qua nginx → UDS → controller
 make test-integration                # full suite
+```
+
+## 5. Deploy lên Kubernetes (kind / multi-cluster sau)
+
+Manifest kustomize tại `deploy/k8s/` (base + overlay `kind/`), RBAC least-privilege cho controller, và secrets 2 tầng (SOPS/age file-level + `pkgs/secrets` field-level AES-256-GCM).
+
+- Hướng dẫn chi tiết: `docs/k8s-deployment.md` (sinh age key, mã hoá secrets, deploy, port-forward, bearer token từ Dex, CLI `sops` encrypt/decrypt, CI job).
+- Plan chi tiết: `plans/36-k8s-manifests.md`.
+
+```sh
+earthly +integration-images
+kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name ltp
+kubectl apply -k deploy/k8s/overlays/kind
+kubectl -n ltp-system rollout status deploy/serve --timeout=180s
+kubectl -n ltp-system port-forward svc/serve 8080:8080 &
+TOKEN=$(python3 scripts/mint-dex-token.py)
+curl -H "Host: localhost" -H "Authorization: Bearer $TOKEN" http://localhost:8080/health
 ```

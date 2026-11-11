@@ -85,12 +85,16 @@ function localtonet() {
 function boot() {
   local cmd=$1
   local nginx_conf="${NGINX_DIR}/http.d/default.conf"
+  # resolver cho cosocket: default giữ Docker embedded DNS (compose),
+  # k8s set NGINX_RESOLVER=kube-dns.kube-system.svc.cluster.local.
+  local nginx_resolver="${NGINX_RESOLVER:-127.0.0.11}"
 
-  # Placeholders của conf/nginx (plans/34):
-  #   %%NGINX_LOG%%    — access_log format (http.conf)
-  #   %%HTTP_SERVER%%  — server_name (www.conf)
-  #   %%TOR_SERVER%%   — legacy alias, dev = HTTP_SERVER
-  #   %%FORCE_SSL%%    — chỉ tồn tại khi template có HTTPS; dev = off
+  # Placeholders của conf/nginx (plans/34, plans/36):
+  #   %%NGINX_LOG%%      — access_log format (http.conf)
+  #   %%HTTP_SERVER%%    — server_name (www.conf)
+  #   %%TOR_SERVER%%     — legacy alias, dev = HTTP_SERVER
+  #   %%NGINX_RESOLVER%% — resolver cho cosocket (http.conf + www.conf)
+  #   %%FORCE_SSL%%      — chỉ tồn tại khi template có HTTPS; dev = off
   if [ "${HTTP_PROTOCOL}" = "https" ]; then
     sed -i "s/%%FORCE_SSL%%/on/g" "$nginx_conf"
   else
@@ -100,6 +104,7 @@ function boot() {
   fi
 
   sed -i "s/%%NGINX_LOG%%/$NGINX_LOG/g" "${NGINX_DIR}/nginx.conf"
+  sed -i "s/%%NGINX_RESOLVER%%/$nginx_resolver/g" "${NGINX_DIR}/nginx.conf" "$nginx_conf"
   sed -i "s|%%HTTP_SERVER%%|$HTTP_SERVER|g; s|%%TOR_SERVER%%|$HTTP_SERVER|g" "$nginx_conf"
 
   shift

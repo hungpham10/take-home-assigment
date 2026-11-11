@@ -72,10 +72,12 @@ func PrincipalOf(r *http.Request) Principal {
 	return p
 }
 
-// RequirePrincipalWithRole wraps RequirePrincipal and resolves the role
+// RequirePrincipalWithRole wraps RequirePrincipal, resolves an opaque external
+// subject (OIDC `sub`, plan 37) to a local user id, and resolves the role
 // server-side from tbl_user_roles/tbl_users (plan16 API-AUTHZ-04 — the
 // X-User-Role header alone is not authoritative):
 //
+//   - identity not resolvable → fail-closed 401.
 //   - DB role found → DB role wins regardless of the header claim.
 //   - no DB role + empty header  → proceed with an empty role (unprivileged).
 //   - no DB role + header claims a role → fail-closed 401 (spoofed/unprovisioned identity).
@@ -83,8 +85,15 @@ func RequirePrincipalWithRole(db *gorm.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return RequirePrincipal(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p := PrincipalOf(r)
+			userID, err := resolveIdentity(db, p.TenantID, p.UserID)
+			if err != nil {
+				httpx.WriteCodeError(w, "UNAUTHORIZED", "identity not recognized")
+				return
+			}
+			p.UserID = userID
+
 			var role string
-			err := db.WithContext(r.Context()).Raw(
+			err = db.WithContext(r.Context()).Raw(
 				`SELECT ur.role FROM tbl_user_roles ur
 				 JOIN tbl_users u ON u.id = ur.user_id
 				 WHERE u.id = ?::uuid AND u.tenant_id = ?::uuid

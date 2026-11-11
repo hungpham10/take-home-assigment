@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -74,6 +75,23 @@ func TestNewUnixSocketReplacesStaleSocket(t *testing.T) {
 		t.Fatalf("New over stale file: %v", err)
 	}
 	_ = ln.Close()
+}
+
+func TestNewUnixSocketRejectsDirectory(t *testing.T) {
+	// /var/run/axum phải là FILE socket. Nếu ai đó tạo nó thành thư mục
+	// (mkdir trong entrypoint, emptyDir mount), os.Remove(path) fail với
+	// EBUSY/EISDIR — thông báo lỗi phải chỉ thẳng vào nguyên nhân.
+	path := filepath.Join(t.TempDir(), "axum")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New("unix:" + path)
+	if err == nil {
+		t.Fatal("New over directory: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("error = %q, want mention of directory", err)
+	}
 }
 
 func TestNewTCPUnchanged(t *testing.T) {

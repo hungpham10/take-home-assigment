@@ -25,11 +25,20 @@ K6_OPERATOR_BUNDLE="https://raw.githubusercontent.com/grafana/k6-operator/${K6_O
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
 jqget() { python3 -c "import sys,json;d=json.load(sys.stdin);v=d$1;print('' if v is None else ('true' if v is True else ('false' if v is False else str(v))))"; }
 
 # --- 0. tooling ---------------------------------------------------------------
 command -v kubectl >/dev/null || fail "kubectl not installed"
 command -v curl >/dev/null || fail "curl not installed"
+command -v python3 >/dev/null || fail "python3 not installed"
+
+DEPLOY_MODE="${DEPLOY_MODE:-legacy}"   # legacy: docker postgres + go controller (máy local)
+                                       # in-cluster: docker build images + kustomize apply lên kind
+if [ "$DEPLOY_MODE" = "in-cluster" ]; then
+  command -v docker >/dev/null || fail "docker not installed (cần cho DEPLOY_MODE=in-cluster)"
+  BASE=http://localhost:8080           # port-forward svc/serve 8080:8080 ở bước 2
+fi
 
 # --- 1. cluster bootstrap -----------------------------------------------------
 if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
@@ -98,60 +107,176 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
 fi
 
 # --- 2. control-plane postgres + controller -----------------------------------
-say "control-plane postgres (:$PG_PORT)"
-docker rm -f ltp-full-deploy-pg >/dev/null 2>&1 || true
-docker run -d --rm --name ltp-full-deploy-pg \
-  -e POSTGRES_USER=ltp -e POSTGRES_PASSWORD=ltp -e POSTGRES_DB=ltp \
-  -p "$PG_PORT:5432" postgres:16-alpine >/dev/null
-PGHOST=127.0.0.1 PGPORT=$PG_PORT PGUSER=ltp PGPASSWORD=ltp PGDATABASE=ltp
-export PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
-# psql wrapper: host không có psql → chạy qua container postgres (portable CI/local)
-psql() { docker exec -i ltp-full-deploy-pg psql -U ltp -d ltp "$@"; }
-for i in $(seq 1 30); do pg_in=$(psql -tAc "SELECT 1" 2>/dev/null || true); [ "$pg_in" = "1" ] && break; sleep 1; done
-[ "$pg_in" = "1" ] || fail "control-plane postgres not ready"
+if [ "$DEPLOY_MODE" = "in-cluster" ]; then
+  say "build images (docker build) + apply k8s overlay kind"
+  docker build -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
+  docker build -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
+  kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name "$CLUSTER" 2>/dev/null || true
+  export SOPS_AGE_KEY_CONTENT="${SOPS_AGE_KEY_CONTENT:-}"
+  POSTGRES_PASSWORD=ltp scripts/k8s-apply.sh
+  # port-forward: serve (API gateway), dex (mint token), postgres (seed SQL)
+  kubectl -n ltp-system port-forward svc/serve 8080:8080 >/tmp/ltp-full-deploy-pf-serve.log 2>&1 &
+  PF_SERVE=$!
+  kubectl -n ltp-system port-forward svc/dex 5556:5556 >/tmp/ltp-full-deploy-pf-dex.log 2>&1 &
+  PF_DEX=$!
+  # đợi Dex discovery sẵn sàng (tránh 302 khi mint token)
+  for i in $(seq 1 30); do
+    if curl -sf http://localhost:5556/dex/.well-known/openid-configuration >/dev/null 2>&1; then break; fi
+    sleep 2
+  done
+  curl -sf http://localhost:5556/dex/.well-known/openid-configuration >/dev/null 2>&1 || fail "dex discovery không sẵn sàng"
+  kubectl -n ltp-system port-forward svc/postgres 5432:5432 >/tmp/ltp-full-deploy-pf-pg.log 2>&1 &
+  PF_PG=$!
+  # cho port-forward ổnsten trước khi curl health (tránh connection refused spurio)
+  sleep 3
+  # đợi postgres pod xuất hiện
+  PG_POD=""
+  for i in $(seq 1 30); do
+    PG_POD=$(kubectl -n ltp-system get pod -l app=postgres -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    [ -n "$PG_POD" ] && break
+    sleep 1
+  done
+  [ -n "$PG_POD" ] || fail "postgres pod không xuất hiện"
+  export PGPASSWORD=ltp
+  psql() { kubectl -n ltp-system exec "$PG_POD" -- psql -U ltp -d ltp "$@"; }
+  # health qua nginx gateway (không cần auth)
+  HEALTH_OK=""
+  for i in $(seq 1 30); do
+    if curl -sf http://localhost:8080/health >/dev/null 2>&1; then HEALTH_OK=1; break; fi
+    sleep 2
+  done
+  [ -n "$HEALTH_OK" ] || { echo "--- serve pf log ---"; tail -20 /tmp/ltp-full-deploy-pf-serve.log >&2 || true; fail "serve health (60s)"; }
+  # bearer token từ Dex (host-side qua port-forward 5556) — scripts/mint-dex-token.py
+  # (một bản port của sources/opsense-rs/scripts/mint-dex-token.py) thực hiện đầy đủ
+  # flow OIDC: discovery → login form → POST credentials → approval → exchange code.
+  TOKEN=$(LTP_DEX_ISSUER=http://localhost:5556/dex \
+    LTP_DEX_CLIENT_ID=ltp-test \
+    LTP_DEX_CLIENT_SECRET='ltp-dev-shared-secret-32-bytes-min!!' \
+    LTP_DEX_USER=dev-user@example.com \
+    LTP_DEX_PASSWORD=password \
+    python3 scripts/mint-dex-token.py --print --login)
+  [ -n "$TOKEN" ] || fail "mint Dex bearer token"
+  # Header phải là MỘT argv của curl ⇒ dùng config file (-K).
+  # Viết `H="-H Authorization: Bearer $TOKEN -H Host: localhost"` rồi dùng $H
+  # (không quote) sẽ bị word-split: curl nhận `-H Authorization:` (xoá header)
+  # và `-H Host:` (xoá Host) ⇒ HTTP/1.1 thiếu Host ⇒ nginx trả 400 mặc định.
+  CURL_CONF=/tmp/ltp-full-deploy-curl.conf
+  printf 'header = "Authorization: Bearer %s"\nheader = "Host: localhost"\n' "$TOKEN" > "$CURL_CONF"
+  chmod 600 "$CURL_CONF"
+  H="-K $CURL_CONF"
+  trap 'kill $PF_SERVE $PF_DEX $PF_PG 2>/dev/null || true; rm -f "$CURL_CONF"' EXIT
 
-for f in sql/*.sql; do psql -v ON_ERROR_STOP=1 -q < "$f" || fail "migration $f"; done
+  # nginx chuyển id_token.sub thành X-User-Id. Dex LUÔN trả sub dạng opaque
+  # (base64url protobuf{userID, connectorID}), nên controller map subject →
+  # tbl_users.id qua tbl_user_external_identities (plans/37). Đọc thẳng sub từ
+  # token vừa mint thay vì hardcode chuỗi protobuf của Dex.
+  SUBJECT=$(TOKEN="$TOKEN" python3 -c '
+import base64, json, os
+payload = os.environ["TOKEN"].split(".")[1]
+payload += "=" * (-len(payload) % 4)
+print(json.loads(base64.urlsafe_b64decode(payload)).get("sub", ""))
+')
+  [ -n "$SUBJECT" ] || fail "decode id_token.sub"
+  echo "   sub=$SUBJECT"
+else
+  say "control-plane postgres (:$PG_PORT)"
+  docker rm -f ltp-full-deploy-pg >/dev/null 2>&1 || true
+  docker run -d --rm --name ltp-full-deploy-pg \
+    -e POSTGRES_USER=ltp -e POSTGRES_PASSWORD=ltp -e POSTGRES_DB=ltp \
+    -p "$PG_PORT:5432" postgres:16-alpine >/dev/null
+  PGHOST=127.0.0.1 PGPORT=$PG_PORT PGUSER=ltp PGPASSWORD=ltp PGDATABASE=ltp
+  export PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
+  # psql wrapper: host không có psql → chạy qua container postgres (portable CI/local)
+  psql() { docker exec -i ltp-full-deploy-pg psql -U ltp -d ltp "$@"; }
+  for i in $(seq 1 30); do pg_in=$(psql -tAc "SELECT 1" 2>/dev/null || true); [ "$pg_in" = "1" ] && break; sleep 1; done
+  [ "$pg_in" = "1" ] || fail "control-plane postgres not ready"
 
-say "build + start controller (K8S_ENABLED=true)"
-SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
-go build -o bin/loadtest-controller ./cmds/loadtest-controller
-DATABASE_DSN="postgres://ltp:ltp@127.0.0.1:$PG_PORT/ltp?sslmode=disable" \
-SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=${BASE#http://localhost} K8S_ENABLED=true RUNNER_MODE=k8s K8S_API_URL="$SERVER" KUBECONFIG="$HOME/.kube/config" \
-  ./bin/loadtest-controller > /tmp/ltp-full-deploy-controller.log 2>&1 &
-CTRL_PID=$!
-trap 'kill $CTRL_PID 2>/dev/null; docker rm -f ltp-full-deploy-pg >/dev/null 2>&1' EXIT
-HEALTH_OK=""
-for i in $(seq 1 30); do
-  if curl -sf "$BASE/health" >/dev/null 2>&1; then HEALTH_OK=1; break; fi
-  sleep 2
-done
-[ -n "$HEALTH_OK" ] || { echo "--- controller log ---"; tail -30 /tmp/ltp-full-deploy-controller.log >&2 || true; fail "controller health (60s)"; }
+  for f in sql/*.sql; do psql -v ON_ERROR_STOP=1 -q < "$f" || fail "migration $f"; done
+
+  say "build + start controller (K8S_ENABLED=true)"
+  SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+  go build -o bin/loadtest-controller ./cmds/loadtest-controller
+  DATABASE_DSN="postgres://ltp:ltp@127.0.0.1:$PG_PORT/ltp?sslmode=disable" \
+  SCRIPTS_DIR=/tmp/ltp-full-deploy ADDR=${BASE#http://localhost} K8S_ENABLED=true RUNNER_MODE=k8s K8S_API_URL="$SERVER" KUBECONFIG="$HOME/.kube/config" \
+    ./bin/loadtest-controller > /tmp/ltp-full-deploy-controller.log 2>&1 &
+  CTRL_PID=$!
+  trap 'kill $CTRL_PID 2>/dev/null; docker rm -f ltp-full-deploy-pg >/dev/null 2>&1' EXIT
+  HEALTH_OK=""
+  for i in $(seq 1 30); do
+    if curl -sf "$BASE/health" >/dev/null 2>&1; then HEALTH_OK=1; break; fi
+    sleep 2
+  done
+  [ -n "$HEALTH_OK" ] || { echo "--- controller log ---"; tail -30 /tmp/ltp-full-deploy-controller.log >&2 || true; fail "controller health (60s)"; }
+  # legacy: header-based auth (không bearer)
+  H=""
+fi
 
 # --- 3. fixture + namespace + database + echo service qua API ------------------
 say "seed tenant fixture"
+# In-cluster (bearer): host=localhost để nginx resolve tenant qua $host, +
+# auth profile trỏ Dex để verify JWT. Legacy (header): host=fulldeploy.local,
+# auth qua X-Tenant-Id/X-User-Id header.
+if [ "$DEPLOY_MODE" = "in-cluster" ]; then
+  TENANT_HOST="localhost"
+  # Dex phải là FQDN: resolver của nginx (cosocket) không dùng search domain
+  # trong /etc/resolv.conf ⇒ query "dex" trả SERVFAIL ("dex could not be resolved
+  # (2: Server failure)") dù pod resolve được nhờ ndots.
+  DEX_URL="http://dex.ltp-system.svc.cluster.local:5556/dex"
+  # user id PHẢI = Dex staticPasswords[].userID (deploy/k8s/base/dex/configmap.yaml):
+  # id_token.sub → X-User-Id → resolve qua tbl_user_external_identities (plans/37).
+  USER_UUID="11111111-1111-4111-8111-111111111111"
+  USER_CTE=", u AS (
+    INSERT INTO tbl_users (id, tenant_id, email, display_name)
+    SELECT '$USER_UUID'::uuid, id, 'dev-user@example.com', 'FullDeploy' FROM t
+    ON CONFLICT (id) DO UPDATE SET display_name='FullDeploy' RETURNING id, tenant_id
+  )"
+  AUTH_PROFILE=", p AS (
+    INSERT INTO tbl_tenant_auth_profiles (tenant_id, name, issuer, jwks_uri, config)
+    SELECT id, 'default', '$DEX_URL', '$DEX_URL/keys',
+           '{\"jwt_mode\":\"jwks\",\"oidc_jwks_url\":\"$DEX_URL/keys\",\"oidc_issuer\":\"$DEX_URL\",\"oidc_client_id\":\"ltp-test\",\"oidc_client_secret\":\"ltp-dev-shared-secret-32-bytes-min!!\",\"oidc_expected_alg\":\"RS256\",\"session_secret\":\"global-dev-session-secret-32-bytes!\"}'::jsonb
+    FROM t
+    ON CONFLICT (tenant_id, name) DO UPDATE
+      SET issuer = EXCLUDED.issuer, jwks_uri = EXCLUDED.jwks_uri,
+          config = EXCLUDED.config, updated_at = now()
+  ), i AS (
+    INSERT INTO tbl_user_external_identities (user_id, issuer, subject)
+    SELECT id, '$DEX_URL', '$SUBJECT' FROM u
+    ON CONFLICT (issuer, subject) DO UPDATE SET user_id = EXCLUDED.user_id
+  )"
+else
+  TENANT_HOST="fulldeploy.local"
+  USER_CTE=", u AS (
+    INSERT INTO tbl_users (tenant_id, email, display_name)
+    SELECT id, 'fulldeploy@local', 'FullDeploy' FROM t
+    ON CONFLICT (tenant_id, email) DO UPDATE SET display_name='FullDeploy' RETURNING id, tenant_id
+  )"
+  AUTH_PROFILE=""
+fi
 SEED=$(psql -tAc "
   WITH t AS (
     INSERT INTO tbl_tenants (name, slug) VALUES ('FullDeploy', 'fulldeploy')
     ON CONFLICT (slug) DO UPDATE SET name='FullDeploy' RETURNING id
-  ), u AS (
-    INSERT INTO tbl_users (tenant_id, email, display_name)
-    SELECT id, 'fulldeploy@local', 'FullDeploy' FROM t
-    ON CONFLICT (tenant_id, email) DO UPDATE SET display_name='FullDeploy' RETURNING id, tenant_id
-  ), r AS (
+  )$USER_CTE, r AS (
     INSERT INTO tbl_user_roles (user_id, role) SELECT id, 'user' FROM u
     ON CONFLICT (user_id, role) DO NOTHING
   ), h AS (
-    INSERT INTO tbl_tenant_hosts (tenant_id, host) SELECT tenant_id, 'fulldeploy.local' FROM u
+    INSERT INTO tbl_tenant_hosts (tenant_id, host) SELECT tenant_id, '$TENANT_HOST' FROM u
     ON CONFLICT (host) DO UPDATE SET tenant_id = EXCLUDED.tenant_id
-  )
+  )$AUTH_PROFILE
   SELECT tenant_id || '|' || id FROM u")
 TENANT=${SEED%%|*}; USERID=${SEED##*|}
 [ -n "$TENANT" ] || fail "seed"
-H="-H X-Tenant-Id:$TENANT -H X-User-Id:$USERID -H X-User-Role:user"
+# legacy: header-based auth (in-cluster đã set H = Bearer ở bước 2)
+if [ -z "${H:-}" ]; then
+  H="-H X-Tenant-Id:$TENANT -H X-User-Id:$USERID -H X-User-Role:user"
+fi
 
 say "create namespace + database + echo service (create-with-spec, 1 call)"
-CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key: fd-ns-$(date +%s)" \
-  $H -H 'Content-Type: application/json' -d '{
+# retry vì kubectl port-forward có thể mất kết nối sau khi health check passa
+CREATE=""
+for i in $(seq 1 5); do
+  if CREATE=$(curl -s --retry 3 --retry-connrefused --retry-delay 2 -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key: fd-ns-$(date +%s)" \
+    $H -H 'Content-Type: application/json' -d '{
     "name":"full-deploy-env",
     "spec":{
       "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":80,"health":{"path":"/","port":80},
@@ -161,7 +286,13 @@ CREATE=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces" -H "Idempotency-Key:
         "openapi":{"content":"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}}],
       "databases":[{"name":"demo-db","engine":"postgres","version":"16","config":{"image":"postgres:16","storage_gb":1}}]
     }
-  }')
+  }') && [ -n "$CREATE" ]; then
+    break
+  fi
+  echo "create namespace retry $i/5" >&2
+  sleep 2
+done
+[ -n "$CREATE" ] || fail "create-with-spec (connection refused after retries)"
 echo "$CREATE" | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['namespace']['id']" >/dev/null 2>&1 || fail "create-with-spec: $CREATE"
 NS=$(echo "$CREATE" | jqget "['namespace']['id']")
 ENVNS="lt-env-$NS"

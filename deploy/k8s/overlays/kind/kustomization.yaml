@@ -1,0 +1,13 @@
+resources:
+  - ../../base
+
+# kind local: image :local + IfNotPresent (không pull registry), replicas 1,
+# resources đã đủ nhỏ ở base. Không chỉnh replicas/resources ở đây để giữ manifest
+# đơn giản; overlay prod sẽ bổ sung replicas/TLS/HPA.
+images:
+  - name: loadtest-platform-serve
+    newName: loadtest-platform-serve
+    newTag: local
+  - name: loadtest-platform-mock-service
+    newName: loadtest-platform-mock-service
+    newTag: local
