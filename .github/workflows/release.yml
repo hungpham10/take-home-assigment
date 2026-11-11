@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        description: Version bump type
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Earthly
+        run: |
+          curl -fsSL https://get.earthly.dev | bash
+          echo "$HOME/.earthly/bin" >> $GITHUB_PATH
+
+      - name: Configure Docker for ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Bump version & commit
+        id: bump
+        run: |
+          ./scripts/bump.sh ${{ github.event.inputs.bump }}
+          NEW_VERSION=$(cat version.txt)
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create and push git tag
+        run: |
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Build & push images (Earthly +all)
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          REGISTRY: ghcr.io
+          IMAGE_PREFIX: ${{ github.repository_owner }}/loadtest-platform
+        run: |
+          earthly --build-arg VERSION=${VERSION} --build-arg REGISTRY=${REGISTRY} --build-arg IMAGE_PREFIX=${IMAGE_PREFIX} +all
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: Release v${{ steps.bump.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
