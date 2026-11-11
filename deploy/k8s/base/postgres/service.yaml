@@ -7,7 +7,6 @@ metadata:
     app: postgres
     loadtest.io/managed-by: loadtest-controller
 spec:
-  clusterIP: None
   ports:
     - port: 5432
       targetPort: 5432
