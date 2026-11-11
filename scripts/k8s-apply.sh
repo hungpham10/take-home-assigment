@@ -46,7 +46,15 @@ for res in "sts/postgres -n ltp-system" \
            "deploy/dex -n ltp-system" \
            "deploy/serve -n ltp-system" \
            "deploy/mock-service -n mock-system"; do
-  kubectl rollout status $res --timeout=180s || fail "rollout $res"
+  if ! kubectl rollout status $res --timeout=180s; then
+    echo "--- dump logs for failed resource: $res ---"
+    case "$res" in
+      deploy/serve*) kubectl -n ltp-system logs deploy/serve --all-containers --tail=100 2>&1 || true ;;
+      deploy/dex*)   kubectl -n ltp-system logs deploy/dex   --all-containers --tail=80  2>&1 || true ;;
+      deploy/valkey*)kubectl -n ltp-system logs deploy/valkey --all-containers --tail=80  2>&1 || true ;;
+    esac
+    fail "rollout $res"
+  fi
 done
 
 echo "== apply xong =="
