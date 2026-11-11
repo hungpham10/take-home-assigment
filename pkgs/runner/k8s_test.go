@@ -18,6 +18,14 @@ func newK8sRunner(t *testing.T) *K8sTestRunRunner {
 
 const testNS = "lt-env-ns1"
 
+// objName returns the K8s object name rendered for a run: "run-" + ref. The
+// "run-" prefix keeps metadata.name DNS-1035 compliant even when ref (the
+// LT_ID UUID) starts with a digit. Tests use this mirror of
+// pkgs/k8s.RunObjectName so object names in test fixtures match production.
+func objName(ref string) string {
+	return "run-" + ref
+}
+
 func testRunGVK() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: "k6.io", Version: "v1alpha1", Kind: "TestRun"}
 }
@@ -49,9 +57,10 @@ func TestK8sTestRunRunnerProvisionCreatesScriptConfigMap(t *testing.T) {
 	if ref != "run-123" {
 		t.Fatalf("ref = %q, want run-123", ref)
 	}
-	cm, err := r.Client.Get(ctx, cmGVK(), "lt-env-ns1", "run-123-script")
+	// Script ConfigMap is run--script (DNS-1035), not -script.
+	cm, err := r.Client.Get(ctx, cmGVK(), "lt-env-ns1", objName(ref)+"-script")
 	if err != nil {
-		t.Fatalf("script ConfigMap not created: %v", err)
+		t.Fatalf("script ConfigMap %s not created: %v", objName(ref)+"-script", err)
 	}
 	content, _, _ := unstructured.NestedString(cm.Object, "data", "test.js")
 	if content == "" {
@@ -60,6 +69,60 @@ func TestK8sTestRunRunnerProvisionCreatesScriptConfigMap(t *testing.T) {
 	lbls := cm.GetLabels()
 	if lbls["loadtest.io/run-id"] != "run-123" {
 		t.Fatalf("ConfigMap run-id label = %q", lbls)
+	}
+	if _, err := r.Client.Get(ctx, cmGVK(), "lt-env-ns1", ref+"-script"); err != k8s.ErrNotFound {
+		t.Fatalf("unprefixed ConfigMap %q should not exist (err=%v)", ref+"-script", err)
+	}
+}
+
+func TestK8sTestRunRunnerProvisionStartWithNumericRef(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	// Digit-leading UUID, exactly like the CI failure.
+	ref := "3c1cb1c9-bc06-4d88-ad0f-d6a5cadb4b5f"
+
+	gotRef, err := r.Provision(ctx, Spec{
+		ID:        ref,
+		Namespace: testNS,
+		Script:    []byte(`export default function(){ http.get("http://echo:80/"); }`),
+		VUs:       10,
+		Duration:  "30s",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if gotRef != ref {
+		t.Fatalf("Provision ref = %q, want %q", gotRef, ref)
+	}
+
+	// Script ConfigMap must be run--script, not -script (starts
+	// with a digit -> DNS-1035 invalid).
+	if _, err := r.Client.Get(ctx, cmGVK(), testNS, objName(ref)+"-script"); err != nil {
+		t.Fatalf("script ConfigMap %s not created: %v", objName(ref)+"-script", err)
+	}
+	if _, err := r.Client.Get(ctx, cmGVK(), testNS, ref+"-script"); err != k8s.ErrNotFound {
+		t.Fatalf("unprefixed ConfigMap %q should not exist", ref+"-script")
+	}
+
+	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS, Duration: "30s"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, objName(ref))
+	if err != nil {
+		t.Fatalf("TestRun %s not created: %v", objName(ref), err)
+	}
+	if lbls := tr.GetLabels(); lbls["loadtest.io/run-id"] != ref {
+		t.Fatalf("TestRun run-id label = %q, want raw UUID %q", lbls["loadtest.io/run-id"], ref)
+	}
+	cm, _, _ := unstructured.NestedMap(tr.Object, "spec", "script")
+	cmName, _, _ := unstructured.NestedString(cm, "configMap", "name")
+	if cmName != objName(ref)+"-script" {
+		t.Fatalf("TestRun script.configMap.name = %q, want %s-script", cmName, objName(ref))
+	}
+	// Get by raw UUID must NOT find the TestRun (name is run-).
+	if _, err := r.Client.Get(ctx, testRunGVK(), testNS, ref); err != k8s.ErrNotFound {
+		t.Fatalf("TestRun %s should not exist (name is %s), err=%v", ref, objName(ref), err)
 	}
 }
 
@@ -70,7 +133,7 @@ func TestK8sTestRunRunnerStartCreatesTestRun(t *testing.T) {
 	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS, Duration: "30s"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	tr, err := r.Client.Get(ctx, testRunGVK(), "lt-env-ns1", "run-123")
+	tr, err := r.Client.Get(ctx, testRunGVK(), "lt-env-ns1", objName(ref))
 	if err != nil {
 		t.Fatalf("TestRun not created: %v", err)
 	}
@@ -98,8 +161,8 @@ func TestK8sTestRunRunnerStartCreatesTestRun(t *testing.T) {
 	}
 	script, _, _ := unstructured.NestedMap(tr.Object, "spec", "script")
 	cm, _, _ := unstructured.NestedString(script, "configMap", "name")
-	if cm != "run-123-script" {
-		t.Fatalf("TestRun script.configMap.name = %q, want run-123-script", cm)
+	if cm != objName(ref)+"-script" {
+		t.Fatalf("TestRun script.configMap.name = %q, want %s-script", cm, objName(ref))
 	}
 	args, _, _ := unstructured.NestedSlice(tr.Object, "spec", "args")
 	foundDuration := false
@@ -132,12 +195,12 @@ func TestK8sTestRunRunnerStatusMapsStages(t *testing.T) {
 			r := newK8sRunner(t)
 			ctx := context.Background()
 			ref, _ := r.Provision(ctx, Spec{ID: "run-x", Namespace: testNS})
-			// Plant a TestRun with the given stage.
+			// Plant a TestRun with the given stage (object name is run-).
 			tr := &unstructured.Unstructured{
 				Object: map[string]any{
 					"apiVersion": "k6.io/v1alpha1",
 					"kind":       "TestRun",
-					"metadata":   map[string]any{"name": ref, "namespace": "lt-env-ns1"},
+					"metadata":   map[string]any{"name": objName(ref), "namespace": "lt-env-ns1"},
 					"status": map[string]any{
 						"stage": c.stage,
 					},
@@ -166,12 +229,12 @@ func TestK8sTestRunRunnerStatusFallsBackToRunnerPod(t *testing.T) {
 	ctx := context.Background()
 	ref, _ := r.Provision(ctx, Spec{ID: "run-y", Namespace: testNS})
 
-	// Plant a TestRun stuck at stage "created".
+	// Plant a TestRun stuck at stage "created" (object name is run-).
 	tr := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "k6.io/v1alpha1",
 			"kind":       "TestRun",
-			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
 			"status": map[string]any{
 				"stage": "created",
 			},
@@ -182,7 +245,7 @@ func TestK8sTestRunRunnerStatusFallsBackToRunnerPod(t *testing.T) {
 	}
 
 	// Plant a runner pod labeled loadtest.io/run-id=ref AND runner=true,
-	// phase Running.
+	// phase Running. (ref starts with a letter so the pod name is valid.)
 	pod := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -222,12 +285,12 @@ func TestK8sTestRunRunnerStatusIgnoresInitializerOnlyPod(t *testing.T) {
 	ctx := context.Background()
 	ref, _ := r.Provision(ctx, Spec{ID: "run-z", Namespace: testNS})
 
-	// Plant a TestRun stuck at stage "created".
+	// Plant a TestRun stuck at stage "created" (object name is run-).
 	tr := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "k6.io/v1alpha1",
 			"kind":       "TestRun",
-			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
 			"status": map[string]any{
 				"stage": "created",
 			},
@@ -286,7 +349,7 @@ func TestK8sTestRunRunnerStopDeletesTestRun(t *testing.T) {
 		Object: map[string]any{
 			"apiVersion": "k6.io/v1alpha1",
 			"kind":       "TestRun",
-			"metadata":   map[string]any{"name": ref, "namespace": "lt-env-ns1"},
+			"metadata":   map[string]any{"name": objName(ref), "namespace": "lt-env-ns1"},
 		},
 	}); err != nil {
 		t.Fatalf("plant: %v", err)
@@ -294,7 +357,7 @@ func TestK8sTestRunRunnerStopDeletesTestRun(t *testing.T) {
 	if err := r.Stop(ctx, ref); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if _, err := r.Client.Get(ctx, testRunGVK(), "lt-env-ns1", ref); err != k8s.ErrNotFound {
+	if _, err := r.Client.Get(ctx, testRunGVK(), "lt-env-ns1", objName(ref)); err != k8s.ErrNotFound {
 		t.Fatalf("TestRun still present after Stop: err=%v", err)
 	}
 	// Idempotent: stopping again is fine.
@@ -310,7 +373,7 @@ func TestK8sTestRunRunnerListByRunID(t *testing.T) {
 	_ = r.Client.Apply(ctx, toUnstructured(map[string]any{
 		"apiVersion": "k6.io/v1alpha1",
 		"kind":       "TestRun",
-		"metadata":   map[string]any{"name": ref, "namespace": "lt-env-ns1", "labels": map[string]any{"loadtest.io/run-id": ref}},
+		"metadata":   map[string]any{"name": objName(ref), "namespace": "lt-env-ns1", "labels": map[string]any{"loadtest.io/run-id": ref}},
 	}, "k6.io", "v1alpha1", "TestRun"))
 	list, err := r.Client.List(ctx, testRunGVK(), "lt-env-ns1", labels.Set{"loadtest.io/run-id": ref})
 	if err != nil {
@@ -328,7 +391,8 @@ func TestK8sTestRunRunnerStopMissingIsNoop(t *testing.T) {
 	}
 }
 
-// plantJob plants a Job named ref+"-1" with the given condition type/status.
+// plantJob plants a Job named run--1 with the given condition type/status.
+// Job name mirrors the Status() computation (k8s.RunObjectName(ref) + "-1").
 func plantJob(t *testing.T, r *K8sTestRunRunner, ref, condType, condStatus string) {
 	t.Helper()
 	ctx := context.Background()
@@ -336,15 +400,16 @@ func plantJob(t *testing.T, r *K8sTestRunRunner, ref, condType, condStatus strin
 		"type":   condType,
 		"status": condStatus,
 	}
+	jobName := objName(ref) + "-1"
 	job := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "batch/v1",
 			"kind":       "Job",
 			"metadata": map[string]any{
-				"name":      ref + "-1",
+				"name":      jobName,
 				"namespace": testNS,
 				"labels": map[string]any{
-					"job-name": ref + "-1",
+					"job-name": jobName,
 				},
 			},
 			"status": map[string]any{
@@ -369,7 +434,7 @@ func TestK8sTestRunRunnerStatusJobCompleteIsCompleted(t *testing.T) {
 		Object: map[string]any{
 			"apiVersion": "k6.io/v1alpha1",
 			"kind":       "TestRun",
-			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
 			"status": map[string]any{
 				"stage": "initialized", // operator stalled here
 			},
@@ -400,7 +465,7 @@ func TestK8sTestRunRunnerStatusJobFailedIsFailed(t *testing.T) {
 		Object: map[string]any{
 			"apiVersion": "k6.io/v1alpha1",
 			"kind":       "TestRun",
-			"metadata":   map[string]any{"name": ref, "namespace": testNS},
+			"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
 			"status": map[string]any{
 				"stage": "initialized",
 			},
@@ -429,7 +494,7 @@ func TestK8sTestRunRunnerStartRendersPausedFalse(t *testing.T) {
 	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, ref)
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, objName(ref))
 	if err != nil {
 		t.Fatalf("TestRun not created: %v", err)
 	}
@@ -448,7 +513,7 @@ func TestK8sTestRunRunnerStartRendersInitializerDisabled(t *testing.T) {
 	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, ref)
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, objName(ref))
 	if err != nil {
 		t.Fatalf("TestRun not created: %v", err)
 	}
@@ -467,7 +532,7 @@ func TestK8sTestRunRunnerStartRendersRunnerProbes(t *testing.T) {
 	if err := r.Start(ctx, ref, Spec{ID: ref, Namespace: testNS}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, ref)
+	tr, err := r.Client.Get(ctx, testRunGVK(), testNS, objName(ref))
 	if err != nil {
 		t.Fatalf("TestRun not created: %v", err)
 	}

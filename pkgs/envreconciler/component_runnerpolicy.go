@@ -275,10 +275,11 @@ func DeleteRunPolicies(ctx context.Context, client k8s.Client, envNS, runID stri
 			return fmt.Errorf("delete run policies: delete %s: %w", np.GetName(), err)
 		}
 	}
-	// Delete the run-scoped script ConfigMap.
+	// Delete the run-scoped script ConfigMap (run- prefix = DNS-1035 compliant;
+	// see pkgs/k8s.RunObjectName). Deleting by the name Provision/Start rendered.
 	cmGVK := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
-	if err := client.Delete(ctx, cmGVK, envNS, runID+"-script"); err != nil && err != k8s.ErrNotFound {
-		return fmt.Errorf("delete run policies: delete configmap %s-script: %w", runID, err)
+	if err := client.Delete(ctx, cmGVK, envNS, k8s.RunObjectName(runID)+"-script"); err != nil && err != k8s.ErrNotFound {
+		return fmt.Errorf("delete run policies: delete configmap %s-script: %w", k8s.RunObjectName(runID), err)
 	}
 	return nil
 }

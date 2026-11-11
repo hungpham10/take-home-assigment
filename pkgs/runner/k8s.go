@@ -143,7 +143,7 @@ func (r *K8sTestRunRunner) Provision(_ context.Context, spec Spec) (string, erro
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata": map[string]any{
-			"name":      spec.ID + "-script",
+			"name":      k8s.RunObjectName(spec.ID) + "-script",
 			"namespace": spec.Namespace,
 			"labels": map[string]any{
 				"loadtest.io/run-id":     spec.ID,
@@ -179,7 +179,7 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 		"apiVersion": "k6.io/v1alpha1",
 		"kind":       "TestRun",
 		"metadata": map[string]any{
-			"name":      ref,
+			"name":      k8s.RunObjectName(ref),
 			"namespace": spec.Namespace,
 			"labels": map[string]any{
 				"loadtest.io/run-id":     ref,
@@ -196,7 +196,7 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 			"paused": "false",
 			"script": map[string]any{
 				"configMap": map[string]any{
-					"name": ref + "-script",
+					"name": k8s.RunObjectName(ref) + "-script",
 					"file": "test.js",
 				},
 			},
@@ -270,7 +270,7 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 // runner=true Running pod fallback. This decouples platform status from the
 // operator's stage machine (docs/network-policy.md §10).
 func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error) {
-	tr, err := r.Client.Get(context.Background(), testRunKind, r.nsFor(ref), ref)
+	tr, err := r.Client.Get(context.Background(), testRunKind, r.nsFor(ref), k8s.RunObjectName(ref))
 	if err != nil {
 		if err == k8s.ErrNotFound {
 			return Status{State: "STOPPED", Msg: "testrun not found", Missing: true}, nil
@@ -279,7 +279,7 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 	}
 
 	// 1. Job "-1" conditions as source of truth for terminal status.
-	jobName := ref + "-1"
+	jobName := k8s.RunObjectName(ref) + "-1"
 	jobs, err := r.Client.List(context.Background(), jobGVK, r.nsFor(ref),
 		labels.Set{"job-name": jobName})
 	if err != nil {
@@ -342,7 +342,7 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 // Stop deletes the TestRun CR. Idempotent: deleting an already-gone run is
 // success. The operator cleans up the runner/initializer/starter pods.
 func (r *K8sTestRunRunner) Stop(_ context.Context, ref string) error {
-	if err := r.Client.Delete(context.Background(), testRunKind, r.nsFor(ref), ref); err != nil && err != k8s.ErrNotFound {
+	if err := r.Client.Delete(context.Background(), testRunKind, r.nsFor(ref), k8s.RunObjectName(ref)); err != nil && err != k8s.ErrNotFound {
 		return fmt.Errorf("k8s runner: delete TestRun: %w", err)
 	}
 	return nil

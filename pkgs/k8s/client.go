@@ -40,6 +40,16 @@ import (
 // need client-go error types.
 var ErrNotFound = errors.New("k8s: object not found")
 
+// RunObjectName returns a DNS-1035-compliant K8s object name for a run-scoped
+// resource. K8s object metadata.name must start with a lowercase letter
+// ([a-z]([-a-z0-9]*[a-z0-9])?), but LT_ID is a UUID that may start with a digit
+// (observed in CI: `3c1cb1c9-...`). Prefixing with "run-" guarantees a valid
+// name regardless of the ID's first character. The loadtest.io/run-id label
+// keeps the raw UUID (label values are not subject to this rule).
+func RunObjectName(ref string) string {
+	return "run-" + ref
+}
+
 // FieldManager is the SSA field manager ownership identity of this controller
 // (docs/k8s-orchestration.md §4.1 — all applies share one manager so prune
 // semantics stay predictable).

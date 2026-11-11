@@ -42,7 +42,7 @@ Authz: tenant isolation; owner-only; `admin` cross-owner within tenant. Immutabl
 4. Validate **JS script** (presence, size/type/allowed form, guardrails).
 5. Apply guardrails (vusers/duration/TTL/concurrency/quotas).
 6. Persist run (`PROVISIONING`/`QUEUED`, `namespace_id`, `targets`, script ref/hash, `expires_at`).
-7. Provision async: bind execution to namespace context; ensure **runner NetworkPolicy/egress** allows only resolved targets/approved deps + required platform endpoints (targets are derived server-side, not advisory); create script source (run-scoped name, e.g., `<test_id>-script`; set owner references/cleanup on failure; respect ConfigMap size limits); create k6 `TestRun`; store `k8s_refs`. Runner must have no platform/K8s credentials. The run-scoped NetworkPolicy is **three policies per run** — egress (runner → target), ingress (target ← runner), and api (k6-operator controller ns → runner TCP 6565) — selected by label `loadtest.io/run-id`, specified in [`docs/network-policy.md`](network-policy.md) §3; NetworkPolicy is L3/L4 only (`service` + `port`).
+7. Provision async: bind execution to namespace context; ensure **runner NetworkPolicy/egress** allows only resolved targets/approved deps + required platform endpoints (targets are derived server-side, not advisory); create script source (run-scoped name, e.g., `run-<test_id>-script` — the `run-` prefix guarantees the K8s object name is DNS-1035 compliant even when `<test_id>` is a UUID starting with a digit; set owner references/cleanup on failure; respect ConfigMap size limits); create k6 `TestRun`; store `k8s_refs`. Runner must have no platform/K8s credentials. The run-scoped NetworkPolicy is **three policies per run** — egress (runner → target), ingress (target ← runner), and api (k6-operator controller ns → runner TCP 6565) — selected by label `loadtest.io/run-id`, specified in [`docs/network-policy.md`](network-policy.md) §3; NetworkPolicy is L3/L4 only (`service` + `port`).
 8. Return `202` + `status_url`; reconcile to canonical statuses per `docs/bff-loadtest-api-spec.md` (MVP: use `STOPPED` for stop/cancel outcomes; `CANCELED` reserved unless explicitly distinguished).
 
 ## 5. Target API and script (clarity)
@@ -81,7 +81,7 @@ Remote/registered scripts should be validated before dispatching load:
 ## 6. Security notes (must address before implementation)
 - **Untrusted JS:** k6 script is arbitrary code. Enforce network-level egress restrictions for runners (resolved targets only + required allowances), least-privilege SA (no K8s/platform secrets), quotas (vusers, duration, script size, ConfigMap 1 MiB), and safe target resolution.
 - **Rollback:** if `TestRun` creation fails after script source creation, clean up or use owner references to avoid orphans.
-- **K8s naming:** use run-scoped names/labels (`test_id`), not `<name>-script` without unique scope.
+- **K8s naming:** use run-scoped names/labels prefixed with `run-` (e.g. `run-<test_id>-script`), not `<name>-script` without unique scope; object `metadata.name` must be DNS-1035 (start with a lowercase letter), which a digit-leading `<test_id>` UUID would violate.
 - **k6-operator version:** pin tested `k6.io` API version (e.g., `v1alpha1`) and operator compatibility.
 
 ## 7. Decisions / open items
