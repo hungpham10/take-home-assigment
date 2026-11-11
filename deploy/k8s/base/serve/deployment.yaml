@@ -59,6 +59,8 @@ spec:
               value: localhost
             - name: NGINX_LOG
               value: main
+            - name: NGINX_DIR
+              value: /usr/local/openresty/nginx/conf
             - name: ENVIRONMENT
               value: dev
             - name: HTTP_PROTOCOL
