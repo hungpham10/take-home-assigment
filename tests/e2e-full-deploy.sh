@@ -33,9 +33,9 @@ command -v curl >/dev/null || fail "curl not installed"
 command -v python3 >/dev/null || fail "python3 not installed"
 
 DEPLOY_MODE="${DEPLOY_MODE:-legacy}"   # legacy: docker postgres + go controller (máy local)
-                                       # in-cluster: earthly images + kustomize apply lên kind
+                                       # in-cluster: docker build images + kustomize apply lên kind
 if [ "$DEPLOY_MODE" = "in-cluster" ]; then
-  command -v earthly >/dev/null || fail "earthly not installed (cần cho DEPLOY_MODE=in-cluster)"
+  command -v docker >/dev/null || fail "docker not installed (cần cho DEPLOY_MODE=in-cluster)"
   BASE=http://localhost:8080           # port-forward svc/serve 8080:8080 ở bước 2
 fi
 
