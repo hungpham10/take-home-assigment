@@ -17,9 +17,14 @@ import (
 	"time"
 
 	"github.com/hungpham/loadtest-platform/pkgs/mockruntime"
+	"github.com/hungpham/loadtest-platform/pkgs/version"
 )
 
 func main() {
+	if version.PrintIfRequested(os.Args[1:], os.Stdout) {
+		return
+	}
+
 	addr := envOr("ADDR", ":8090")
 	snapshotPath := envOr("MOCK_SNAPSHOT_FILE", "") // optional initial snapshot
 
@@ -42,7 +47,7 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	slog.Info("mock-service listening", "addr", addr, "generation", rt.ObservedGeneration())
+	slog.Info("mock-service listening", "addr", addr, "generation", rt.ObservedGeneration(), "version", version.Get().Version, "commit", version.Get().Commit)
 	select {
 	case sig := <-sigCh:
 		slog.Info("shutting down", "signal", sig)

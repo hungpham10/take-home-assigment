@@ -29,10 +29,10 @@ import (
 // 172.18.0.0/16, mock-system, ports 80/8090).
 func platformNet(cfg config.Config) envreconciler.PlatformNet {
 	return envreconciler.PlatformNet{
-		K6OperatorNamespace:    cfg.K6OperatorNamespace,
-		K8SNodeCIDRs:           cfg.K8SNodeCIDRs,
-		MockServiceNamespace:   cfg.MockServiceNamespace,
-		MockServicePorts:       cfg.MockServicePorts,
+		K6OperatorNamespace:  cfg.K6OperatorNamespace,
+		K8SNodeCIDRs:         cfg.K8SNodeCIDRs,
+		MockServiceNamespace: cfg.MockServiceNamespace,
+		MockServicePorts:     cfg.MockServicePorts,
 	}
 }
 

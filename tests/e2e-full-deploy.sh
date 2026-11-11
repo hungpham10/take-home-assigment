@@ -146,6 +146,10 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
     sleep 2
   done
   [ -n "$HEALTH_OK" ] || { echo "--- serve pf log ---"; tail -20 /tmp/ltp-full-deploy-pf-serve.log >&2 || true; fail "serve health (60s)"; }
+  # Runtime truth (docs/versioning.md): the pod reports which build it runs.
+  VER_JSON=$(curl -sf http://localhost:8080/version 2>/dev/null || true)
+  echo "   /version: $(echo "$VER_JSON" | head -c 200)"
+  echo "$VER_JSON" | grep -q '"version"' || fail "GET /version missing version field"
   # bearer token từ Dex (host-side qua port-forward 5556) — scripts/mint-dex-token.py
   # (một bản port của sources/opsense-rs/scripts/mint-dex-token.py) thực hiện đầy đủ
   # flow OIDC: discovery → login form → POST credentials → approval → exchange code.
@@ -207,6 +211,9 @@ else
     sleep 2
   done
   [ -n "$HEALTH_OK" ] || { echo "--- controller log ---"; tail -30 /tmp/ltp-full-deploy-controller.log >&2 || true; fail "controller health (60s)"; }
+  VER_JSON=$(curl -sf "$BASE/version" 2>/dev/null || true)
+  echo "   /version: $(echo "$VER_JSON" | head -c 200)"
+  echo "$VER_JSON" | grep -q '"version"' || fail "GET /version missing version field"
   # legacy: header-based auth (không bearer)
   H=""
 fi

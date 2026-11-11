@@ -1,8 +1,25 @@
-.PHONY: test lint build fmt tidy clean test-integration test-integration-down up down logs
+.PHONY: test lint build fmt tidy clean version version-check k8s-render test-integration test-integration-down up down logs
 
 EARTHLY ?= earthly
 COMPOSE ?= docker-compose
 LTP_TAG ?= local
+
+# ---------------------------------------------------------------------
+# Version (docs/versioning.md) — git tag is the single source of truth.
+# `git describe` yields "0.1.1" on a tagged commit and "0.1.1-3-gabc1234"
+# after it. A tree without .git fall back to "dev" so the binary never
+# claims a release it was not built for.
+# ---------------------------------------------------------------------
+MODULE     := github.com/hungpham/loadtest-platform
+# Single source of truth for the resolution rules: scripts/bump.sh --print
+# (tag → "0.1.1", after tag → "0.1.1-3-gabc1234", no tag/no git → "dev").
+VERSION    ?= $(shell ./scripts/bump.sh --print 2>/dev/null || echo dev)
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+LDFLAGS := -X $(MODULE)/pkgs/version.Version=$(VERSION) \
+           -X $(MODULE)/pkgs/version.Commit=$(GIT_COMMIT) \
+           -X $(MODULE)/pkgs/version.BuildDate=$(BUILD_DATE)
 
 test:
 	go test ./... -race
@@ -13,9 +30,24 @@ lint-transitions:
 lint:
 	golangci-lint run
 
+version:
+	@echo $(VERSION)
+
+# version-check — CI gate: bump logic + binary banner must agree with git.
+version-check:
+	@./scripts/bump_test.sh
+	@go test ./pkgs/version/... -count=1
+	@echo ">>> version: $(VERSION) (commit $(GIT_COMMIT))"
+
 build:
-	go build -o bin/loadtest-controller ./cmds/loadtest-controller
-	go build -o bin/mock-service ./cmds/mock-service
+	go build -ldflags "$(LDFLAGS)" -o bin/loadtest-controller ./cmds/loadtest-controller
+	go build -ldflags "$(LDFLAGS)" -o bin/mock-service ./cmds/mock-service
+
+# k8s-render — render an overlay with the real image tag (default: release).
+#   make k8s-render                      # overlay release, tag = latest git tag
+#   make k8s-render OVERLAY=kind K8S_VERSION=local
+k8s-render:
+	@./scripts/k8s-render.sh $(or $(OVERLAY),release) $(K8S_VERSION)
 
 fmt:
 	go fmt ./...
@@ -30,7 +62,9 @@ clean:
 # Integration stack (plans/34 — pattern opsense-rs)
 # ---------------------------------------------------------------------
 integration-images:
-	$(EARTHLY) --build-arg VERSION=$(LTP_TAG) +integration-images
+	$(EARTHLY) --build-arg VERSION=$(LTP_TAG) \
+	           --build-arg GIT_COMMIT=$(GIT_COMMIT) \
+	           --build-arg BUILD_DATE=$(BUILD_DATE) +integration-images
 
 up:
 	@# macOS colima không mount được ~/Desktop (TCC) → stage 2 file bind-mount sang ~/.ltp-run
