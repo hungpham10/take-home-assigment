@@ -27,8 +27,8 @@ otelcol.receiver.otlp "app_receiver" {
 }
 
 // --- METRICS CONFIGURATION (SCRAPE) ---
-prometheus.scrape "rust_app_scrape" {
-  targets = [{"__address__" = "localhost:8080", "instance" = "rust-server"}]
+prometheus.scrape "gateway_scrape" {
+  targets = [{"__address__" = "localhost:8080", "instance" = "loadtest-controller"}]
   forward_to = [prometheus.remote_write.grafana_cloud.receiver]
   scrape_interval = "15s"
 }

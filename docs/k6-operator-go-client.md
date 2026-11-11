@@ -89,7 +89,7 @@ func ShipTestRun(ctx context.Context, cfg *rest.Config, ns, name, script string,
 	}
 
 	_, err = core.CoreV1().ConfigMaps(ns).Create(ctx, &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-script-" + runID, Namespace: ns, Labels: labels}, // run-scoped unique name; consider OwnerReference for cleanup on failure
+		ObjectMeta: metav1.ObjectMeta{Name: "run-" + runID + "-script", Namespace: ns, Labels: labels}, // run-scoped unique DNS-1035 name ("run-" prefix); consider OwnerReference for cleanup on failure
 		Data:       map[string]string{"test.js": script}, // ConfigMap data value limit ~1 MiB; enforce script size guardrails
 	}, metav1.CreateOptions{})
 	if err != nil {
@@ -103,7 +103,7 @@ func ShipTestRun(ctx context.Context, cfg *rest.Config, ns, name, script string,
 		"spec": map[string]any{
 			"parallelism": parallelism,
 			"script": map[string]any{
-				"configMap": map[string]any{"name": name + "-script-" + runID, "file": "test.js"},
+				"configMap": map[string]any{"name": "run-" + runID + "-script", "file": "test.js"},
 			},
 			// "args": []any{"--tag", "env=staging"}, // takes precedence over "arguments"
 		},

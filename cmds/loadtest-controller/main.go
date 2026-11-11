@@ -18,6 +18,7 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/config"
 	"github.com/hungpham/loadtest-platform/pkgs/ha"
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
+	"github.com/hungpham/loadtest-platform/pkgs/listener"
 	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
 	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
@@ -126,7 +127,13 @@ func run() error {
 	}
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
+	// listener.New supports ADDR="unix:/var/run/axum" (nginx upstream, plans/34)
+	// as well as plain TCP addresses.
+	ln, err := listener.New(cfg.Addr)
+	if err != nil {
+		return err
+	}
+	go func() { errCh <- srv.Serve(ln) }()
 	slog.Info("controller listening", "addr", cfg.Addr, "runner", cfg.RunnerMode)
 
 	select {

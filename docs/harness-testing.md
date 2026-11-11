@@ -510,7 +510,7 @@ End-to-end **K8s-mode** flow with real cluster (kind), CNPG operator, and Env Re
 | `E2E-FD-05` | **L3/L4 probe**: busybox pod gắn `loadtest.io/run-id=<id>`: runner→echo (port 80) ✅; runner→demo-db (5432) ❌; undeclared internet/metadata ❌ | kind + Calico |
 | `E2E-FD-06` | **L3/L4 probe negative**: other-service→demo-db (5432) ❌ (không `database_bindings`); bound-service→demo-db ✅ (có binding) | kind + Calico |
 | `E2E-FD-07` | **Cleanup**: `DELETE /namespaces/{id}` → 202 DELETING → K8s ns gone → run-scoped NetworkPolicy + ConfigMap gone | kind + CNPG |
-| `E2E-FD-08` | **Script gate**: `POST /loadtests` với script chưa VALIDATED → 409 `SCRIPT_NOT_VALIDATED` | kind |
+| `E2E-FD-08` | **Script gate**: upload script nội dung bắt đầu bằng byte NUL → validator đánh `INVALID`; `POST /loadtests` với script đó → 409 `SCRIPT_NOT_VALIDATED` (không phụ thuộc timing validate async) | kind |
 
 **Prerequisites**: `kind`, `kubectl`, `docker`, `curl`, `python3`. **k6-operator** (`bundle.yaml`, pinned tag) + `grafana/k6` image phải có sẵn trong kind (script cài trong `tests/e2e-full-deploy.sh`). Controller chạy với `RUNNER_MODE=k8s` cho các case 04–07. Uses `KEEP_CLUSTER=1` to retain cluster for debugging.
 

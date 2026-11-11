@@ -16,10 +16,12 @@ BASE=${BASE:-http://localhost:18080}
 PG_PORT=${PG_PORT:-55433}
 CLUSTER=${CLUSTER:-ltp-full-deploy}
 # Pinned versions (avoid floating `releases/latest` / `main` which can break CI).
-CNPG_VERSION="${CNPG_VERSION:-v1.26.0}"
-CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/${CNPG_VERSION}/manifests/cnpg.yaml"
-K6_OPERATOR_VERSION="${K6_OPERATOR_VERSION:-v0.14.0}"
-K6_OPERATOR_BUNDLE="https://github.com/grafana/k6-operator/releases/download/${K6_OPERATOR_VERSION}/bundle.yaml"
+# CNPG: manifests/cnpg.yaml không tồn tại ở tag v1.26.0 → dùng release artifact.
+CNPG_VERSION="${CNPG_VERSION:-1.26.0}"
+CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/v${CNPG_VERSION}/releases/cnpg-${CNPG_VERSION}.yaml"
+# k6-operator: bundle.yaml nằm trong repo tag, không phải release asset (v0.14.0 không tồn tại).
+K6_OPERATOR_VERSION="${K6_OPERATOR_VERSION:-v1.7.0}"
+K6_OPERATOR_BUNDLE="https://raw.githubusercontent.com/grafana/k6-operator/${K6_OPERATOR_VERSION}/bundle.yaml"
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -293,11 +295,35 @@ SCRIPT_ID=$(printf '%s' "$SCRIPT" | jqget "['id']")
 [ -n "$SCRIPT_ID" ] || fail "script upload: $SCRIPT"
 
 # E2E-FD-08: create loadtest with script NOT YET VALIDATED → 409 SCRIPT_NOT_VALIDATED
+# Deterministic: upload script invalid cho CẢ hai validator:
+#   - Structural (không có k6): nội dung bắt đầu bằng byte NUL → content[0]==0
+#   - LocalK6 (có k6): k6 inspect từ chối invalid JS → parse error
+#   → status INVALID bất kể validator nào chạy. Poll tới INVALID rồi dùng làm
+#   script_id cho POST /loadtests → mong đợi 409. Không phụ thuộc timing validate async.
+# Sinh JSON bằng python3 để truyền đáng tin cậy byte NUL (tránh shell printf '%s'
+# cắt chuỗi tại byte NUL).
+BAD_SCRIPT_JSON=$(python3 -c 'import json;print(json.dumps({"name":"echo-bad","content":"\x00this is not valid k6 script"}))')
+BAD_SCRIPT=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces/$NS/scripts" -H "Idempotency-Key: fd-badscript-$(date +%s)" \
+  $H -H 'Content-Type: application/json' -d "$BAD_SCRIPT_JSON")
+BAD_SCRIPT_ID=$(printf '%s' "$BAD_SCRIPT" | jqget "['id']")
+[ -n "$BAD_SCRIPT_ID" ] || fail "bad script upload: $BAD_SCRIPT"
+
+BAD_STATUS=""
+for i in $(seq 1 30); do
+  BAD_STATUS=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/scripts/$BAD_SCRIPT_ID" $H | jqget "['status']")
+  [ "$BAD_STATUS" = "INVALID" ] && break
+  [ "$BAD_STATUS" = "VALIDATED" ] && fail "E2E-FD-08: bad script unexpectedly VALIDATED (validator did not reject NUL content)"
+  sleep 2
+done
+[ "$BAD_STATUS" = "INVALID" ] || fail "bad script did not reach INVALID (status=$BAD_STATUS)"
+
 LT_PRE=$(curl -s -o /tmp/fd-lt-pre.json -w "%{http_code}" -X POST "$BASE/api/loadtest/v1/namespaces/$NS/loadtests" \
   -H "Idempotency-Key: fd-lt-pre-$(date +%s)" $H -H 'Content-Type: application/json' \
-  -d "{\"name\":\"echo-load-pre\",\"script_id\":\"$SCRIPT_ID\",\"load_config\":{\"vusers\":5,\"duration\":\"45s\",\"timeout_minutes\":5}}")
+  -d "{\"name\":\"echo-load-pre\",\"script_id\":\"$BAD_SCRIPT_ID\",\"load_config\":{\"vusers\":5,\"duration\":\"45s\",\"timeout_minutes\":5}}")
 [ "$LT_PRE" = "409" ] || fail "E2E-FD-08: expected 409 for unvalidated script, got $LT_PRE $(cat /tmp/fd-lt-pre.json 2>/dev/null || true)"
-echo "   E2E-FD-08: unvalidated script → 409 SCRIPT_NOT_VALIDATED ✅"
+LT_PRE_CODE=$(jqget "['error']['code']" < /tmp/fd-lt-pre.json 2>/dev/null || true)
+[ "$LT_PRE_CODE" = "SCRIPT_NOT_VALIDATED" ] || fail "E2E-FD-08: expected error code SCRIPT_NOT_VALIDATED, got $LT_PRE_CODE"
+echo "   E2E-FD-08: unvalidated (INVALID) script → 409 SCRIPT_NOT_VALIDATED ✅"
 
 SCRIPT_STATUS=""
 for i in $(seq 1 30); do

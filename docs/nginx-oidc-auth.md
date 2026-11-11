@@ -28,6 +28,12 @@ For protected paths, nginx fetches tenant auth config from the backend control e
 - Tenant config provides values like `auth.id` (tenant id), `jwt_mode` (`jwks` vs shared secret), `oidc_jwks_url`/`jwt_secret`, OIDC `issuer/client_id/client_secret/expected_alg/session_secret`, etc.
 - `/login`/`logout` may fall back to env vars for backward compat; `/callback` **requires** dynamic config to avoid session/cache mismatch.
 
+### Dex as dev OIDC provider (plans/34)
+Local compose runs **Dex** (`ghcr.io/dexidp/dex:v2.41.1`, port 5556) with `conf/dex/config.dev.yaml`
+(issuer `http://localhost:5556/dex`, static client `ltp-test`, static user `dev-user@example.com`/`password`).
+Tenant auth-config seeded in DB uses the in-network issuer `http://dex:5556/dex`; host-side tools/tests
+use `http://localhost:5556/dex` (same port-forward). See [`packaging-deployment.md`](packaging-deployment.md).
+
 ## Authentication modes (`/api/`, `vhost/04-api.conf`)
 1. **Public (`$jwt_required == 0`)**: resolve tenant, set `X-Tenant-Id`, set `X-User-Id: public`, pass through.
 2. **Bearer token present (`Authorization: Bearer ...`)**:
