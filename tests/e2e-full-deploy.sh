@@ -16,10 +16,12 @@ BASE=${BASE:-http://localhost:18080}
 PG_PORT=${PG_PORT:-55433}
 CLUSTER=${CLUSTER:-ltp-full-deploy}
 # Pinned versions (avoid floating `releases/latest` / `main` which can break CI).
-CNPG_VERSION="${CNPG_VERSION:-v1.26.0}"
-CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/${CNPG_VERSION}/manifests/cnpg.yaml"
-K6_OPERATOR_VERSION="${K6_OPERATOR_VERSION:-v0.14.0}"
-K6_OPERATOR_BUNDLE="https://github.com/grafana/k6-operator/releases/download/${K6_OPERATOR_VERSION}/bundle.yaml"
+# CNPG: manifests/cnpg.yaml không tồn tại ở tag v1.26.0 → dùng release artifact.
+CNPG_VERSION="${CNPG_VERSION:-1.26.0}"
+CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/v${CNPG_VERSION}/releases/cnpg-${CNPG_VERSION}.yaml"
+# k6-operator: bundle.yaml nằm trong repo tag, không phải release asset (v0.14.0 không tồn tại).
+K6_OPERATOR_VERSION="${K6_OPERATOR_VERSION:-v1.7.0}"
+K6_OPERATOR_BUNDLE="https://raw.githubusercontent.com/grafana/k6-operator/${K6_OPERATOR_VERSION}/bundle.yaml"
 
 say()  { echo "== $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
