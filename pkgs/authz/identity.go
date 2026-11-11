@@ -11,6 +11,7 @@
 // subject has to be mapped through tbl_user_external_identities — the schema's
 // bridge between IdP subjects and local users. Unmapped subjects fail closed:
 // provisioning is an admin concern, never implicit.
+
 package authz
 
 import (
