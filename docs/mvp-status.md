@@ -110,20 +110,27 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 
 ## 7. Gaps / remaining work
 
-1. **K8s runner implemented** — `runner.Runner` interface + `K8sTestRunRunner` when `RUNNER_MODE=k8s` (creates a `k6.io/v1alpha1 TestRun` via the Go client, script via ConfigMap). Integration test via `tests/e2e-full-deploy.sh` (kind + k6-operator) ✅ plan 27.
-2. **k6 perf gate not yet run** — install k6 and run `tests/perf/*` at least once, record the numbers in the README
-3. **mock-service** — the binary exists at `cmds/mock-service` (separate data plane, does not use pkgs/controller); the mock-status/mock-pools endpoints are still stubs, metadata CRUD goes through namespace components.
-4. **Outbox worker** — the table + outbox writes exist, but there is no dispatcher loop yet
-5. **Quota gate 429** — `tbl_reservation_ledger` has a schema, not yet wired into loadtest create.
+1. **k6 perf gate not yet run** — install k6 and run `tests/perf/*` at least once, record the numbers in the README.
+2. **mock-service** — the binary exists at `cmds/mock-service` (separate data plane, does not use pkgs/controller); the mock-status/mock-pools endpoints are still stubs, metadata CRUD goes through namespace components.
+3. **Outbox worker** — the table + outbox writes exist, but there is no dispatcher loop yet.
+4. **Quota gate 429** — `tbl_reservation_ledger` has a schema, not yet wired into loadtest create.
    Per-run guardrails (vusers/duration/timeout caps → 422) **are** enforced at create
    (`docs/loadtest-manager-api.md` §5.4, plans/42); per-tenant quotas remain deferred.
-6. **CodeGraph final review + bump version** (`scripts/bump.sh`) — per AGENTS.md before treating it as a release
-7. Plans 16 (harness-testing-integrity) — created by the user, not yet implemented
-8. **Submission deliverables (plans 41–45):** 42–45 are implemented
-   ([42](../plans/42-loadtest-caps.md) caps at create · [43](../plans/43-sample-service.md)
-   `examples/sample-service` · [44](../plans/44-developer-cli.md) `ltp` CLI ·
-   [45](../plans/45-run-results.md) k6 summary + `ltp run report`); plan 41 (README/WRITEUP/AI-USAGE)
-   is the remaining deliverable. Quota ledger (gap 5) stays deferred; demo video is still unplanned.
+5. **CodeGraph final review + bump version** (`scripts/bump.sh`) — per AGENTS.md before treating it as a release.
+6. Plans 16 (harness-testing-integrity) — created by the user, not yet implemented.
+
+### Phase 2 (plans 41–45)
+
+| Plan | Scope | Status |
+|------|-------|--------|
+| 42 | loadtest caps — MAX_VUS / MAX_DURATION / MAX_TIMEOUT_MINUTES → 422 at create | implemented (`pkgs/loadtest/limits.go`, wired through server/testutil) |
+| 43 | sample service — `examples/sample-service` Go SUT + openapi.yaml + Dockerfile + kind E2E wiring | implemented |
+| 44 | developer CLI — `pkgs/ltpclient` + `cmds/ltp` (ns/script/run/report), exit codes, docs, e2e-cli | implemented |
+| 45 | run results — migration 0014, k6 summary parse (local + pod log), API fields, `ltp run report` | implemented |
+| 41 | submission docs — README (EN), WRITEUP.md, AI-USAGE.md, plans index, mvp-status refresh | **remaining deliverable** (this doc refresh) |
+
+Merge order: 42 → 43 → 44 → 45 → 41 (plan 41 merges last so the README documents shipped CLI syntax).
+Quota ledger (gap 4) stays deferred; demo video is still unplanned (plan 46, pending confirmation).
 
 ## 7b. Harness (plans/16 — PR #20/#21, 2026-11-07)
 - Centralized composition root: `Mount(r chi.Router, d Deps)`, a single server.go configures middleware; tests via `pkgs/testutil.NewServer` (does not rebuild auth)
