@@ -1,4 +1,4 @@
-.PHONY: test lint build fmt tidy clean version version-check k8s-render test-integration test-integration-down up down logs
+.PHONY: test test-cli lint build build-sample kind-demo fmt tidy clean version version-check k8s-render test-integration test-integration-down up down logs
 
 EARTHLY ?= earthly
 COMPOSE ?= docker-compose
@@ -42,6 +42,22 @@ version-check:
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/loadtest-controller ./cmds/loadtest-controller
 	go build -ldflags "$(LDFLAGS)" -o bin/mock-service ./cmds/mock-service
+	go build -ldflags "$(LDFLAGS)" -o bin/ltp ./cmds/ltp
+
+# build-sample — demo system-under-test image (plans/43). Context = repo root.
+build-sample:
+	docker build -f examples/sample-service/Dockerfile -t ltp/sample-service:dev .
+
+# test-cli — end-to-end the developer CLI against the running stack (plans/44).
+# Needs `make build` + the compose stack; not wired into CI yet (flip it once
+# it has passed twice in a row — plans/44 step 5).
+test-cli: build
+	./tests/e2e-cli.sh
+
+# kind-demo — build the sample SUT and run the full kind E2E against it.
+# Requires kind + kubectl + docker (the script bootstraps cluster/CNPG/k6-operator).
+kind-demo: build-sample
+	./tests/e2e-full-deploy.sh
 
 # k8s-render — render an overlay with the real image tag (default: release).
 #   make k8s-render                      # overlay release, tag = latest git tag

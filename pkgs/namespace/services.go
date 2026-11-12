@@ -244,7 +244,14 @@ func (d Deps) createService(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", err.Error())
 			return
 		}
-		svc.OpenAPISpec = []byte(body.OpenAPI.Content)
+		// openapi_spec is JSONB: YAML authors are accepted and normalized here
+		// (plans/43 — the sample service ships openapi.yaml).
+		normalized, normErr := serviceopenapi.Normalize([]byte(body.OpenAPI.Content))
+		if normErr != nil {
+			httpx.WriteError(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", normErr.Error())
+			return
+		}
+		svc.OpenAPISpec = normalized
 		svc.SpecHash = store.StrPtr(serviceopenapi.SpecHash([]byte(body.OpenAPI.Content)))
 		svc.ParsedSummary = summary.Marshal()
 	}

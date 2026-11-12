@@ -2,6 +2,7 @@ package loadtest
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
@@ -80,22 +81,29 @@ func (rc Reconciler) reconcileOne(ctx context.Context, lt *store.LoadTest) {
 	case lt.Status == "PROVISIONING" && (st.State == "FAILED" || st.State == "STOPPED"):
 		_ = store.LTToFailed(ctx, rc.DB, lt.ID, actor, "runner failed at provision: "+st.Msg)
 	case lt.Status == "RUNNING" && st.State == "COMPLETED":
-		rc.finish(ctx, lt, "COMPLETED", actor, "runner completed")
+		rc.finish(ctx, lt, st, "COMPLETED", actor, "runner completed")
 	case lt.Status == "RUNNING" && st.State == "FAILED":
-		rc.finish(ctx, lt, "FAILED", actor, "runner failed: "+st.Msg)
+		rc.finish(ctx, lt, st, "FAILED", actor, "runner failed: "+st.Msg)
 	case lt.Status == "STOPPING" && (st.State == "STOPPED" || st.State == "FAILED" || st.State == "COMPLETED"):
-		rc.finish(ctx, lt, "STOPPED", actor, "stopped by request")
+		rc.finish(ctx, lt, st, "STOPPED", actor, "stopped by request")
 	}
 }
 
-func (rc Reconciler) finish(ctx context.Context, lt *store.LoadTest, to, actor, reason string) {
+// finish writes the terminal transition, finished_at, and — in the same
+// transaction — the run's k6 summary (plans/45 §4). Collection is guarded by
+// `result_collected_at IS NULL`, so a retried tick never double-writes and
+// never replaces a good summary with a later empty one.
+func (rc Reconciler) finish(ctx context.Context, lt *store.LoadTest, st runner.Status, to, actor, reason string) {
 	err := rc.DB.Transaction(func(tx *gorm.DB) error {
 		if err := store.LTFinish(ctx, tx, lt.ID, to, actor, reason); err != nil {
 			return err
 		}
 		now := rc.now()
-		return tx.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
-			Update("finished_at", &now).Error
+		if err := tx.Model(&store.LoadTest{}).Where("id = ?", lt.ID).
+			Update("finished_at", &now).Error; err != nil {
+			return err
+		}
+		return rc.collectResult(ctx, tx, lt.ID, st)
 	})
 	if err != nil {
 		slog.Warn("finish transition failed", "loadtest", lt.ID, "to", to, "err", err)
@@ -109,6 +117,47 @@ func (rc Reconciler) finish(ctx context.Context, lt *store.LoadTest, to, actor, 
 			slog.Warn("delete run policies failed", "loadtest", lt.ID, "err", err)
 		}
 	}
+}
+
+// collectResult stores the parsed k6 summary for a terminal run. The row is
+// only updated when nothing was collected before (idempotent), and the columns
+// are written as one statement so a partial result is impossible.
+//
+// The summary is *never* empty-and-silent: when retrieval or parsing failed we
+// still stamp result_collected_at and record why, so the API can tell
+// "collected, nothing to report" from "never collected".
+func (rc Reconciler) collectResult(_ context.Context, tx *gorm.DB, ltID string, st runner.Status) error {
+	sum := runner.ParseSummary(st.Summary)
+	parseErr := sum.ParseError
+	if st.SummaryErr != "" {
+		parseErr = "summary unavailable: " + st.SummaryErr
+	}
+
+	var summaryJSON any // nil → NULL
+	if !sum.Empty() {
+		if b, err := json.Marshal(sum); err == nil {
+			summaryJSON = b
+		} else if parseErr == "" {
+			parseErr = "encode summary: " + err.Error()
+		}
+	}
+	var thresholdsFailed any // nil → NULL
+	if len(sum.Thresholds) > 0 {
+		thresholdsFailed = sum.ThresholdsFailed
+	}
+	var parseErrVal any
+	if parseErr != "" {
+		parseErrVal = parseErr
+	}
+
+	return tx.Model(&store.LoadTest{}).
+		Where("id = ? AND result_collected_at IS NULL", ltID).
+		Updates(map[string]any{
+			"result_collected_at": rc.now(),
+			"result_summary":      summaryJSON,
+			"thresholds_failed":   thresholdsFailed,
+			"result_parse_error":  parseErrVal,
+		}).Error
 }
 
 // reapTimeouts: RUNNING past timeout_at → TIMED_OUT → TIMEOUT_CLEANED.
@@ -129,6 +178,11 @@ func (rc Reconciler) reapTimeouts(ctx context.Context) {
 			continue
 		}
 		_ = store.LTToTimeoutCleaned(ctx, rc.DB, lt.ID, actor, "cleaned after timeout")
+		// A killed run has no trustworthy result: record that collection
+		// happened and why there is nothing to report.
+		_ = rc.collectResult(ctx, rc.DB, lt.ID, runner.Status{
+			SummaryErr: "run timed out before summary",
+		})
 		// Run reached a terminal status: delete run-scoped NetworkPolicies +
 		// script ConfigMap (docs §3.3).
 		if rc.K8s != nil {

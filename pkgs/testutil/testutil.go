@@ -15,6 +15,7 @@ import (
 	"time"
 
 	platform "github.com/hungpham/loadtest-platform"
+	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
@@ -59,6 +60,7 @@ type ServerDeps struct {
 	K8S        bool             // cluster wired → async apply (plans/21)
 	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
 	ApplyNow   func(ctx context.Context, namespaceID string) // plans/26 hierarchical apply
+	Limits     loadtest.Limits  // load-test guardrails (plans/42); zero = defaults
 }
 
 // NewServer builds the REAL server composition (health/ready/metrics +
@@ -77,6 +79,7 @@ func NewServer(t *testing.T, d ServerDeps) http.Handler {
 		K8S:        d.K8S,
 		StaleAfter: d.StaleAfter,
 		ApplyNow:   d.ApplyNow,
+		Limits:     d.Limits,
 	})
 }
 

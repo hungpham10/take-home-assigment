@@ -7,6 +7,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -34,6 +35,14 @@ type Status struct {
 	// controller restart lost the in-process table). The reconciler treats
 	// Missing as "runner lost the run" → FAILED, not a normal STOPPED.
 	Missing bool
+	// Summary is the raw end-of-run k6 output tail: stdout for the local
+	// runner, the runner pod log for Kubernetes. It is filled only on a
+	// terminal poll, so the cost is one extra read per run and the runner
+	// never has to know the result schema (pkgs/runner.ParseSummary does).
+	Summary []byte
+	// SummaryErr reports why Summary is unavailable (pod already garbage
+	// collected, RBAC denial, …). A run is never failed because of it.
+	SummaryErr string
 }
 
 // Runner executes load tests.
@@ -92,10 +101,17 @@ func (l *Local) Start(ctx context.Context, ref string, s Spec) error {
 	for k, v := range s.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	// Capture the tail for the results collector (plans/45). k6 writes its
+	// summary to stdout; stderr (progress, threshold failures) is captured into
+	// the same buffer because os/exec shares one pipe for identical writers and
+	// the summary is the last thing printed either way.
+	out := &bytes.Buffer{}
+	cmd.Stdout = out
+	cmd.Stderr = out
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("runner: k6 start: %w", err)
 	}
-	l.procs.add(ref, &proc{cmd: cmd, script: tmp.Name()})
+	l.procs.add(ref, &proc{cmd: cmd, script: tmp.Name(), out: out})
 	return nil
 }
 
@@ -126,12 +142,16 @@ func (l *Local) Status(_ context.Context, ref string) (Status, error) {
 	}()
 	select {
 	case <-exited:
+		// Read the captured output BEFORE removing the proc from the table.
+		st := Status{Summary: p.output()}
 		l.procs.remove(ref)
 		_ = os.Remove(p.script)
 		if p.waitErr != nil {
-			return Status{State: "FAILED", Msg: p.waitErr.Error()}, nil
+			st.State, st.Msg = "FAILED", p.waitErr.Error()
+			return st, nil
 		}
-		return Status{State: "COMPLETED"}, nil
+		st.State = "COMPLETED"
+		return st, nil
 	case <-time.After(200 * time.Millisecond):
 		return Status{State: "RUNNING"}, nil
 	}

@@ -1,8 +1,10 @@
 #!/bin/sh
-# E2E full deploy (plans/26) — vòng đời ĐẦY ĐỦ với database + service demo:
-#   namespace → database (CNPG postgres:16) + echo-server service → validate
+# E2E full deploy (plans/26) — vòng đời ĐẦY ĐỦ trên kind:
+#   namespace → database (CNPG postgres:16) + SUT service (mặc định
+#   examples/sample-service: GET /todos; fallback ealen/echo-server) → validate
 #   → apply (202) → Env Reconciler apply thật → Status Watcher projection
-#   → READY → port-forward curl echo-server trả JSON → DELETE namespace + verify K8s ns gone.
+#   → READY → port-forward curl SUT trả JSON → loadtest k6 → DELETE namespace
+#   + verify K8s ns gone.
 #
 # Yêu cầu: docker, kind (hoặc KUBECONFIG trỏ sẵn), kubectl, curl, python3.
 # Env: KEEP_CLUSTER=1 giữ lại kind cluster sau khi chạy; SKIP_BOOTSTRAP=1 dùng
@@ -15,6 +17,24 @@ set -e
 BASE=${BASE:-http://localhost:18080}
 PG_PORT=${PG_PORT:-55433}
 CLUSTER=${CLUSTER:-ltp-full-deploy}
+# SUT under test (plans/43). Default = examples/sample-service on kind:
+#   make build-sample   # docker build → ltp/sample-service:dev
+# The script loads the image into the kind node itself.
+# Fallback to the historical echo-server demo with:
+#   SUT_IMAGE=ealen/echo-server:latest SUT_PORT=80 SUT_HEALTH_PATH=/ \
+#   SUT_PROBE_PATH=/ SUT_K6_URL=http://echo:80/ tests/e2e-full-deploy.sh
+SUT_IMAGE="${SUT_IMAGE:-ltp/sample-service:dev}"
+SUT_PORT="${SUT_PORT:-8080}"
+SUT_HEALTH_PATH="${SUT_HEALTH_PATH:-/healthz}"
+SUT_PROBE_PATH="${SUT_PROBE_PATH:-/todos}"
+SUT_K6_URL="${SUT_K6_URL:-http://echo:8080/todos}"
+# The SUT's OpenAPI document is what the platform indexes into targets[].
+# Default to the sample spec when the sample image is the SUT; otherwise the
+# script keeps its inline one-path spec (echo-server).
+if [ -z "${SUT_OPENAPI:-}" ] && [ "${SUT_IMAGE%%:*}" = "ltp/sample-service" ]; then
+  SUT_OPENAPI=examples/sample-service/openapi.yaml
+fi
+SUT_OPENAPI="${SUT_OPENAPI:-}"
 # Pinned versions (avoid floating `releases/latest` / `main` which can break CI).
 # CNPG: manifests/cnpg.yaml không tồn tại ở tag v1.26.0 → dùng release artifact.
 CNPG_VERSION="${CNPG_VERSION:-1.26.0}"
@@ -44,9 +64,17 @@ fi
 if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   command -v kind >/dev/null || fail "kind not installed (hoặc đặt SKIP_BOOTSTRAP=1 với KUBECONFIG sẵn)"
   say "kind cluster: $CLUSTER (disableDefaultCNI so Calico is the sole CNI enforcing NetworkPolicy)"
-  kind get clusters | grep -q "^$CLUSTER$" || {
-    KIND_CONFIG="$(mktemp)"
-    cat > "$KIND_CONFIG" <<KIND_YAML
+  # Pin the node image: the E2E depends on a CNI/OS combination that the pinned
+  # Calico release supports. kind's default image tracks the newest k8s, whose
+  # node OS (Debian 13+) no longer ships libpcap.so.0.8 and breaks calico-node's
+  # mount-bpffs init container. CI pins the same version.
+  KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
+  if kind get clusters | grep -q "^$CLUSTER$"; then
+    say "deleting existing cluster $CLUSTER to apply required config (pinned node image, disableDefaultCNI)"
+    kind delete cluster --name "$CLUSTER"
+  fi
+  KIND_CONFIG="$(mktemp)"
+  cat > "$KIND_CONFIG" <<KIND_YAML
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
@@ -57,22 +85,31 @@ nodes:
   - role: control-plane
   - role: worker
 KIND_YAML
-    kind create cluster --name "$CLUSTER" --config "$KIND_CONFIG" --wait 120s
-    rm -f "$KIND_CONFIG"
-  }
+  kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" \
+    --config "$KIND_CONFIG" --wait 120s
+  rm -f "$KIND_CONFIG"
   kind export kubeconfig --name "$CLUSTER"
   # Pre-load images vào kind node: CNPG bootstrap không phải pull ghcr/postgres
   # mỗi lần (5-7m → ~1-2m, ổn định CI).
-  docker pull ealen/echo-server:latest >/dev/null 2>&1 || true
-  docker pull ghcr.io/cloudnative-pg/postgresql:16 >/dev/null 2>&1 || true
-  docker pull grafana/k6:latest >/dev/null 2>&1 || true
-  kind load docker-image ealen/echo-server:latest ghcr.io/cloudnative-pg/postgresql:16 grafana/k6:latest --name "$CLUSTER" 2>/dev/null || true
+  # The SUT image must exist locally (CI builds it; `make kind-demo` builds it);
+  # fail loudly if it cannot be loaded — an ImagePullBackOff in-cluster is much
+  # harder to diagnose than a load error here.
+  docker image inspect "$SUT_IMAGE" >/dev/null 2>&1 || docker pull "$SUT_IMAGE" >/dev/null 2>&1 || true
+  docker image inspect "$SUT_IMAGE" >/dev/null 2>&1 || fail "SUT image $SUT_IMAGE not found locally (build it first, e.g. make build-sample)"
+  kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
+  for img in ghcr.io/cloudnative-pg/postgresql:16 grafana/k6:latest; do
+    docker pull "$img" >/dev/null 2>&1 || true
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      kind load docker-image "$img" --name "$CLUSTER" >/dev/null 2>&1 || echo "warn: could not pre-load $img (nodes will pull it)"
+    fi
+  done
 
   # Install Calico so NetworkPolicy is actually enforced (kindnetd does not).
   # kind's default CNI (kindnetd) does NOT enforce NetworkPolicies.
   # The standard calico.yaml manifest installs calico-node daemonset in kube-system.
   say "install Calico CNI (NetworkPolicy enforcement)"
-  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.1/manifests/calico.yaml
+  CALICO_VERSION="${CALICO_VERSION:-v3.29.1}"
+  kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/$CALICO_VERSION/manifests/calico.yaml"
   # Wait for calico-node daemonset (in kube-system) to be ready.
   for i in $(seq 1 30); do
     if kubectl get daemonset -n kube-system calico-node >/dev/null 2>&1; then break; fi
@@ -111,7 +148,7 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   say "build images (docker build) + apply k8s overlay kind"
   docker build -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
   docker build -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
-  kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name "$CLUSTER" 2>/dev/null || true
+  kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name "$CLUSTER"
   export SOPS_AGE_KEY_CONTENT="${SOPS_AGE_KEY_CONTENT:-}"
   POSTGRES_PASSWORD=ltp scripts/k8s-apply.sh
   # port-forward: serve (API gateway), dex (mint token), postgres (seed SQL)
@@ -278,7 +315,17 @@ if [ -z "${H:-}" ]; then
   H="-H X-Tenant-Id:$TENANT -H X-User-Id:$USERID -H X-User-Role:user"
 fi
 
-say "create namespace + database + echo service (create-with-spec, 1 call)"
+say "create namespace + database + benchmark service (create-with-spec, 1 call)"
+# OpenAPI content as a JSON *string literal* for the create payload. Reading the
+# real spec means the platform's target index (pkgs/serviceopenapi) is exercised
+# with multiple operations, not a single hand-written path.
+if [ -n "$SUT_OPENAPI" ] && [ -f "$SUT_OPENAPI" ]; then
+  OPENAPI_JSON=$(python3 -c 'import json,sys; print(json.dumps(open(sys.argv[1], encoding="utf-8").read()))' "$SUT_OPENAPI") \
+    || fail "cannot read SUT_OPENAPI=$SUT_OPENAPI"
+  say "SUT spec: $SUT_OPENAPI ($(wc -l < "$SUT_OPENAPI" | tr -d ' ') lines)"
+else
+  OPENAPI_JSON='"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"'
+fi
 # retry vì kubectl port-forward có thể mất kết nối sau khi health check passa
 CREATE=""
 for i in $(seq 1 5); do
@@ -286,11 +333,11 @@ for i in $(seq 1 5); do
     $H -H 'Content-Type: application/json' -d '{
     "name":"full-deploy-env",
     "spec":{
-      "services":[{"name":"echo","deploy":{"image":"ealen/echo-server:latest","replicas":1,"port":80,"health":{"path":"/","port":80},
+      "services":[{"name":"echo","deploy":{"image":"'"$SUT_IMAGE"'","replicas":1,"port":'"$SUT_PORT"',"health":{"path":"'"$SUT_HEALTH_PATH"'","port":'"$SUT_PORT"'},
         "config_map":{"app.yaml":"listen: 8080\n"},"service_account":true,
         "hpa":{"min_replicas":1,"max_replicas":3,"cpu_target_percent":80}},
         "database_bindings":[{"database_id":"demo-db","binding":"DEMO_DB","access":"readwrite"}],
-        "openapi":{"content":"{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"Echo\",\"version\":\"1\"},\"paths\":{\"/\":{\"get\":{\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}"}}],
+        "openapi":{"content":'"$OPENAPI_JSON"'}}],
       "databases":[{"name":"demo-db","engine":"postgres","version":"16","config":{"image":"postgres:16","storage_gb":1}}]
     }
   }') && [ -n "$CREATE" ]; then
@@ -390,7 +437,7 @@ if [ -z "$API_REACHABLE" ]; then
 fi
 # Probe pod egress to echo service should be DENIED (not a declared dependency;
 # default-deny egress only allows DNS + kube-apiserver + declared deps).
-ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
+ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 "http://echo:${SUT_PORT}${SUT_PROBE_PATH}" 2>/dev/null | head -c 1 || echo "")
 if [ -n "$ECHO_REACHABLE" ]; then
   kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
   fail "probe pod reached echo service without declared dependency — default-deny egress not enforced"
@@ -410,22 +457,22 @@ ECHO_AVAIL=$(kubectl -n "$ENVNS" get deploy echo -o jsonpath='{.status.condition
 [ "$ECHO_AVAIL" = "True" ] || fail "echo deployment not Available"
 
 # --- 6. echo phục vụ thật qua port-forward --------------------------------------
-say "curl echo-server qua port-forward"
-kubectl -n "$ENVNS" port-forward svc/echo 18082:80 >/tmp/ltp-full-deploy-pf.log 2>&1 &
+say "curl SUT qua port-forward ($SUT_IMAGE)"
+kubectl -n "$ENVNS" port-forward svc/echo 18082:"$SUT_PORT" >/tmp/ltp-full-deploy-pf.log 2>&1 &
 PF_PID=$!
 ECHO_BODY=""
 for i in $(seq 1 20); do
-  ECHO_BODY=$(curl -s --max-time 5 http://localhost:18082/ 2>/dev/null || true)
+  ECHO_BODY=$(curl -s --max-time 5 "http://localhost:18082$SUT_PROBE_PATH" 2>/dev/null || true)
   [ -n "$ECHO_BODY" ] && break
   sleep 1
 done
 kill $PF_PID 2>/dev/null || true
-[ -n "$ECHO_BODY" ] || { echo "--- port-forward log ---"; tail -20 /tmp/ltp-full-deploy-pf.log >&2 || true; fail "echo-server did not respond"; }
-echo "   echo response: $(echo "$ECHO_BODY" | head -c 120)"
+[ -n "$ECHO_BODY" ] || { echo "--- port-forward log ---"; tail -20 /tmp/ltp-full-deploy-pf.log >&2 || true; fail "SUT did not respond at $SUT_PROBE_PATH"; }
+echo "   SUT response: $(echo "$ECHO_BODY" | head -c 120)"
 
 # --- 8. upload k6 script + poll VALIDATED -----------------------------------------
 say "upload + validate k6 script"
-SCRIPT_CONTENT='import http from "k6/http"; export default function() { http.get("http://echo:80/"); }'
+SCRIPT_CONTENT='import http from "k6/http"; export default function() { http.get("'"$SUT_K6_URL"'"); }'
 SCRIPT=$(curl -s -X POST "$BASE/api/loadtest/v1/namespaces/$NS/scripts" -H "Idempotency-Key: fd-script-$(date +%s)" \
   $H -H 'Content-Type: application/json' \
   -d "{\"name\":\"echo-test\",\"content\":$(printf '%s' "$SCRIPT_CONTENT" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}")
@@ -503,7 +550,7 @@ done
   curl -s -w "\nHTTP_CODE:%{http_code}" "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H 2>&1 || echo "curl loadtest failed"
   fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
 }
-# run-policy labels + egress port 80 + target selector = service name (echo)
+# run-policy labels + egress port + target selector = service name (echo)
 # kubectl -o jsonpath='{.metadata.labels}' prints Go map syntax (map[k:v ...]),
 # not k=v pairs → extract each label via its own jsonpath query.
 NP_KIND=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
@@ -512,14 +559,14 @@ NP_RUN=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
   -o jsonpath='{.metadata.labels.loadtest\.io/run-id}')
 [ "$NP_KIND" = "run-policy" ] || fail "egress NP component-kind=$NP_KIND (want run-policy)"
 [ "$NP_RUN" = "$LT_ID" ] || fail "egress NP run-id=$NP_RUN (want $LT_ID)"
-EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)]}')
-[ -n "$EGRESS_PORTS" ] || fail "egress NP missing port 80 rule"
-EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)].to[0].podSelector.matchLabels.loadtest\.io/component-id}')
+EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port=='"$SUT_PORT"')]}')
+[ -n "$EGRESS_PORTS" ] || fail "egress NP missing port $SUT_PORT rule"
+EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port=='"$SUT_PORT"')].to[0].podSelector.matchLabels.loadtest\.io/component-id}')
 [ "$EGRESS_TARGET" = "echo" ] || fail "egress NP target selector = $EGRESS_TARGET (want echo)"
 # 6565 API ingress rule present
 API_6565=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-api-$LT_ID -o jsonpath='{.spec.ingress[?(@.ports[0].port==6565)]}')
 [ -n "$API_6565" ] || fail "api NP missing 6565 ingress rule"
-echo "   run-scoped NetworkPolicies: egress/ingress/api present, port 80 scoped, target=echo, 6565 ✅"
+echo "   run-scoped NetworkPolicies: egress/ingress/api present, port $SUT_PORT scoped, target=echo, 6565 ✅"
 
 # --- 13. L3/L4 probes from busybox runner-like pod (in-flight, before completion) ---
 # Enforcement must be verified while the run is alive: the reconciler deletes
@@ -537,9 +584,11 @@ for i in $(seq 1 60); do
 done
 [ "$PSTATUS" = "Running" ] || fail "probe pod did not reach Running"
 
-# 13a. runner → echo (port 80) MUST be allowed (declared target)
-ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
-[ -n "$ECHO_PROBE" ] || fail "runner→echo:80 denied (declared target should be allowed)"
+# 13a. runner → echo (SUT port) MUST be allowed (declared target).
+# Probe the known-good SUT path (not "/" — sample-service serves /todos,/healthz
+# and returns 404 on "/" which makes busybox wget exit non-zero with empty body).
+ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 "http://echo:${SUT_PORT}${SUT_PROBE_PATH}" 2>/dev/null | head -c 1 || echo "")
+[ -n "$ECHO_PROBE" ] || fail "runner→echo:${SUT_PORT}${SUT_PROBE_PATH} denied (declared target should be allowed)"
 # 13b. runner → demo-db-rw (5432) MUST be denied (not a target; CNPG svc is demo-db-rw)
 DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- nc -z -w3 demo-db-rw 5432 2>/dev/null || echo "")
 [ -z "$DB_PROBE" ] || fail "runner→demo-db-rw:5432 allowed (should be denied — not a target)"
@@ -589,6 +638,53 @@ STARTED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | j
 FINISHED=$(curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | jqget "['finished_at']")
 [ -n "$STARTED" ] && [ -n "$FINISHED" ] || fail "loadtest missing started_at/finished_at"
 echo "   loadtest COMPLETED ✅ (started=$STARTED finished=$FINISHED)"
+
+# --- 11a. results collected (plans/45) ----------------------------------------
+# The reconciler reads the runner pod log tail on the terminal poll and stores
+# the parsed k6 summary. Assert the contract the CLI/report depends on:
+# result_collected_at within 30s of finished_at and real request numbers.
+say "results collected from the runner pod log"
+RESULT_OK=""
+for i in $(seq 1 30); do
+  if curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H | python3 -c '
+import json,sys,base64
+d=json.load(sys.stdin)
+if not d.get("result_collected_at"):
+    sys.exit(2)
+raw=d.get("result_summary")
+if isinstance(raw,str):
+    # The store model marshals the summary to []byte; GORM reads JSONB into
+    # []byte and Go serializes []byte as base64 in JSON responses. Decode so
+    # the summary is a JSON object regardless of transport encoding.
+    try:
+        raw=base64.b64decode(raw)
+    except Exception:
+        raw=None
+if isinstance(raw,(bytes,bytearray)):
+    try:
+        raw=raw.decode()
+    except Exception:
+        raw=None
+s=json.loads(raw) if isinstance(raw,str) and raw else (raw if isinstance(raw,dict) else {})
+if int(s.get("http_reqs") or 0) <= 0:
+    print("result_summary:", json.dumps(s)[:400], file=sys.stderr)
+    sys.exit(3)
+print("http_reqs:", s["http_reqs"], "rps:", s.get("rps"), "p95_ms:", s.get("p95_ms"),
+      "thresholds_failed:", d.get("thresholds_failed"))
+' > /tmp/fd-result.txt 2>/tmp/fd-result.err; then
+    RESULT_OK=1
+    break
+  fi
+  sleep 1
+done
+[ -n "$RESULT_OK" ] || {
+  echo "--- loadtest payload ---"
+  curl -s "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H
+  echo "--- assertion error ---"
+  cat /tmp/fd-result.err 2>/dev/null || true
+  fail "results not collected within 30s (result_collected_at/result_summary missing)"
+}
+echo "   results: $(cat /tmp/fd-result.txt) ✅"
 
 # --- 11b. assert run-scoped NetworkPolicies garbage-collected after terminal ---
 # Reconciler (2s tick) deletes run-scoped NetworkPolicies + script ConfigMap

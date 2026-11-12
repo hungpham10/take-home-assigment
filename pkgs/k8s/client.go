@@ -15,11 +15,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,6 +81,11 @@ type Client interface {
 	Delete(ctx context.Context, gvk schema.GroupVersionKind, ns, name string) error
 	List(ctx context.Context, gvk schema.GroupVersionKind, ns string, sel labels.Set) ([]*unstructured.Unstructured, error)
 	Watch(ctx context.Context, gvk schema.GroupVersionKind, ns string) (watch.Interface, error)
+	// PodLogs returns at most tailBytes of the container's log (the tail is
+	// what matters: k6 prints its summary last). ErrNotFound when the pod is
+	// gone — a collected-then-deleted runner pod is not an error condition for
+	// the caller, it is a result that could not be read.
+	PodLogs(ctx context.Context, ns, pod, container string, tailBytes int64) ([]byte, error)
 }
 
 // GVRFor maps a GroupVersionKind to its plural resource via the RESTMapper
@@ -101,6 +108,7 @@ func GVRFor(mapper meta.RESTMapper, gvk schema.GroupVersionKind) (schema.GroupVe
 // DynamicClient is the real Client backed by discovery + dynamic client-go.
 type DynamicClient struct {
 	dyn    dynamic.Interface
+	cs     kubernetes.Interface
 	disc   discovery.DiscoveryInterface
 	mapper meta.RESTMapper
 	mu     sync.Mutex
@@ -139,7 +147,13 @@ func newDynamicForConfig(cfg *rest.Config) (*DynamicClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("k8s: discovery client: %w", err)
 	}
-	return &DynamicClient{dyn: dyn, disc: disc}, nil
+	// Typed clientset: only used for pod logs (the dynamic client has no log
+	// subresource access).
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("k8s: clientset: %w", err)
+	}
+	return &DynamicClient{dyn: dyn, cs: cs, disc: disc}, nil
 }
 
 // mapper lazily builds the RESTMapper (group resources change when CRDs land).
@@ -236,6 +250,27 @@ func (c *DynamicClient) Watch(ctx context.Context, gvk schema.GroupVersionKind, 
 	return ri.Watch(ctx, opts)
 }
 
+// PodLogs reads the tail of a container log through the typed clientset.
+func (c *DynamicClient) PodLogs(ctx context.Context, ns, pod, container string, tailBytes int64) ([]byte, error) {
+	if c.cs == nil {
+		return nil, errors.New("k8s: clientset not configured")
+	}
+	if tailBytes <= 0 {
+		tailBytes = 1 << 20 // 1 MiB
+	}
+	opts := &corev1.PodLogOptions{Container: container, LimitBytes: &tailBytes}
+	stream, err := c.cs.CoreV1().Pods(ns).GetLogs(pod, opts).Stream(ctx)
+	if err != nil {
+		return nil, normalize(err)
+	}
+	defer func() { _ = stream.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(stream, tailBytes))
+	if err != nil {
+		return nil, fmt.Errorf("k8s: read pod log: %w", err)
+	}
+	return raw, nil
+}
+
 func normalize(err error) error {
 	if err == nil {
 		return nil
@@ -255,7 +290,10 @@ var _ Client = (*DynamicClient)(nil)
 type Fake struct {
 	mu      sync.Mutex
 	objects map[string]map[string]*unstructured.Unstructured // gvk-key -> ns/name -> obj
-	Faults  Faults
+	// Logs holds fake container logs keyed by "ns/pod" (the container argument
+	// is ignored: tests only ever read the runner container).
+	Logs   map[string][]byte
+	Faults Faults
 }
 
 // Faults injects errors per operation; nil means "succeed".
@@ -267,11 +305,36 @@ type Faults struct {
 	WatchErr  error
 	// ApplyDelay sleeps before applying (timeout/retry tests).
 	ApplyDelay time.Duration
+	// PodLogsErr makes PodLogs fail (pod GC'd / RBAC denial tests).
+	PodLogsErr error
 }
 
 // NewFake returns an empty Fake client.
 func NewFake() *Fake {
-	return &Fake{objects: map[string]map[string]*unstructured.Unstructured{}}
+	return &Fake{
+		objects: map[string]map[string]*unstructured.Unstructured{},
+		Logs:    map[string][]byte{},
+	}
+}
+
+// PodLogs returns the fake log for ns/pod, truncated to the last tailBytes so
+// tests exercise the same size cap as the real client.
+func (f *Fake) PodLogs(_ context.Context, ns, pod, _ string, tailBytes int64) ([]byte, error) {
+	if f.Faults.PodLogsErr != nil {
+		return nil, f.Faults.PodLogsErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	raw, ok := f.Logs[ns+"/"+pod]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	if tailBytes > 0 && int64(len(out)) > tailBytes {
+		out = out[int64(len(out))-tailBytes:]
+	}
+	return out, nil
 }
 
 func fakeKey(gvk schema.GroupVersionKind) string {

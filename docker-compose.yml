@@ -117,6 +117,10 @@ services:
       HTTP_SERVER: localhost
       NGINX_LOG: main
       ENVIRONMENT: dev
+      # Load-test guardrails (plans/42, docs/loadtest-manager-api.md §5.4)
+      MAX_VUS: 500
+      MAX_DURATION: 30m
+      MAX_TIMEOUT_MINUTES: 60
     depends_on:
       postgres:
         condition: service_healthy
@@ -147,6 +151,11 @@ services:
       retries: 6
       start_period: 10s
     networks: [ltp-net]
+
+  # Demo system-under-test (plans/43) runs on kind via the namespace spec:
+  #   make build-sample && SUT_IMAGE=ltp/sample-service:dev tests/e2e-full-deploy.sh
+  # It is intentionally NOT part of the compose stack — the platform does not
+  # need it to boot, and the reference deployment path is Kubernetes.
 
 networks:
   ltp-net:

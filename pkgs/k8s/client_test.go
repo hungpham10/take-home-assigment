@@ -3,6 +3,7 @@ package k8s_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
@@ -133,4 +134,40 @@ func TestKindToVersionKind(t *testing.T) {
 		t.Fatalf("unexpected gvk %v", gvk)
 	}
 	_ = metav1.ObjectMeta{}
+}
+
+// TestFakePodLogs — the results path (plans/45) reads the runner pod tail.
+func TestFakePodLogs(t *testing.T) {
+	f := k8s.NewFake()
+	f.Logs["lt-env-ns/run-lt-1"] = []byte("step 1\n█ TOTAL RESULTS\n  http_reqs: 1\n")
+	raw, err := f.PodLogs(context.Background(), "lt-env-ns", "run-lt-1", "k6", 1<<20)
+	if err != nil || !strings.Contains(string(raw), "TOTAL RESULTS") {
+		t.Fatalf("PodLogs = (%q, %v)", raw, err)
+	}
+
+	// Missing pod → ErrNotFound (caller records SummaryErr, never 500).
+	if _, err := f.PodLogs(context.Background(), "lt-env-ns", "gone", "k6", 1<<20); !errors.Is(err, k8s.ErrNotFound) {
+		t.Errorf("missing pod error = %v, want ErrNotFound", err)
+	}
+
+	// Size cap keeps the TAIL (the summary is printed last).
+	big := make([]byte, 4096)
+	for i := range big {
+		big[i] = 'a'
+	}
+	copy(big[len(big)-10:], "THE END!!!")
+	f.Logs["lt-env-ns/big"] = big
+	raw, err = f.PodLogs(context.Background(), "lt-env-ns", "big", "k6", 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 64 || !strings.HasSuffix(string(raw), "THE END!!!") {
+		t.Errorf("cap = %d bytes ending %q", len(raw), raw[len(raw)-10:])
+	}
+
+	// Injected failure propagates.
+	f.Faults.PodLogsErr = errors.New("forbidden")
+	if _, err := f.PodLogs(context.Background(), "lt-env-ns", "run-lt-1", "k6", 0); err == nil {
+		t.Error("PodLogsErr was not returned")
+	}
 }

@@ -71,6 +71,24 @@ Per-component runtime status lives in the **`tbl_component_status` projection** 
 - `timeout_at` + a partial index for the reaper (TIMED_OUT); app gate: namespace `ready_for_loadtest` + script `VALIDATED` (409 otherwise).
 - `tbl_loadtest_events` append-only; `fn_loadtest_transition`.
 
+### Migration 0014 — load test results (plans/45)
+Four additive, nullable columns on `tbl_load_tests`. No default and no CHECK on `status`, so the
+change is metadata-only (no table rewrite) and a result can be attached to `COMPLETED`, `FAILED`
+or `STOPPED` alike.
+
+| Column | Type | Notes |
+|---|---|---|
+| `result_summary` | `JSONB` | parsed k6 summary (`pkgs/runner.Summary`); NULL = never collected |
+| `thresholds_failed` | `BOOLEAN` | NULL when no `█ THRESHOLDS` block was parsed |
+| `result_collected_at` | `TIMESTAMPTZ` | set on success **and** failure; the idempotency guard (`... IS NULL`) |
+| `result_parse_error` | `TEXT` | why the summary is missing/partial (pod GC'd, empty output, timeout) |
+
+Contract: NULL means "not collected", not "collected nothing" — see
+[`docs/loadtest-manager-api.md`](loadtest-manager-api.md) §8. Covered by
+`tests/sql/loadtest_results_test.sql` (columns exist, old rows read back NULL, JSONB round-trip,
+a FAILED run may carry a parse error).
+
+
 ### tbl_test_events
 Append-only runtime stream, unique `(load_test_id, seq)`, `type log|metric|status`.
 

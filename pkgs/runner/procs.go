@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"os/exec"
 	"sync"
 )
@@ -14,6 +15,23 @@ type proc struct {
 	script  string
 	waitErr error
 	waited  bool
+	// out receives the child's stdout+stderr (see Local.Start). Written by
+	// os/exec's copy goroutines while the process runs; only read after reap()
+	// has returned, which is when those goroutines are done (that is what makes
+	// output() race-free).
+	out *bytes.Buffer
+}
+
+// output returns a copy of the captured tail (never while the process runs).
+func (p *proc) output() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.out == nil {
+		return nil
+	}
+	b := make([]byte, len(p.out.Bytes()))
+	copy(b, p.out.Bytes())
+	return b
 }
 
 // reap waits (once) for the process to exit and returns (exited, waitErr).

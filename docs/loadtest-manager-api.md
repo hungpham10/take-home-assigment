@@ -78,6 +78,27 @@ Remote/registered scripts should be validated before dispatching load:
 - Validate script size/type, reject unsafe archive/module patterns per policy, and record audit.
 - Validation Jobs and staged artifacts are TTL-cleaned; reaper removes orphans.
 
+### 5.4 Load-config guardrails (enforced at create)
+
+`POST /namespaces/{id}/loadtests` validates `load_config` **before** any DB write or Runner call
+(plans/42). A rejected config returns **422** and leaves no `tbl_load_tests` row.
+
+| Field | Rule | Code |
+|---|---|---|
+| `vusers` | integer ≥ 1 and ≤ `MAX_VUS` (default 500) | `VALIDATION_FAILED` / `VUS_LIMIT_EXCEEDED` |
+| `duration` | Go/k6 duration (`30s`, `10m`, `1h30m`), ≥ 10s and ≤ `MAX_DURATION` (default 30m) | `INVALID_DURATION` / `VALIDATION_FAILED` / `DURATION_LIMIT_EXCEEDED` |
+| `timeout_minutes` | ≥ 1, ≤ `MAX_TIMEOUT_MINUTES` (default 60), and **strictly greater than `duration`** | `VALIDATION_FAILED` / `TIMEOUT_LIMIT_EXCEEDED` / `TIMEOUT_TOO_SHORT` |
+| script size | ≤ 1 MiB (ConfigMap limit) | `VALIDATION_FAILED` |
+
+The timeout rule exists because the reaper transitions `RUNNING → TIMED_OUT` at `timeout_at`
+(`pkgs/loadtest/reconciler.go`): a timeout at or below the duration would kill a healthy run.
+Limits are deployment configuration (`MAX_VUS`, `MAX_DURATION`, `MAX_TIMEOUT_MINUTES`); an invalid
+value fails controller startup rather than silently disabling the guardrail.
+
+**Still open:** per-tenant quotas via `tbl_reservation_ledger` → `429 QUOTA_EXCEEDED`, and a
+concurrency cap (max simultaneous RUNNING tests per namespace). See `plans/42-loadtest-caps.md`
+"Out of scope".
+
 ## 6. Security notes (must address before implementation)
 - **Untrusted JS:** k6 script is arbitrary code. Enforce network-level egress restrictions for runners (resolved targets only + required allowances), least-privilege SA (no K8s/platform secrets), quotas (vusers, duration, script size, ConfigMap 1 MiB), and safe target resolution.
 - **Rollback:** if `TestRun` creation fails after script source creation, clean up or use owner references to avoid orphans.
@@ -97,9 +118,38 @@ Remote/registered scripts should be validated before dispatching load:
 - `k8s`: `pkgs/runner.K8sTestRunRunner` creates a `TestRun` (k6.io/v1alpha1) via the Go Kubernetes API (no `kubectl`), the script is staged into a run-scoped ConfigMap (≤1 MiB), and the runner pod runs in `lt-env-<namespace_id>` under `default-deny` + the run-scoped NetworkPolicy (`docs/network-policy.md` §3).
 
 **Run result surface (MVP):**
-- `GET /loadtests/{id}`: `status`, `runner_ref`, `started_at`, `finished_at`, `timeout_at`, `targets`, `unreliable`.
+- `GET /loadtests/{id}`: `status`, `runner_ref`, `started_at`, `finished_at`, `timeout_at`, `targets`, `unreliable`, and the collected result: `result_summary`, `thresholds_failed`, `result_collected_at`, `result_parse_error`.
 - `GET /loadtests/{id}/events`: transition sequence (`from_status` → `to_status`) + `reason`, with the `unreliable` flag (namespace `DEGRADED` after the run started → `unreliable: true`, the run continues anyway).
-- **K6 metrics/summary** (pod log parse → `result_summary`, `thresholds_failed`, `result_collected_at`) is deferred to the benchmark plan (k6 OSS has no default metrics endpoint; it requires installing k6 + parsing the pod log).
+
+**K6 summary (implemented, plans/45).** On the terminal poll the reconciler reads the run's output tail
+— stdout for `local`, the runner pod log for `k8s` (`LimitBytes` 1 MiB; k6 prints its summary last) —
+parses it with `pkgs/runner.ParseSummary`, and stores the result **in the same transaction** as the
+terminal status transition.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `result_summary` | object \| null | `{http_reqs, rps, p95_ms, p99_ms, avg_ms, error_rate, checks, checks_failed, thresholds[], thresholds_failed, parse_error?}` — durations in ms, `error_rate` 0..1 |
+| `thresholds_failed` | bool \| null | true when any k6 threshold was violated; null when no threshold block was parsed |
+| `result_collected_at` | timestamp \| null | when collection ran (success **or** failure); the idempotency key |
+| `result_parse_error` | string \| null | why the summary is missing or partial (pod GC'd, empty output, timeout) |
+
+Semantics that consumers must rely on (they are tested):
+
+- **`null` means "not collected", not "collected nothing".** An old row, or a run still active, has all
+  four fields null.
+- **`result_collected_at` with no `result_summary`** means collection ran and there was nothing to
+  report; `result_parse_error` says why. The API still returns `200` (a missing log is never a `500`).
+- **Idempotent.** The write is guarded by `result_collected_at IS NULL`, so a retried reconciler tick
+  never overwrites a good summary with a later empty one.
+- **A timed-out run records `result_parse_error = "run timed out before summary"`** — a killed k6 has
+  no trustworthy result.
+- **`unreliable: true` is orthogonal** to the numbers and must be checked alongside them: it means the
+  namespace went `DEGRADED` *after* the run started.
+
+`ltp run report <ns> <lt>` renders this payload (`docs/developer-cli.md`); `--json` emits the run object
+unchanged, so `jq '.result_summary.http_reqs'` works. No metrics **pipeline** (Prometheus/OTel
+remote-write, per-second samples) exists — one summary blob per run is the MVP contract.
+
 
 ### Status source of truth (k8s runner)
 

@@ -185,21 +185,8 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
           kind --version
           kubectl version --client
-      - name: Create kind cluster (with retry)
-        run: |
-          for i in $(seq 1 3); do
-            echo "Attempt $i: creating kind cluster ltp-full-deploy"
-            if kind create cluster --name ltp-full-deploy --wait 120s; then
-              echo "Kind cluster created successfully"
-              break
-            fi
-            echo "Attempt $i failed, waiting 10s before retry..."
-            kind delete cluster --name ltp-full-deploy 2>/dev/null || true
-            sleep 10
-          done
-          kind export kubeconfig --name ltp-full-deploy
-          kubectl get nodes
-          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Build sample service image
+        run: docker build -f examples/sample-service/Dockerfile -t ltp/sample-service:dev .
       - name: Run full deploy E2E
         env:
           SKIP_BOOTSTRAP: "0"
@@ -245,25 +232,13 @@ jobs:
             -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
           docker build --build-arg VERSION="$VERSION" --build-arg GIT_COMMIT="$COMMIT" \
             -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
-      - name: Create kind cluster (with retry)
-        run: |
-          for i in $(seq 1 3); do
-            echo "Attempt $i: creating kind cluster ltp-full-deploy-incluster"
-            if kind create cluster --name ltp-full-deploy-incluster --wait 120s; then
-              echo "Kind cluster created successfully"
-              break
-            fi
-            echo "Attempt $i failed, waiting 10s before retry..."
-            kind delete cluster --name ltp-full-deploy-incluster 2>/dev/null || true
-            sleep 10
-          done
-          kind export kubeconfig --name ltp-full-deploy-incluster
-          kubectl get nodes
-          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Build sample service image
+        run: docker build -f examples/sample-service/Dockerfile -t ltp/sample-service:dev .
       - name: Run full deploy E2E (in-cluster)
         env:
           SKIP_BOOTSTRAP: "0"
           DEPLOY_MODE: "in-cluster"
+          CLUSTER: ltp-full-deploy-incluster
           SOPS_AGE_KEY_CONTENT: ${{ secrets.SOPS_AGE_KEY_CONTENT }}
         run: ./tests/e2e-full-deploy.sh
       - name: Dump cluster state on failure

@@ -67,6 +67,26 @@ func ValidateAndIndex(spec []byte) (*Summary, error) {
 	return s, nil
 }
 
+// Normalize returns an OpenAPI document as JSON. OpenAPI documents are often
+// authored in YAML, but tbl_services.openapi_spec is a JSONB column, so the
+// stored bytes must be JSON or the insert fails (SQLSTATE 22P02 → 500). JSON
+// input is returned unchanged so spec hashes stay stable.
+func Normalize(spec []byte) ([]byte, error) {
+	if json.Valid(spec) {
+		return spec, nil
+	}
+	loader := openapi3.NewLoader()
+	doc, err := loader.LoadFromData(spec)
+	if err != nil {
+		return nil, fmt.Errorf("invalid OpenAPI document: %w", err)
+	}
+	out, err := doc.MarshalJSON()
+	if err != nil {
+		return nil, fmt.Errorf("normalize OpenAPI document: %w", err)
+	}
+	return out, nil
+}
+
 // SpecHash is a stable content hash for revalidation checks.
 func SpecHash(spec []byte) string {
 	const hexDigits = "0123456789abcdef"

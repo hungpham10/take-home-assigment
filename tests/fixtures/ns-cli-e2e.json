@@ -1,0 +1,19 @@
+{
+  "services": [
+    {
+      "name": "sut",
+      "deploy": {
+        "image": "ltp/sample-service:dev",
+        "replicas": 1,
+        "port": 8080,
+        "health": {
+          "path": "/healthz",
+          "port": 8080
+        }
+      },
+      "openapi": {
+        "content": "{\n  \"openapi\": \"3.0.0\",\n  \"info\": {\n    \"title\": \"CLI E2E SUT\",\n    \"version\": \"1.0.0\"\n  },\n  \"paths\": {\n    \"/todos\": {\n      \"get\": {\n        \"operationId\": \"listTodos\",\n        \"responses\": {\n          \"200\": {\n            \"description\": \"ok\"\n          }\n        }\n      }\n    }\n  }\n}"
+      }
+    }
+  ]
+}

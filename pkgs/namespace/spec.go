@@ -294,6 +294,13 @@ func (d Deps) createWithSpec(ctx context.Context, p authz.Principal, req createR
 			}
 			summary = sum.Marshal()
 			specHash = serviceopenapi.SpecHash([]byte(s.OpenAPI.Content))
+			// tbl_services.openapi_spec is JSONB; OpenAPI documents are often
+			// YAML (the sample service ships openapi.yaml), so normalize before
+			// storing or the INSERT fails with SQLSTATE 22P02 (500).
+			normalized, normErr := serviceopenapi.Normalize([]byte(s.OpenAPI.Content))
+			if normErr != nil {
+				return specErr{"spec.services[" + s.Name + "] openapi invalid: " + normErr.Error()}
+			}
 			svc := store.Service{
 				NamespaceID:      ns.ID,
 				ServiceID:        strPtr("svc-" + svcID),
@@ -303,7 +310,7 @@ func (d Deps) createWithSpec(ctx context.Context, p authz.Principal, req createR
 				Mock:             rawOr(s.Mock, "{}"),
 				DatabaseBindings: rawOr(s.DatabaseBindings, "[]"),
 				Dependencies:     rawOr(s.Dependencies, "[]"),
-				OpenAPISpec:      []byte(s.OpenAPI.Content),
+				OpenAPISpec:      normalized,
 				SpecHash:         strPtr(specHash),
 				ParsedSummary:    summary,
 				Version:          1,

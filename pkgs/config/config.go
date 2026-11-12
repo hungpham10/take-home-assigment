@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config is the loadtest-controller runtime configuration.
@@ -58,6 +59,13 @@ type Config struct {
 	MockServiceNamespace string
 	// mock-service ports allowed for egress SUT/runner → mock-service.
 	MockServicePorts []int32
+
+	// Load-test guardrails (plans/42, docs/loadtest-manager-api.md §5):
+	// per-run ceilings enforced at POST /loadtests (422). Quota enforcement via
+	// tbl_reservation_ledger is a separate, deferred concern.
+	MaxVUs            int
+	MaxDuration       time.Duration
+	MaxTimeoutMinutes int
 }
 
 // FromEnv builds Config from environment variables with sane dev defaults.
@@ -105,6 +113,15 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if c.MockServicePorts, err = envPorts("MOCK_SERVICE_PORTS", "80,8090"); err != nil {
+		return Config{}, err
+	}
+	if c.MaxVUs, err = envInt("MAX_VUS", 500); err != nil {
+		return Config{}, err
+	}
+	if c.MaxDuration, err = envDuration("MAX_DURATION", 30*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if c.MaxTimeoutMinutes, err = envInt("MAX_TIMEOUT_MINUTES", 60); err != nil {
 		return Config{}, err
 	}
 	return c, nil
@@ -192,4 +209,18 @@ func envInt(key string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid %s %q: must be a positive integer", key, v)
 	}
 	return n, nil
+}
+
+// envDuration parses a Go duration ("30s", "10m", "1h30m") and fails closed on
+// a typo: silently ignoring MAX_DURATION would leave the guardrail disabled.
+func envDuration(key string, def time.Duration) (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be a positive duration (e.g. 30s, 10m)", key, v)
+	}
+	return d, nil
 }

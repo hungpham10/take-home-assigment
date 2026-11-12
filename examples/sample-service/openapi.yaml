@@ -1,0 +1,110 @@
+openapi: 3.0.3
+info:
+  title: Sample Service
+  version: "1.0.0"
+  description: >
+    Minimal system-under-test for the load-testing platform demo. In-memory,
+    no auth. Endpoints are chosen so a test script can produce deterministic
+    latency (GET /slow) and a deterministic error rate (GET /flaky).
+servers:
+  - url: http://sample-service:8080
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      responses:
+        "200":
+          description: ok
+  /todos:
+    get:
+      operationId: listTodos
+      summary: List todos
+      responses:
+        "200":
+          description: todo list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  todos:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Todo"
+                  count:
+                    type: integer
+    post:
+      operationId: createTodo
+      summary: Create a todo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text:
+                  type: string
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Todo"
+        "400":
+          description: missing text
+  /slow:
+    get:
+      operationId: slow
+      summary: Sleep for ?ms= (bounded at 2000ms) — deterministic latency
+      parameters:
+        - name: ms
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 2000
+            default: 50
+      responses:
+        "200":
+          description: slept_ms
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slept_ms:
+                    type: integer
+  /flaky:
+    get:
+      operationId: flaky
+      summary: Fail with probability ?rate= (0..1) — deterministic error rate
+      parameters:
+        - name: rate
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 0
+            maximum: 1
+            default: 0
+      responses:
+        "200":
+          description: ok
+        "500":
+          description: injected failure
+components:
+  schemas:
+    Todo:
+      type: object
+      properties:
+        id:
+          type: integer
+        text:
+          type: string
+        done:
+          type: boolean

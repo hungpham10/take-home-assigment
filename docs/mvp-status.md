@@ -59,7 +59,7 @@ nginx (conf/nginx — pre-existing, untouched)
 
 Health: `/health`, `/ready` (fail-closed DB), `/metrics` (prometheus).
 
-## 3. DB schema (13 migrations — source of truth `sql/`)
+## 3. DB schema (14 migrations — source of truth `sql/`)
 
 | Migration | Contents |
 |---|---|
@@ -69,11 +69,12 @@ Health: `/health`, `/ready` (fail-closed DB), `/metrics` (prometheus).
 | 0004 | scripts + events + validations, load_tests + events + `fn_loadtest_transition`, test_events |
 | 0005 | idempotency_keys, outbox_events, reservation_ledger, datasets + events |
 | 0006–0009 | additional seed transitions, strip secrets from the DB, token_encrypted, revalidate VALIDATED |
+| 0010–0014 | namespace spec/components, component status, readiness invariants + transition clears readiness, **load test results** (plans/45) |
 
 **Invariants verified by SQL tests (CI job sql-migrations):**
 - Every status change goes through `fn_*_transition` (FOR UPDATE → check map → status+version+1 → event, 1 transaction)
 - Events append-only; `tbl_<object>` is the read source (JOIN + index)
-- 4 test suites: `tests/sql/{transition,namespace_transition,loadtest_transition,plumbing}_test.sql`
+- 5 test suites: `tests/sql/{transition,namespace_transition,loadtest_transition,plumbing,loadtest_results}_test.sql`
 
 ## 4. Security checklist
 
@@ -109,13 +110,27 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 
 ## 7. Gaps / remaining work
 
-1. **K8s runner implemented** — `runner.Runner` interface + `K8sTestRunRunner` when `RUNNER_MODE=k8s` (creates a `k6.io/v1alpha1 TestRun` via the Go client, script via ConfigMap). Integration test via `tests/e2e-full-deploy.sh` (kind + k6-operator) ✅ plan 27.
-2. **k6 perf gate not yet run** — install k6 and run `tests/perf/*` at least once, record the numbers in the README
-3. **mock-service** — the binary exists at `cmds/mock-service` (separate data plane, does not use pkgs/controller); the mock-status/mock-pools endpoints are still stubs, metadata CRUD goes through namespace components.
-4. **Outbox worker** — the table + outbox writes exist, but there is no dispatcher loop yet
-5. **Quota gate 429** — `tbl_reservation_ledger` has a schema, not yet wired into loadtest create
-6. **CodeGraph final review + bump version** (`scripts/bump.sh`) — per AGENTS.md before treating it as a release
-7. Plans 16 (harness-testing-integrity) — created by the user, not yet implemented
+1. **k6 perf gate not yet run** — install k6 and run `tests/perf/*` at least once, record the numbers in the README.
+2. **mock-service** — the binary exists at `cmds/mock-service` (separate data plane, does not use pkgs/controller); the mock-status/mock-pools endpoints are still stubs, metadata CRUD goes through namespace components.
+3. **Outbox worker** — the table + outbox writes exist, but there is no dispatcher loop yet.
+4. **Quota gate 429** — `tbl_reservation_ledger` has a schema, not yet wired into loadtest create.
+   Per-run guardrails (vusers/duration/timeout caps → 422) **are** enforced at create
+   (`docs/loadtest-manager-api.md` §5.4, plans/42); per-tenant quotas remain deferred.
+5. **CodeGraph final review + bump version** (`scripts/bump.sh`) — per AGENTS.md before treating it as a release.
+6. Plans 16 (harness-testing-integrity) — created by the user, not yet implemented.
+
+### Phase 2 (plans 41–45)
+
+| Plan | Scope | Status |
+|------|-------|--------|
+| 42 | loadtest caps — MAX_VUS / MAX_DURATION / MAX_TIMEOUT_MINUTES → 422 at create | implemented (`pkgs/loadtest/limits.go`, wired through server/testutil) |
+| 43 | sample service — `examples/sample-service` Go SUT + openapi.yaml + Dockerfile + kind E2E wiring | implemented |
+| 44 | developer CLI — `pkgs/ltpclient` + `cmds/ltp` (ns/script/run/report), exit codes, docs, e2e-cli | implemented |
+| 45 | run results — migration 0014, k6 summary parse (local + pod log), API fields, `ltp run report` | implemented |
+| 41 | submission docs — README (EN), WRITEUP.md, AI-USAGE.md, plans index, mvp-status refresh | **remaining deliverable** (this doc refresh) |
+
+Merge order: 42 → 43 → 44 → 45 → 41 (plan 41 merges last so the README documents shipped CLI syntax).
+Quota ledger (gap 4) stays deferred; demo video is still unplanned (plan 46, pending confirmation).
 
 ## 7b. Harness (plans/16 — PR #20/#21, 2026-11-07)
 - Centralized composition root: `Mount(r chi.Router, d Deps)`, a single server.go configures middleware; tests via `pkgs/testutil.NewServer` (does not rebuild auth)
@@ -175,3 +190,27 @@ CI (GitHub Actions): lint (golangci-lint v2) + test (`-race`, postgres service) 
 - **CLI**: `loadtest-controller sops encrypt|decrypt` (hex blob, pattern `opsense-rs sops.rs`) — generate/verify `token_encrypted` when seeding SQL.
 - **Test**: CI job `Full Deploy E2E (in-cluster)` — Earthly build → kind load → kustomize apply → `tests/e2e-full-deploy.sh DEPLOY_MODE=in-cluster` (bearer token from `scripts/mint-dex-token.py`) → `tests/integration` via port-forward.
 - Details: `docs/k8s-deployment.md`, `plans/36-k8s-manifests.md`.
+
+### plans/45 — Run results: collect, store, surface k6 summary (2026-11-12)
+
+- **One parser for both backends**: `pkgs/runner/summary.go` `ParseSummary` reads k6's *text* summary
+  (`█ THRESHOLDS` + `█ TOTAL RESULTS`, plus the older v0.4x inline layout). Text — not
+  `--summary-export` — because the K8s path can only read the pod log; two formats would mean two
+  parsers. Fixtures in `pkgs/runner/testdata/` are real captured k6 output (pass/threshold-fail/
+  truncated/progress-only/empty/v0.49).
+- **Runner carries the raw tail, not a parsed struct**: `runner.Status` gains `Summary []byte` +
+  `SummaryErr`. Local captures stdout/stderr in a buffer and reads it *before* dropping the proc;
+  K8s adds `k8s.Client.PodLogs` (typed clientset, `LimitBytes` 1 MiB) and reads the runner pod log on
+  the terminal poll only.
+- **Collection is transactional and idempotent**: `Reconciler.finish` takes the runner status and
+  writes migration `0014`'s four columns in the same transaction as the terminal transition, guarded
+  by `result_collected_at IS NULL`. A missing log keeps the terminal status and records
+  `result_parse_error`; a timeout records its own reason. NULL = not collected (≠ collected nothing).
+- **API + CLI**: `GET /loadtests/{id}` returns the results (`docs/loadtest-manager-api.md` §8);
+  `ltp run report` renders RPS/p95/p99/avg/failure-rate/checks/thresholds and never prints zeros for
+  an uncollected run (`docs/developer-cli.md`).
+- **Tests**: parser table tests, local-runner capture (`-race`), K8s `PodLogs` (hit/missing/cap/fault),
+  reconciler result tests against real Postgres, `tests/sql/loadtest_results_test.sql`, CLI report
+  tests, and a `tests/e2e-full-deploy.sh` assertion that a kind run's `result_summary.http_reqs > 0`
+  within 30s of `finished_at`.
+- Details: `plans/45-run-results.md`.

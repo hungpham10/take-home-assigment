@@ -54,6 +54,13 @@ spec:
               value: 172.18.0.0/16
             - name: HA_ENABLED
               value: "false"
+            # Load-test guardrails (plans/42): per-run caps enforced at create.
+            - name: MAX_VUS
+              value: "500"
+            - name: MAX_DURATION
+              value: 30m
+            - name: MAX_TIMEOUT_MINUTES
+              value: "60"
             # nginx boot placeholders (release.sh boot() sed)
             - name: HTTP_SERVER
               value: localhost
