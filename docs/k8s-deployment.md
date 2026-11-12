@@ -1,15 +1,15 @@
-# Triển khai loadtest-platform lên Kubernetes (kind / multi-cluster sau)
+# Deploying loadtest-platform to Kubernetes (kind / multi-cluster later)
 
-Mô hình 2 tầng bảo mật:
+Two-layer security model:
 
-| Tầng | Cơ chế | Bảo vệ gì | Vị trí lưu |
+| Layer | Mechanism | What it protects | Where it is stored |
 |------|--------|-----------|------------|
-| 1 | **SOPS + age** (file-level) | Toàn bộ env nhạy cảm (DB DSN, OIDC secrets, tenant secrets, `LTP_MASTER_KEY`) | `deploy/k8s/base/serve/secrets.enc.yaml` — commit được |
-| 2 | **AES-256-GCM field-level** (`pkgs/secrets`) | Giá trị nhạy cảm trong DB (abt_ plaintext, shared secret sau này) | DB cột `BYTEA`, master key từ `LTP_MASTER_KEY` (tách từ SOPS env) |
+| 1 | **SOPS + age** (file-level) | All sensitive env values (DB DSN, OIDC secrets, tenant secrets, `LTP_MASTER_KEY`) | `deploy/k8s/base/serve/secrets.enc.yaml` — safe to commit |
+| 2 | **AES-256-GCM field-level** (`pkgs/secrets`) | Sensitive values in the DB (abt_ plaintext, shared secrets later on) | DB column `BYTEA`, master key from `LTP_MASTER_KEY` (separated from the SOPS env) |
 
-Private age key **không bao giờ vào repo/image**; chỉ public key trong `.sops.yaml`.
+The private age key **never goes into the repo/image**; only the public key lives in `.sops.yaml`.
 
-## 1. Sinh age key (một lần duy nhất, trên máy vận hành)
+## 1. Generate an age key (one time only, on the operator machine)
 
 ```bash
 mkdir -p ~/.config/sops/age
@@ -17,27 +17,27 @@ age-keygen -o ~/.config/sops/age/keys.txt
 chmod 600 ~/.config/sops/age/keys.txt
 ```
 
-Lấy **public key** (dòng bắt đầu `# public key:`):
+Get the **public key** (the line starting with `# public key:`):
 
 ```bash
 sed -n 's/^# public key: //p' ~/.config/sops/age/keys.txt
 ```
 
-> ⚠️ Đừng `head -1` — file bắt đầu bằng dòng `# created: …`; `head -1` trả comment tạo ra recipient sai.
+> ⚠️ Do not use `head -1` — the file starts with a `# created: …` line; `head -1` returns that comment and yields the wrong recipient.
 
-Thêm public key vào `.sops.yaml` (model theo `env/secrets*.yaml`):
+Add the public key to `.sops.yaml` (modelled on `env/secrets*.yaml`):
 
 ```yaml
 creation_rules:
   - path_regex: deploy/k8s/.*\.enc\.(yaml|yml|json)$
-    age: age1ql3z7hjy54pw3hyww5ayy…   # <-- public key thật của bạn
+    age: age1ql3z7hjy54pw3hyww5ayy…   # <-- your real public key
   - path_regex: env/secrets\.[a-z]+\.yaml$
     age: age1ql3z7hjy54pw3hyww5ayy…
 ```
 
-## 2. Tạo file secrets mã hoá (commit được)
+## 2. Create the encrypted secrets file (safe to commit)
 
-Viết plaintext (KHÔNG commit):
+Write the plaintext (do NOT commit):
 
 ```bash
 cat > /tmp/secrets.dev.yaml <<'EOF'
@@ -58,55 +58,55 @@ sops -e /tmp/secrets.dev.yaml > deploy/k8s/base/serve/secrets.enc.yaml
 rm /tmp/secrets.dev.yaml
 ```
 
-Sinh `LTP_MASTER_KEY` mới (32 byte hex = 64 ký tự):
+Generate a new `LTP_MASTER_KEY` (32 bytes hex = 64 characters):
 
 ```bash
 openssl rand -hex 32
 ```
 
-> ⚠️ `LTP_MASTER_KEY` phải đúng 32 byte sau khi hex-decode (64 ký tự hex). `pkgs/secrets.LoadMasterKey()` sẽ từ chối key sai độ dài và tính năng reveal token sẽ im lặng tắt (không crash).
+> ⚠️ `LTP_MASTER_KEY` must be exactly 32 bytes after hex-decoding (64 hex characters). `pkgs/secrets.LoadMasterKey()` rejects a key of the wrong length, and the token reveal feature is silently disabled (no crash).
 
-Kiểm tra file đã mã hoá giải mã được đúng `KEY=VALUE`:
+Verify that the encrypted file decrypts to the correct `KEY=VALUE` pairs:
 
 ```bash
 sops -d --output-type dotenv deploy/k8s/base/serve/secrets.enc.yaml
 ```
 
-## 3. Tạo K8s Secret chứa `SOPS_AGE_KEY_CONTENT` (không commit)
+## 3. Create the K8s Secret holding `SOPS_AGE_KEY_CONTENT` (do not commit)
 
 ```bash
 kubectl -n ltp-system create secret generic sops-age-key \
   --from-literal=SOPS_AGE_KEY_CONTENT="$(cat ~/.config/sops/age/keys.txt)"
 ```
 
-Nội dung file `keys.txt` (bao gồm dòng `# created:` và `# public key:`) phải paste **nguyên block** — thiếu một dòng thì `sops -d` fail.
+The contents of `keys.txt` (including the `# created:` and `# public key:` lines) must be pasted as the **entire block** — a missing line makes `sops -d` fail.
 
-## 4. Deploy lên kind
+## 4. Deploy to kind
 
 ```bash
-# 0. kind cluster (lần đầu)
+# 0. kind cluster (first time)
 kind create cluster --name ltp --wait 120s
 kind export kubeconfig --name ltp
 
-# 1. dependencies: CNPG + k6-operator + Calico (tái dùng script có sẵn)
-#    tests/e2e-full-deploy.sh tự làm khi DEPLOY_MODE=in-cluster
+# 1. dependencies: CNPG + k6-operator + Calico (reuse the existing script)
+#    tests/e2e-full-deploy.sh does this automatically when DEPLOY_MODE=in-cluster
 
-# 2. build images + nạp vào kind
+# 2. build images + load them into kind
 earthly +integration-images          # → loadtest-platform-serve:local, mock-service:local
 kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name ltp
 
-# 3. apply manifest
+# 3. apply manifests
 kubectl apply -k deploy/k8s/overlays/kind
 kubectl -n ltp-system rollout status deploy/serve --timeout=180s
 kubectl -n ltp-system rollout status deploy/dex --timeout=180s
 kubectl -n ltp-system rollout status sts/postgres --timeout=180s
 
-# 4. port-forward (mỗi terminal một)
+# 4. port-forward (one per terminal)
 kubectl -n ltp-system port-forward svc/serve 8080:8080 &
 kubectl -n ltp-system port-forward svc/dex 5556:5556 &
 ```
 
-## 5. Lấy bearer token từ Dex (không mở browser)
+## 5. Get a bearer token from Dex (without opening a browser)
 
 ```bash
 export LTP_DEX_ISSUER=http://localhost:5556/dex
@@ -119,40 +119,40 @@ TOKEN=$(python3 scripts/mint-dex-token.py)
 curl -H "Host: localhost" -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/loadtest/v1/namespaces
 ```
 
-`scripts/mint-dex-token.py` drive HTML login của Dex và xuất `id_token` (JWT RS256) — đúng cơ chế `tests/integration/dex.go` (port từ `sources/opsense-rs/scripts/mint-dex-token.py`).
+`scripts/mint-dex-token.py` drives the Dex HTML login and outputs an `id_token` (JWT RS256) — the same mechanism as `tests/integration/dex.go` (ported from `sources/opsense-rs/scripts/mint-dex-token.py`).
 
-### Lưu ý: header phải là **một** argv của curl
+### Note: the header must be **one** curl argv
 
 ```bash
-# SAI — shell tách "Bearer $TOKEN" thành 2 arg ⇒ curl hiểu `-H Authorization:`
-# (xoá header) và gửi request HTTP/1.1 không có Host ⇒ nginx trả 400
+# WRONG — the shell splits "Bearer $TOKEN" into 2 args ⇒ curl reads `-H Authorization:`
+# (drops the header) and sends an HTTP/1.1 request without Host ⇒ nginx returns 400
 H="-H Authorization: Bearer $TOKEN -H Host: localhost"; curl $H ...
 
-# ĐÚNG — dùng curl config file (một word, không bị word-split)
+# RIGHT — use a curl config file (a single word, no word-splitting)
 printf 'header = "Authorization: Bearer %s"\nheader = "Host: localhost"\n' "$TOKEN" > /tmp/curl.conf
 curl -K /tmp/curl.conf ...
 ```
 
-### Định danh tenant/user trong chế độ bearer
+### Tenant/user identity in bearer mode
 
-Gateway lấy danh tính từ phía nginx (`conf/nginx/vhost/04-api.conf`):
+The gateway takes its identity from the nginx side (`conf/nginx/vhost/04-api.conf`):
 
-| Header | Nguồn | Ràng buộc schema |
+| Header | Source | Schema constraint |
 |---|---|---|
-| `X-Tenant-Id` | `auth-config` → `auth.id` | **=`tbl_tenants.id`** (`tbl_namespaces.tenant_id` là FK) |
-| `X-User-Id` | JWT `sub` | UUID hoặc external subject — xem dưới |
+| `X-Tenant-Id` | `auth-config` → `auth.id` | **=`tbl_tenants.id`** (`tbl_namespaces.tenant_id` is a FK) |
+| `X-User-Id` | JWT `sub` | UUID or external subject — see below |
 
-`tbl_namespaces.owner_user_id REFERENCES tbl_users(id)` là **UUID**, còn `sub` của Dex
-**luôn** là opaque: `base64url(protobuf{userID, connectorID})` (Dex v2.41
-`server/oauth2.go:genSubject`, không tắt được). Vì vậy:
+`tbl_namespaces.owner_user_id REFERENCES tbl_users(id)` is a **UUID**, while Dex's `sub` is
+**always** opaque: `base64url(protobuf{userID, connectorID})` (Dex v2.41
+`server/oauth2.go:genSubject`, cannot be disabled). Therefore:
 
-- ConfigMap trong cluster đặt `staticPasswords[].userID: 11111111-1111-4111-8111-111111111111`
-  để `tbl_users.id` cố định, và E2E đọc `sub` từ token vừa mint rồi seed
-  `tbl_user_external_identities(issuer, subject)` trỏ về user đó.
-- Controller resolve `X-User-Id` (plan 37, `pkgs/authz/identity.go`): UUID → dùng nguyên;
-  ngược lại tra `tbl_user_external_identities` trong tenant; không thấy → `401`.
+- The in-cluster ConfigMap sets `staticPasswords[].userID: 11111111-1111-4111-8111-111111111111`
+  to keep `tbl_users.id` fixed, and the E2E reads `sub` from the freshly minted token and then seeds
+  `tbl_user_external_identities(issuer, subject)` pointing at that user.
+- The controller resolves `X-User-Id` (plan 37, `pkgs/authz/identity.go`): a UUID → used as-is;
+  otherwise it looks up `tbl_user_external_identities` within the tenant; not found → `401`.
 
-Kiểm tra nhanh:
+Quick check:
 
 ```bash
 kubectl -n ltp-system exec statefulset/postgres -- \
@@ -161,11 +161,11 @@ kubectl -n ltp-system exec statefulset/postgres -- \
                              LEFT JOIN tbl_user_external_identities uei ON uei.user_id = u.id"
 ```
 
-### Resolver DNS cho Lua (JWKS, OIDC discovery)
+### DNS resolver for Lua (JWKS, OIDC discovery)
 
-nginx dùng cosocket (`lua-resty-http`) để gọi JWKS/OIDC ⇒ cần `resolver` đúng với
-môi trường. `conf/nginx/http.conf` + `www.conf` dùng placeholder `%%NGINX_RESOLVER%%`,
-`scripts/release.sh` thay bằng env (default `127.0.0.11` cho Docker Compose):
+nginx uses cosockets (`lua-resty-http`) to call JWKS/OIDC, so it needs the `resolver` to match the
+environment. `conf/nginx/http.conf` + `www.conf` use the placeholder `%%NGINX_RESOLVER%%`,
+and `scripts/release.sh` replaces it from the env (default `127.0.0.11` for Docker Compose):
 
 ```yaml
 # deploy/k8s/base/serve/deployment.yaml
@@ -173,32 +173,32 @@ môi trường. `conf/nginx/http.conf` + `www.conf` dùng placeholder `%%NGINX_R
   value: kube-dns.kube-system.svc.cluster.local
 ```
 
-Quên bước này ⇒ Lua fetch `http://dex:5556/dex/keys` fail ⇒ mọi request bearer trả 401
-(`Invalid Token`) dù JWKS vẫn truy cập được từ ngoài.
+Forgetting this step ⇒ the Lua fetch of `http://dex:5556/dex/keys` fails ⇒ every bearer request returns 401
+(`Invalid Token`) even though JWKS is still reachable from outside.
 
-> ⚠️ **Dùng FQDN trong URL, không dùng tên ngắn.** `resolver` của nginx (cosocket)
-> **không** áp dụng search domain/ndots trong `/etc/resolv.conf`; query `dex` trả
+> ⚠️ **Use the FQDN in the URL, not the short name.** nginx's `resolver` (cosocket)
+> does **not** apply the search domain/ndots from `/etc/resolv.conf`; a query for `dex` returns
 > `SERVFAIL` ⇒ `Invalid Token … failed fetching jwks: dex could not be resolved
-> (2: Server failure)`. Trong cluster dùng
+> (2: Server failure)`. Inside the cluster use
 > `http://dex.ltp-system.svc.cluster.local:5556/dex` (issuer + jwks_uri +
-> `oidc_jwks_url` trong auth profile). Docker Compose thì tên ngắn `dex` vẫn đúng vì
-> embedded DNS resolve trực tiếp.
+> `oidc_jwks_url` in the auth profile). With Docker Compose the short name `dex` still works because
+> the embedded DNS resolves it directly.
 
-## 6. CLI `sops` subcommand (encrypt/decrypt giá trị nhạy cảm)
+## 6. CLI `sops` subcommand (encrypt/decrypt sensitive values)
 
 ```bash
 export LTP_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
-# Encrypt plaintext → hex blob (paste thẳng vào SQL seed)
+# Encrypt plaintext → hex blob (paste straight into the SQL seed)
 ./bin/loadtest-controller sops encrypt "client-secret-abc"
 # → \x3f9a…
 
-# Decrypt ngược lại để verify seed (nhận \x / 0x / hex trần)
+# Decrypt it back to verify the seed (accepts \x / 0x / bare hex)
 ./bin/loadtest-controller sops decrypt '\x3f9a…'
 # → client-secret-abc
 ```
 
-Dispatch xảy ra **trước** `config.FromEnv()`, nên không cần `DATABASE_DSN`/DB khi chạy `sops`. Master key đọc từ `LTP_MASTER_KEY` (SOPS env — nếu unset, `Encrypt`/`Decrypt` báo lỗi rõ ràng thay vì panic).
+Dispatch happens **before** `config.FromEnv()`, so no `DATABASE_DSN`/DB is needed when running `sops`. The master key is read from `LTP_MASTER_KEY` (SOPS env — if unset, `Encrypt`/`Decrypt` return a clear error instead of panicking).
 
 ## 7. Teardown
 
@@ -209,20 +209,20 @@ kind delete cluster --name ltp
 
 ## 8. CI
 
-Job `Full Deploy E2E (in-cluster)` trong `.github/workflows/ci.yml`:
+The `Full Deploy E2E (in-cluster)` job in `.github/workflows/ci.yml`:
 1. `checkout` + `setup-go`
-2. cài `kind` v0.24.0 + `kubectl` v1.31.0
-3. tạo kind cluster (`ltp-full-deploy`, retry x3)
+2. install `kind` v0.24.0 + `kubectl` v1.31.0
+3. create the kind cluster (`ltp-full-deploy`, retry x3)
 4. `earthly +integration-images` → `kind load docker-image` (serve + mock-service)
 5. `DEPLOY_MODE=in-cluster ./tests/e2e-full-deploy.sh`
-6. dump cluster state (pods/events/CNPG/TestRun/controller logs) khi fail
+6. dump cluster state (pods/events/CNPG/TestRun/controller logs) on failure
 
-Estimate: 15–20 phút (earthly cold build 6–10m + bootstrap + lifecycle). Timeout 45m.
+Estimate: 15–20 minutes (earthly cold build 6–10m + bootstrap + lifecycle). Timeout 45m.
 
-## Mẹo debug
+## Debugging tips
 
-- Xem log controller: `kubectl -n ltp-system logs deploy/serve -c serve` (supervisord gom stdout)
-- Xem TestRun: `kubectl -n lt-env-<ns> get testrun -o wide`
-- Xem CNPG cluster: `kubectl -n lt-env-<ns> get cluster`
-- Xem event NetworkPolicy: `kubectl -n lt-env-<ns> get networkpolicy`
-- Dump toàn bộ khi fail: `kubectl get ns,deploy,svc,pods,testruns,clusters -A` + `kubectl events`
+- View controller logs: `kubectl -n ltp-system logs deploy/serve -c serve` (supervisord collects stdout)
+- View TestRun: `kubectl -n lt-env-<ns> get testrun -o wide`
+- View the CNPG cluster: `kubectl -n lt-env-<ns> get cluster`
+- View NetworkPolicy events: `kubectl -n lt-env-<ns> get networkpolicy`
+- Dump everything on failure: `kubectl get ns,deploy,svc,pods,testruns,clusters -A` + `kubectl events`

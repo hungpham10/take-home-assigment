@@ -160,7 +160,7 @@ Non-prod sources only; owner = Environment creator; `pii_classification` = `mask
 
 ## 5. Status models (summary)
 
-- **Namespace:** `DRAFT, VALIDATING, INVALID, APPLYING, DATA_LOADING, READY, DEGRADED, DELETING, DELETED` + `ready_for_loadtest` (`DATA_LOADING` when required dataset restore/import/verify is incomplete). `DELETE` từ `READY` tự clear `ready_for_loadtest` qua `fn_namespace_transition` (sql/0013) trước khi sang `DELETING` — không bị chặn bởi `chk_namespaces_ready_only_when_ready` (sql/0012).
+- **Namespace:** `DRAFT, VALIDATING, INVALID, APPLYING, DATA_LOADING, READY, DEGRADED, DELETING, DELETED` + `ready_for_loadtest` (`DATA_LOADING` when required dataset restore/import/verify is incomplete). `DELETE` from `READY` clears `ready_for_loadtest` automatically via `fn_namespace_transition` (sql/0013) before moving to `DELETING` — not blocked by `chk_namespaces_ready_only_when_ready` (sql/0012).
 - **Load test (canonical):**
 | Status | Meaning |
 |---|---|
