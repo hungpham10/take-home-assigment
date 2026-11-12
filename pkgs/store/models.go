@@ -412,7 +412,7 @@ type LoadTest struct {
 	// reconciler collects the k6 summary: NULL means "not collected", which is
 	// different from "collected and empty" (result_collected_at set + no
 	// result_summary + result_parse_error set).
-	ResultSummary     []byte     `gorm:"column:result_summary;type:jsonb" json:"result_summary,omitempty"`
+	ResultSummary     json.RawMessage `gorm:"column:result_summary;type:jsonb" json:"result_summary,omitempty"`
 	ThresholdsFailed  *bool      `gorm:"column:thresholds_failed" json:"thresholds_failed,omitempty"`
 	ResultCollectedAt *time.Time `gorm:"column:result_collected_at" json:"result_collected_at,omitempty"`
 	ResultParseError  *string    `gorm:"column:result_parse_error" json:"result_parse_error,omitempty"`

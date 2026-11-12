@@ -121,8 +121,8 @@ func TestNSWaitBlockersOnTimeout(t *testing.T) {
 			t.Errorf("stderr missing %q:\n%s", want, stderr)
 		}
 	}
-	if calls < 2 {
-		t.Errorf("polls = %d, want >1 (wait must poll, not one-shot)", calls)
+	if atomic.LoadInt32(&calls) < 2 {
+		t.Errorf("polls = %d, want >1 (wait must poll, not one-shot)", atomic.LoadInt32(&calls))
 	}
 }
 
@@ -183,8 +183,8 @@ func TestScriptPushWaitsForValidation(t *testing.T) {
 	if !strings.Contains(stdout, "VALIDATED") || !strings.Contains(stdout, "ltp run start") {
 		t.Errorf("stdout = %q", stdout)
 	}
-	if polls < 2 {
-		t.Errorf("polls = %d, want ≥2 (must wait for terminal validation)", polls)
+	if atomic.LoadInt32(&polls) < 2 {
+		t.Errorf("polls = %d, want ≥2 (must wait for terminal validation)", atomic.LoadInt32(&polls))
 	}
 }
 
