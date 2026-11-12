@@ -129,7 +129,9 @@ serve:
         rm -rf lua-ffi-zlib
 
     RUN useradd nginx && \
-        mkdir -p /var/run/axum /var/log/nginx /app/secrets /app/scripts && \
+        # /var/run/axum is a unix socket FILE created by controller (pkgs/listener);
+        # creating it as a directory here breaks bind on startup.
+        mkdir -p /var/log/nginx /app/secrets /app/scripts && \
         chown -R nginx:nginx /var/log/nginx
 
     # Supervisor + nginx + alloy + dex configs
