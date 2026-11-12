@@ -95,6 +95,24 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo ">>> releasing v$V from $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))"
 
+      - name: Build binaries (materialise bin/*-earthly locally)
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          GIT_COMMIT: ${{ steps.bump.outputs.commit }}
+          BUILD_DATE: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # +build làm target gốc ⇒ SAVE ARTIFACT ... AS LOCAL materialise
+          # bin/*-earthly vào host. Không --push: target này không có image.
+          earthly \
+            --build-arg VERSION="$VERSION" \
+            --build-arg GIT_COMMIT="$GIT_COMMIT" \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
+            --build-arg REGISTRY="$REGISTRY" \
+            --build-arg IMAGE_PREFIX="$IMAGE_PREFIX" \
+            +build
+
       # Tag only after the images are pushed and verified (plans/39): a failure
       # in the build must never leave a tag that advertises a release with no
       # artifacts. Ordering: build → verify → tag → GitHub Release.
@@ -102,14 +120,13 @@ jobs:
         env:
           VERSION: ${{ steps.bump.outputs.version }}
           GIT_COMMIT: ${{ steps.bump.outputs.commit }}
+          BUILD_DATE: ${{ steps.bump.outputs.version }}
         run: |
           set -euo pipefail
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          # --push is mandatory: without it Earthly builds but never uploads
-          # (SAVE IMAGE --push only takes effect on a `--push` build).
-          # Earthly v0.8 accepts a single target-ref; +all builds +serve +
-          # +mock-service, each of which pulls +build as a dependency, so the
-          # bin/*-earthly artifacts are materialised by this invocation.
+          # --push là bắt buộc: không có thì Earthly build nhưng không upload.
+          # +all ⇒ BUILD +serve + BUILD +mock-service; mỗi service dùng
+          # COPY (+build/...) nên +build được rebuild từ cache (vốn đã có).
           earthly --push \
             --build-arg VERSION="$VERSION" \
             --build-arg GIT_COMMIT="$GIT_COMMIT" \
