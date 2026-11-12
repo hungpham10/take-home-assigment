@@ -47,10 +47,24 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Install Earthly from its GitHub release asset rather than the
+      # get.earthly.dev installer: that host failed DNS resolution on the
+      # runner (plans/39), and `curl | bash` masked the failure because the
+      # pipeline exit status came from bash, not curl. Fail fast here so a
+      # broken toolchain never reaches the tag step.
       - name: Install Earthly
         run: |
-          curl -fsSL https://get.earthly.dev | bash
-          echo "$HOME/.earthly/bin" >> $GITHUB_PATH
+          set -euo pipefail
+          url="https://github.com/earthly/earthly/releases/latest/download/earthly-linux-amd64"
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 -o /usr/local/bin/earthly "$url"; then
+              break
+            fi
+            echo "earthly download failed (attempt $attempt/3), retrying..." >&2
+            sleep 5
+          done
+          chmod +x /usr/local/bin/earthly
+          earthly --version
 
       - name: Configure Docker for ghcr.io
         run: |
@@ -81,16 +95,9 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo ">>> releasing v$V from $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))"
 
-      - name: Create and push git tag
-        env:
-          V: ${{ steps.bump.outputs.version }}
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$V" -m "Release v$V"
-          git push origin "refs/tags/v$V"
-
+      # Tag only after the images are pushed and verified (plans/39): a failure
+      # in the build must never leave a tag that advertises a release with no
+      # artifacts. Ordering: build → verify → tag → GitHub Release.
       - name: Build & push images (Earthly)
         env:
           VERSION: ${{ steps.bump.outputs.version }}
@@ -120,6 +127,16 @@ jobs:
               docker buildx imagetools inspect "$ref" >/dev/null
             done
           done
+
+      - name: Create and push git tag
+        env:
+          V: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "Release v$V"
+          git push origin "refs/tags/v$V"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
