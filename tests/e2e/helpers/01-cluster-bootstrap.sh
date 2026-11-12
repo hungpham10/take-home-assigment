@@ -16,13 +16,20 @@ bootstrap_cluster() {
   
   say "Creating kind cluster: $CLUSTER (disableDefaultCNI for Calico)"
   
-  if kind get clusters | grep -q "^$CLUSTER$"; then
-    say "Deleting existing cluster $CLUSTER"
-    kind delete cluster --name "$CLUSTER"
-  fi
-  
-  KIND_CONFIG="$(mktemp)"
-  cat > "$KIND_CONFIG" <<KIND_YAML
+  # Retry once if the control plane doesn't become Ready (kind --wait
+  # prints a warning but returns 0 on timeout; slow CI runners can need
+  # a second attempt).
+  for attempt in 1 2; do
+    if [ "$attempt" -gt 1 ]; then
+      say "Control plane not Ready; deleting cluster and retrying ($attempt/2)"
+      kind delete cluster --name "$CLUSTER" 2>/dev/null || true
+    fi
+    if kind get clusters | grep -q "^$CLUSTER$"; then
+      kind delete cluster --name "$CLUSTER" 2>/dev/null || true
+    fi
+
+    KIND_CONFIG="$(mktemp)"
+    cat > "$KIND_CONFIG" <<KIND_YAML
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
@@ -33,15 +40,29 @@ nodes:
   - role: control-plane
   - role: worker
 KIND_YAML
-  
-  kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" \
-    --config "$KIND_CONFIG" --wait 300s
-  rm -f "$KIND_CONFIG"
 
-  # Wait for control-plane node to be Ready (kind --wait may time out
-  # on slow CI runners; the cluster exists but isn't usable yet).
-  wait_for "control-plane node Ready" 60 5 \
-    "kubectl get nodes | grep -q 'control-plane.* Ready'"
+    kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" \
+      --config "$KIND_CONFIG" --wait 300s
+    rm -f "$KIND_CONFIG"
+
+    # Inline wait for control-plane Ready (wait_for would exit on timeout;
+    # we need to retry instead).
+    cp_ok=0
+    for i in $(seq 1 60); do
+      if kubectl get nodes 2>/dev/null | grep -q 'control-plane.* Ready'; then
+        cp_ok=1
+        break
+      fi
+      sleep 5
+    done
+    if [ "$cp_ok" -eq 1 ]; then
+      ok "control-plane node Ready"
+      break
+    fi
+    if [ "$attempt" -eq 2 ]; then
+      fail "control-plane node not Ready after 2 cluster creation attempts"
+    fi
+  done
 
   kind export kubeconfig --name "$CLUSTER"
   ok "Cluster created and kubeconfig exported"
