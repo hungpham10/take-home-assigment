@@ -23,20 +23,21 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/script"
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
+	"github.com/hungpham/loadtest-platform/pkgs/version"
 )
 
 // Deps carries everything the server routes need.
 type Deps struct {
 	DB         *gorm.DB
-	Now        func() time.Time // injectable clock (tests)
-	Secrets    secrets.Resolver // SOPS-decrypted tenant secrets
-	MasterKey  []byte           // AES-256-GCM master key (token encryption at rest)
-	ScriptsDir string           // staging dir for k6 scripts
-	ScriptQ    *script.Queue    // async validation queue (nil → sync in tests)
-	Runner     runner.Runner    // load-test execution backend (local/k8s)
-	K8s        k8s.Client       // cluster client for run-scoped NetworkPolicy (nil in legacy/local mode)
-	K8S        bool             // cluster wired → async apply (plans/21); false = legacy sync
-	StaleAfter time.Duration    // watcher heartbeat staleness threshold (WATCH-05)
+	Now        func() time.Time          // injectable clock (tests)
+	Secrets    secrets.Resolver          // SOPS-decrypted tenant secrets
+	MasterKey  []byte                    // AES-256-GCM master key (token encryption at rest)
+	ScriptsDir string                    // staging dir for k6 scripts
+	ScriptQ    *script.Queue             // async validation queue (nil → sync in tests)
+	Runner     runner.Runner             // load-test execution backend (local/k8s)
+	K8s        k8s.Client                // cluster client for run-scoped NetworkPolicy (nil in legacy/local mode)
+	K8S        bool                      // cluster wired → async apply (plans/21); false = legacy sync
+	StaleAfter time.Duration             // watcher heartbeat staleness threshold (WATCH-05)
 	Net        envreconciler.PlatformNet // platform networking defaults (k6-operator ns, node CIDRs, mock-service)
 	// ApplyNow (plans/26): hierarchical apply ngay trong request path sau khi
 	// desired-state commit (nil ở legacy mode).
@@ -51,7 +52,14 @@ func NewRouter(d Deps) http.Handler {
 	r.Use(middleware.Timeout(30 * time.Second))
 
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": version.Get().Version})
+	})
+
+	// /version is the runtime truth for "which build is this pod running?"
+	// (docs/versioning.md). A deployed image may be older than the manifest
+	// tag; this endpoint is what an operator checks.
+	r.Get("/version", func(w http.ResponseWriter, _ *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, version.Get())
 	})
 
 	r.Get("/ready", func(w http.ResponseWriter, req *http.Request) {

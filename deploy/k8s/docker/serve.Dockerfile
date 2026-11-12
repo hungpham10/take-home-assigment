@@ -49,9 +49,12 @@ COPY scripts/release.sh /app/scripts/release.sh
 COPY scripts/entrypoint.sh /app/entrypoint.sh
 
 ARG VERSION=local
+ARG GIT_COMMIT=unknown
 COPY bin/loadtest-controller /app/loadtest-controller
 COPY bin/mock-service /app/mock-service
 RUN chmod +x /app/*.sh /app/loadtest-controller /app/mock-service
+# Fail-fast evidence in the build log: which version got baked in (plans/38).
+RUN /app/loadtest-controller --version && /app/mock-service --version
 
 ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
 EXPOSE 8080

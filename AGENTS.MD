@@ -40,17 +40,20 @@ You are a senior Go backend engineer working on this project, following its full
    - Unit tests green + required coverage met
    - Performance tests (k6) meet targets
    - CodeGraph MCP final review: no duplicated code, no missing logic, no missing edge cases
-9. **Release:** Run `scripts/bump.sh [major|minor|patch]` to bump the version and push the tag when preparing a release
+9. **Release:** Version comes from git tags (`docs/versioning.md`). Compute the next version with `./scripts/bump.sh [patch|minor|major]` (or bootstrap `--set X.Y.Z`), then run the **Release** GitHub Actions workflow (`bump=patch|minor|major`, or `bump=none` + `version=X.Y.Z` for the first release) to tag, build+push images, and publish. Do not create release tags or bump commits by hand.
 10. **Re-index:** Re-run CodeGraph MCP indexing after changes and review the diff again
 
 ## Commands you can use
 Run tests: `go test ./...`
 Lint: `golangci-lint run`
+Build: `make build` (injects version from git tags via ldflags)
+Version: `make version` / `./bin/loadtest-controller --version` / `GET /version`
+Bump (compute only, no git side effects): `./scripts/bump.sh [patch|minor|major]` · `--print` · `--set X.Y.Z`
+Render k8s manifest with real tag: `make k8s-render [OVERLAY=release|kind] [K8S_VERSION=X.Y.Z]`
 Validate nginx config: `scripts/nginx.sh` (or `nginx -t -c conf/nginx/http.conf`)
 Local stack: `docker compose up -d` (defined in `docker-compose.yml`)
 Build docs: `make docs` (see `Makefile`)
-Bump version: `./scripts/bump.sh [major|minor|patch]`
-Release: `./scripts/release.sh` (SOPS multi-env secret decryption entrypoint)
+Container entrypoint bootstrap (SOPS decrypt + nginx): `./scripts/release.sh`
 
 ## Development practices
 Be concise, specific, and value dense
@@ -60,6 +63,6 @@ Handle edge cases explicitly; duplicated logic is a defect — extract shared co
 Keep API routing changes in `conf/nginx` (maps/vhosts), not in application code
 
 ## Boundaries
-- ✅ **Always do:** **Docs + plan before code** (`docs/` then `plans/`, update both when scope changes), schema in `sql/`, tests first (TDD), run local tests, open PRs for review, run CodeGraph review before merge, bump version via `scripts/bump.sh`
+- ✅ **Always do:** **Docs + plan before code** (`docs/` then `plans/`, update both when scope changes), schema in `sql/`, tests first (TDD), run local tests, open PRs for review, run CodeGraph review before merge, release via the Release workflow (tag-driven, `docs/versioning.md`)
 - ⚠️ **Ask first:** Before merging to `main`, before modifying nginx routing in a breaking way, before changing the SQL schema in a non-backward-compatible way
 - 🚫 **Never do:** Modify anything in `sources/`, skip tests, merge with red CI or failed performance/coverage gates, commit secrets (use SOPS-encrypted files), push directly to `main`

@@ -28,6 +28,32 @@ jobs:
       - name: Transition lint
         run: ./scripts/lint-transitions.sh
 
+  # plans/38: version comes from git tags — the bump logic and the binary
+  # banner must agree, and a release tag must never be silently reused.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Bump script tests
+        run: ./scripts/bump_test.sh
+      - name: Build with injected version + assert banner
+        run: |
+          make build
+          echo ">>> make version: $(make -s version)"
+          ./bin/loadtest-controller --version
+          ./bin/mock-service --version
+          want="$(make -s version)"
+          case "$want" in
+            dev) ;;
+            *) ./bin/loadtest-controller --version | grep -q "v${want#v} " \
+                 || { echo "banner does not match git version '$want'" >&2; exit 1; } ;;
+          esac
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -61,15 +87,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags are the version source of truth (plans/38).
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: Build binaries
+        run: make build
+      - name: Report version
         run: |
-          go build -o bin/loadtest-controller ./cmds/loadtest-controller
-          if [ -d ./cmds/mock-service ]; then
-            go build -o bin/mock-service ./cmds/mock-service
-          fi
+          ./bin/loadtest-controller --version
+          ./bin/mock-service --version
 
   # Plans/22: integration harness trên kind cluster (CI chuẩn — không cần
   # VM/qemu như colima; colima giữ cho local dev, cùng harness chạy được cả
@@ -191,6 +220,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -205,13 +236,15 @@ jobs:
           kind --version
           kubectl version --client
       - name: Build Go binaries
-        run: |
-          go build -o bin/loadtest-controller ./cmds/loadtest-controller
-          go build -o bin/mock-service ./cmds/mock-service
+        run: make build
       - name: Build serve + mock-service images (docker build)
         run: |
-          docker build -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
-          docker build -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
+          VERSION="$(make -s version)"
+          COMMIT="$(git rev-parse --short HEAD)"
+          docker build --build-arg VERSION="$VERSION" --build-arg GIT_COMMIT="$COMMIT" \
+            -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
+          docker build --build-arg VERSION="$VERSION" --build-arg GIT_COMMIT="$COMMIT" \
+            -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
       - name: Create kind cluster (with retry)
         run: |
           for i in $(seq 1 3); do

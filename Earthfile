@@ -7,35 +7,55 @@ VERSION 0.8
 # -----------------------------------------------------------------------
 ARG --global REGISTRY=ghcr.io
 ARG --global IMAGE_PREFIX=loadtest-platform
-ARG --global VERSION=latest
+# Version = git tag (docs/versioning.md). "dev" = no release information.
+ARG --global VERSION=dev
+ARG --global GIT_COMMIT=unknown
+ARG --global BUILD_DATE=
 
 # -----------------------------------------------------------------------
 # build — build 2 Go binary (fast path: binary từ host nếu có, fallback go build)
 # -----------------------------------------------------------------------
 build:
     FROM golang:1.26-bookworm
+    # Version comes from the git tag (docs/versioning.md). CI/Makefile pass it
+    # explicitly; `dev` means "no release information available".
+    ARG VERSION=$VERSION
+    ARG GIT_COMMIT=$GIT_COMMIT
+    ARG BUILD_DATE=$BUILD_DATE
     WORKDIR /src
     # CI stage binaries theo bin/ trước khi gọi; --if-exists ⇒ không fail nếu thiếu
     COPY --if-exists bin/ /src/host-bin/
     COPY . /src/code/
     # Fast path chỉ nhận ELF (CI stage linux binary vào bin/); Mach-O darwin
     # từ `make build` trên host phải bị loại — không chạy được trong container.
+    # Ngoài ELF, binary phải báo ĐÚNG version của build này: binary cũ trong
+    # bin/ (build từ commit khác) sẽ bị rebuild thay vì đóng gói nhầm.
     RUN sh -c '\
+      set -e && \
       mkdir -p /out && \
+      ldflags="-X github.com/hungpham/loadtest-platform/pkgs/version.Version=$VERSION -X github.com/hungpham/loadtest-platform/pkgs/version.Commit=$GIT_COMMIT" && \
+      if [ -n "$BUILD_DATE" ]; then ldflags="$ldflags -X github.com/hungpham/loadtest-platform/pkgs/version.BuildDate=$BUILD_DATE"; fi && \
+      expected="$VERSION" && \
+      case "$VERSION" in dev) ;; *) expected="v$VERSION" ;; esac && \
       sig_ctrl=$(head -c4 /src/host-bin/loadtest-controller 2>/dev/null | od -An -tx1) && \
       sig_mock=$(head -c4 /src/host-bin/mock-service 2>/dev/null | od -An -tx1) && \
       case "$sig_ctrl" in *"7f 45 4c 46"*) ctrl_ok=1 ;; *) ctrl_ok=0 ;; esac && \
       case "$sig_mock" in *"7f 45 4c 46"*) mock_ok=1 ;; *) mock_ok=0 ;; esac && \
+      ctrl_v=$(/src/host-bin/loadtest-controller --version 2>/dev/null || true) && \
+      mock_v=$(/src/host-bin/mock-service --version 2>/dev/null || true) && \
+      case "$ctrl_v" in "$expected"|"$expected "*) ;; *) ctrl_ok=0 ;; esac && \
+      case "$mock_v" in "$expected"|"$expected "*) ;; *) mock_ok=0 ;; esac && \
       if [ "$ctrl_ok" = 1 ] && [ "$mock_ok" = 1 ]; then \
-        echo "--> Using pre-built host binaries"; \
+        echo "--> Using pre-built host binaries ($ctrl_v)"; \
         cp /src/host-bin/loadtest-controller /src/host-bin/mock-service /out/; \
       else \
-        echo "--> Building inside Earthly..."; \
+        echo "--> Building inside Earthly (VERSION=$VERSION)..."; \
         cd /src/code && \
-        go build -o /out/loadtest-controller ./cmds/loadtest-controller && \
-        go build -o /out/mock-service ./cmds/mock-service; \
+        go build -ldflags "$ldflags" -o /out/loadtest-controller ./cmds/loadtest-controller && \
+        go build -ldflags "$ldflags" -o /out/mock-service ./cmds/mock-service; \
       fi && \
       chmod +x /out/loadtest-controller /out/mock-service && \
+      /out/loadtest-controller --version && /out/mock-service --version && \
       ls -la /out/'
     SAVE ARTIFACT /out/loadtest-controller AS LOCAL bin/loadtest-controller-earthly
     SAVE ARTIFACT /out/mock-service AS LOCAL bin/mock-service-earthly
@@ -47,6 +67,8 @@ build:
 serve:
     FROM openresty/openresty:1.27.1.2-4-bookworm-fat
     ARG VERSION=$VERSION
+    ARG GIT_COMMIT=$GIT_COMMIT
+    ARG BUILD_DATE=$BUILD_DATE
 
     # Runtime deps tách nhiều RUN nhỏ (blob ≤ ~80MB — blob lớn qua local
     # registry pullping của Earthly trên colima/docker-29 hay bị EOF giữa dòng).
@@ -124,15 +146,18 @@ serve:
     COPY scripts/release.sh    /app/scripts/release.sh
     COPY scripts/entrypoint.sh /app/entrypoint.sh
 
-    # Binaries lấy từ artifact của build
-    COPY +build/loadtest-controller /app/loadtest-controller
-    COPY +build/mock-service        /app/mock-service
+    # Binaries lấy từ artifact của build (propagate version args so the fast-path
+    # guard in +build can compare against THIS image's VERSION).
+    COPY (+build/loadtest-controller --VERSION=$VERSION --GIT_COMMIT=$GIT_COMMIT --BUILD_DATE=$BUILD_DATE) /app/loadtest-controller
+    COPY (+build/mock-service        --VERSION=$VERSION --GIT_COMMIT=$GIT_COMMIT --BUILD_DATE=$BUILD_DATE) /app/mock-service
     RUN chmod +x /app/*.sh /app/loadtest-controller /app/mock-service
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
     EXPOSE 8080
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}/serve:${VERSION}
+    SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}/serve:latest
     SAVE IMAGE loadtest-platform-serve:${VERSION}
+    SAVE IMAGE loadtest-platform-serve:latest
 
 # -----------------------------------------------------------------------
 # mock-service — data-plane unit riêng (k8s deployment mock-service scale ngang)
@@ -140,20 +165,24 @@ serve:
 mock-service:
     FROM debian:bookworm-slim
     ARG VERSION=$VERSION
+    ARG GIT_COMMIT=$GIT_COMMIT
+    ARG BUILD_DATE=$BUILD_DATE
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates wget && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY +build/mock-service /app/mock-service
+    COPY (+build/mock-service --VERSION=$VERSION --GIT_COMMIT=$GIT_COMMIT --BUILD_DATE=$BUILD_DATE) /app/mock-service
     RUN chmod +x /app/mock-service
 
     ENV ADDR=:8090
     EXPOSE 8090
     ENTRYPOINT ["/app/mock-service"]
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}/mock-service:${VERSION}
+    SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}/mock-service:latest
     SAVE IMAGE loadtest-platform-mock-service:${VERSION}
+    SAVE IMAGE loadtest-platform-mock-service:latest
 
 # -----------------------------------------------------------------------
 # test — chạy unit tests trong container (CI-fallback khi runner không có Go)
@@ -182,5 +211,7 @@ multi:
 # -----------------------------------------------------------------------
 integration-images:
     ARG VERSION=local
-    BUILD --build-arg VERSION=${VERSION} +serve
-    BUILD --build-arg VERSION=${VERSION} +mock-service
+    ARG GIT_COMMIT=unknown
+    ARG BUILD_DATE=
+    BUILD --build-arg VERSION=${VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT} --build-arg BUILD_DATE=${BUILD_DATE} +serve
+    BUILD --build-arg VERSION=${VERSION} --build-arg GIT_COMMIT=${GIT_COMMIT} --build-arg BUILD_DATE=${BUILD_DATE} +mock-service

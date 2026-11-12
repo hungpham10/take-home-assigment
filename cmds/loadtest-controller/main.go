@@ -24,6 +24,7 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/secrets"
 	"github.com/hungpham/loadtest-platform/pkgs/server"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
+	"github.com/hungpham/loadtest-platform/pkgs/version"
 )
 
 func main() {
@@ -34,6 +35,12 @@ func main() {
 }
 
 func run() error {
+	// `--version` must work before any config/env/DB is touched: it is the
+	// "which build is this?" probe used in images and CI (docs/versioning.md).
+	if version.PrintIfRequested(os.Args[1:], os.Stdout) {
+		return nil
+	}
+
 	// CLI subcommand: sops encrypt/decrypt (chỉ cần LTP_MASTER_KEY, không cần
 	// DB). Thực thi trước config.FromEnv() để không bị choke khi
 	// DATABASE_DSN chưa set.
@@ -50,6 +57,7 @@ func run() error {
 		return err
 	}
 	setupLogging(cfg.LogLevel)
+	slog.Info("starting", "version", version.Get().Version, "commit", version.Get().Commit, "build_date", version.Get().BuildDate)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

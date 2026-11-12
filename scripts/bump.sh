@@ -1,119 +1,130 @@
 #!/usr/bin/env bash
 #
-# bump.sh - Bump version and create git tag (auto-fallback to latest tag).
-# Usage: ./bump.sh [major|minor|patch]
+# bump.sh — compute the next release version from the latest git tag.
 #
-# The script:
-#   1. Determines the current version:
-#        • If a `version.txt` file exists at the repository root, reads it.
-#        • Otherwise, uses the most recent git tag (e.g. v1.2.3) as the current version.
-#   2. Increments the version according to the bump type.
-#   3. Writes the new version back to `version.txt` (creating the file if needed).
-#   4. Commits the change with message "chore: bump version to <new_version>".
-#   5. Creates a Git tag v<new_version>.
-#   6. Pushes both the commit and the tag to the remote.
-#   7. Prints the new version.
+# The git tag is the single source of truth (docs/versioning.md). This script
+# has NO side effects: it never writes files, commits, tags or pushes. The
+# release workflow owns those steps so they stay visible in one place.
+#
+# Usage:
+#   ./scripts/bump.sh patch|minor|major   # print the next version
+#   ./scripts/bump.sh --set X.Y.Z         # validate + print an explicit version
+#   ./scripts/bump.sh --print             # print the current build version
+#
+# Output contract: stdout is the version only (machine-readable, e.g.
+# `NEXT=$(./scripts/bump.sh patch)`). Diagnostics go to stderr.
 
 set -euo pipefail
 
-# Determine script directory (project root)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Path to version file (repository root)
-VERSION_FILE="$SCRIPT_DIR/version.txt"
-# Cargo manifest/lockfile (cargo-dist reads the Cargo version, not version.txt)
-CARGO_TOML="$SCRIPT_DIR/Cargo.toml"
-CARGO_LOCK="$SCRIPT_DIR/Cargo.lock"
+# No `cd`: git already resolves the enclosing repository from any subdirectory,
+# and staying in the caller's directory keeps the script testable against a
+# throwaway repository (scripts/bump_test.sh).
 
-# ------------------------------------------------------------
-# Resolve current version
-# ------------------------------------------------------------
-if [[ -f "$VERSION_FILE" ]]; then
-    # Use version.txt if it exists
-    CURRENT_VERSION=$(cat "$VERSION_FILE")
-else
-    # Fallback: get the latest tag that looks like a version
-    LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-    if [[ -z "$LATEST_TAG" ]]; then
-        echo "Error: No version.txt found and no git tags available." >&2
+SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+die() {
+    echo "bump: $*" >&2
+    exit 1
+}
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: ./scripts/bump.sh <patch|minor|major>
+       ./scripts/bump.sh --set X.Y.Z
+       ./scripts/bump.sh --print
+
+The git tag (vMAJOR.MINOR.PATCH) is the source of truth; this script only
+computes a version. The release workflow creates the tag and pushes images.
+EOF
+}
+
+# latest_version prints the highest strict semver tag without the leading "v".
+# Non-semver tags (nightly, v1.2.3-rc.1, ...) are ignored on purpose: they must
+# never influence the next release number.
+latest_version() {
+    git tag --list 'v[0-9]*' 2>/dev/null \
+        | sed -n 's/^v\([0-9][0-9]*\)\.\([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\1 \2 \3/p' \
+        | sort -k1,1n -k2,2n -k3,3n \
+        | tail -n 1 \
+        | tr ' ' '.'
+}
+
+# current_version mirrors the Makefile: git describe, without the "v" prefix.
+# No tag reachable on this commit → "dev": the exact revision still travels in
+# the Commit field, and the banner never claims a release that does not exist.
+current_version() {
+    local described
+    described="$(git describe --tags --always --dirty --match 'v[0-9]*' 2>/dev/null || true)"
+    if [[ "$described" == v[0-9]* ]]; then
+        echo "${described#v}"
+    else
+        echo "dev"
+    fi
+}
+
+# version_gt A B succeeds when A > B (numeric semver comparison).
+version_gt() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        split(a, x, "."); split(b, y, ".")
+        for (i = 1; i <= 3; i++) {
+            if (x[i] + 0 > y[i] + 0) exit 0
+            if (x[i] + 0 < y[i] + 0) exit 1
+        }
         exit 1
-    fi
-    # Strip a leading 'v' if present (e.g. v1.2.3 -> 1.2.3)
-    CURRENT_VERSION="${LATEST_TAG#v}"
-fi
+    }'
+}
 
-# Validate version format (MAJOR.MINOR.PATCH)
-if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" != *[0-9]* ]]; then
-    echo "Error: Unable to parse a valid version from '$CURRENT_VERSION'." >&2
-    exit 1
-fi
+validate_semver() {
+    [[ "$1" =~ $SEMVER_RE ]] || die "version '$1' is not MAJOR.MINOR.PATCH"
+}
 
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+require_git_repo() {
+    git rev-parse --git-dir >/dev/null 2>&1 || die "not a git repository (the version comes from git tags)"
+}
 
-# Validate that all parts are numeric
-if [[ -z "$MAJOR" || -z "$MINOR" || -z "$PATCH" ]]; then
-    echo "Error: version '$CURRENT_VERSION' is not in MAJOR.MINOR.PATCH format." >&2
-    exit 1
-fi
-
-# ------------------------------------------------------------
-# Determine bump level
-# ------------------------------------------------------------
-case "${1:-patch}" in
-    major) BUMP_LEVEL=0 ;;
-    minor) BUMP_LEVEL=1 ;;
-    patch) BUMP_LEVEL=2 ;;
-    *) echo "Error: Invalid bump type '$1'. Use 'major', 'minor', or 'patch'." >&2; exit 1 ;;
+case "${1:-}" in
+    --print)
+        require_git_repo
+        current_version
+        exit 0
+        ;;
+    --help | -h | help)
+        usage
+        exit 0
+        ;;
+    --set)
+        require_git_repo
+        [[ $# -eq 2 ]] || die "--set requires exactly one version argument"
+        validate_semver "$2"
+        latest="$(latest_version)"
+        if [[ -n "$latest" ]] && ! version_gt "$2" "$latest"; then
+            die "--set $2 must be greater than the latest tag ($latest); tags are immutable"
+        fi
+        echo "$2"
+        exit 0
+        ;;
+    patch | minor | major)
+        require_git_repo
+        latest="$(latest_version)"
+        if [[ -z "$latest" ]]; then
+            die "no release tag found. The first release is bootstrapped explicitly:
+  gh workflow run release.yml -f bump=none -f version=0.1.0
+  (local: ./scripts/bump.sh --set 0.1.0)"
+        fi
+        IFS='.' read -r MAJOR MINOR PATCH <<< "$latest"
+        case "$1" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+        esac
+        echo "${MAJOR}.${MINOR}.${PATCH}"
+        exit 0
+        ;;
+    "")
+        usage
+        exit 2
+        ;;
+    *)
+        die "unknown argument '$1' (expected patch|minor|major, --set X.Y.Z or --print)"
+        ;;
 esac
-
-# ------------------------------------------------------------
-# Perform bump
-# ------------------------------------------------------------
-case "$BUMP_LEVEL" in
-    0) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-    1) MINOR=$((MINOR + 1)); PATCH=0 ;;
-    2) PATCH=$((PATCH + 1)) ;;
-esac
-
-NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-echo "$NEW_VERSION" > "$VERSION_FILE"
-echo "Bumped version: $CURRENT_VERSION -> $NEW_VERSION"
-
-# ------------------------------------------------------------
-# Sync the Cargo workspace version with version.txt
-# ------------------------------------------------------------
-# cargo-dist derives the release version from the Cargo package version
-# (every crate uses `version.workspace = true`), not from version.txt. If
-# the two drift, `dist host --tag=v<version>` aborts with
-# "This workspace doesn't have anything for dist to Release!".
-if [[ -f "$CARGO_TOML" ]]; then
-    # Only the `[workspace.package]` version is a line that starts with
-    # `version = `; dependency versions are written inline.
-    sed -E "s/^version = \"[^\"]*\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML" > "$CARGO_TOML.tmp"
-    mv "$CARGO_TOML.tmp" "$CARGO_TOML"
-
-    # Refresh Cargo.lock so workspace member versions match the manifest
-    # (otherwise `cargo --locked` builds fail).
-    if [[ -f "$CARGO_LOCK" ]] && command -v cargo >/dev/null 2>&1; then
-        cargo update --workspace --offline || cargo update --workspace
-    fi
-    echo "Synced Cargo workspace version to $NEW_VERSION"
-else
-    echo "Warning: $CARGO_TOML not found; skipped Cargo version sync." >&2
-fi
-
-# ------------------------------------------------------------
-# Git operations
-# ------------------------------------------------------------
-git add "$VERSION_FILE" "$CARGO_TOML"
-if [[ -f "$CARGO_LOCK" ]]; then
-    git add "$CARGO_LOCK"
-fi
-git commit -m "chore: bump version to $NEW_VERSION"
-git push
-# git tag "v$NEW_VERSION"
-
-# # Push commit and tag to remote
-# git push origin HEAD
-# git push origin "v$NEW_VERSION"
-# 
-# echo "Version $NEW_VERSION committed, tagged, and pushed."

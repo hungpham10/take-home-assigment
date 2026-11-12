@@ -3,19 +3,28 @@
 Pattern tham chiếu: `sources/opsense-rs/Earthfile` + `docker-compose.yml` (multi-stage
 Earthly, fast-path prebuilt binary, compose OIDC stack, integration test suite).
 
+> **Version = git tag** (`docs/versioning.md`, plan 38). Binary và image đều mang
+> version từ tag; `/version` là runtime truth.
+
 ## 1. Images (Earthfile)
 
 | Target | Image | Nội dung |
 |---|---|---|
-| `+build` | — | Build 2 Go binary: `loadtest-controller`, `mock-service` (golang:1.23-bookworm). Fast path: copy `bin/` từ host nếu có (`COPY --if-exists`), fallback `go build` trong Earthly. |
+| `+build` | — | Build 2 Go binary với ldflags version (golang:1.26-bookworm). Fast path: copy `bin/` từ host **chỉ khi** ELF và `--version` khớp `VERSION`; lệch ⇒ `go build` trong Earthly. |
 | `+serve` | `loadtest-platform-serve` | **AIO image** (openresty 1.27.1.2-bookworm-fat): nginx OpenResty + supervisor + **controller (unix socket)** + **mock-service (TCP :8090)** + alloy. Entrypoint `scripts/entrypoint.sh` → SOPS decrypt → supervisord. |
 | `+mock-service` | `loadtest-platform-mock-service` | Data-plane unit riêng (debian-slim + binary, TCP :8090) — dùng cho k8s deployment mock-service scale ngang. |
 | `+test` | — | `go test ./... -race` trong container (CI fallback). |
-| `+all` | | Build & push `serve` + `mock-service`. |
-| `+multi` | | `+all` cho `linux/amd64` + `linux/arm64` (BUILD --platform x2). |
-| `+integration-images` | | Build local `loadtest-platform-serve:local` + `loadtest-platform-mock-service:local`, **no push** — dùng bởi `make test-integration`. |
+| `+all` | — | Build & push `serve` + `mock-service` (chỉ push khi chạy với `--push`). |
+| `+multi` | — | `+all` cho `linux/amd64` + `linux/arm64`. |
+| `+integration-images` | — | Build local `loadtest-platform-serve:local` + `loadtest-platform-mock-service:local`, **no push** — dùng bởi `make test-integration`. |
 
-Registry/tag: `ghcr.io/hungpham10/loadtest-platform/{serve,mock-service}:${VERSION}` (ARG global `REGISTRY`/`IMAGE_PREFIX`/`VERSION`).
+Registry/tag (release, `earthly --push --build-arg VERSION=X.Y.Z ... +all`):
+`ghcr.io/<owner>/loadtest-platform/{serve,mock-service}:<VERSION>` **và** `:latest`.
+Dev/local giữ tag `:local` (overlay `kind`, `imagePullPolicy: IfNotPresent`).
+
+Global Earthfile args: `REGISTRY`, `IMAGE_PREFIX`, `VERSION` (default `dev`),
+`GIT_COMMIT`, `BUILD_DATE`. `VERSION`/`GIT_COMMIT` được nhúng vào binary qua
+`-ldflags` (`pkgs/version`).
 
 ### AIO serve — process model (supervisor `conf/supervisor/ltp.conf`)
 
@@ -76,10 +85,28 @@ make test-integration                # full suite
 
 ## 5. Deploy lên Kubernetes (kind / multi-cluster sau)
 
-Manifest kustomize tại `deploy/k8s/` (base + overlay `kind/`), RBAC least-privilege cho controller, và secrets 2 tầng (SOPS/age file-level + `pkgs/secrets` field-level AES-256-GCM).
+Manifest kustomize tại `deploy/k8s/`:
+
+| Overlay | Image | Dùng cho |
+|---|---|---|
+| `kind` | `loadtest-platform-{serve,mock-service}:local`, `IfNotPresent` | dev local, CI in-cluster (image pre-loaded vào kind) |
+| `release` | `ghcr.io/hungpham10/loadtest-platform/*:<version>`, `Always` | deploy bản release thật |
+
+Render manifest gắn đúng tag (docs/versioning.md):
+
+```sh
+make k8s-render                       # overlay release, tag = latest git tag
+make k8s-render VERSION=0.1.1         # chọn tag cụ thể
+make k8s-render OVERLAY=kind          # :local
+kubectl apply -f bin/k8s/release.yaml
+```
+
+`scripts/k8s-render.sh` copy overlay ra temp, ghi `newTag` = version, rồi
+`kubectl kustomize` ra `bin/k8s/<overlay>.yaml`. Runtime truth vẫn là
+`GET /version` trên pod (đừng tin tag trong manifest nếu pod chưa rollout).
 
 - Hướng dẫn chi tiết: `docs/k8s-deployment.md` (sinh age key, mã hoá secrets, deploy, port-forward, bearer token từ Dex, CLI `sops` encrypt/decrypt, CI job).
-- Plan chi tiết: `plans/36-k8s-manifests.md`.
+- Plan chi tiết: `plans/36-k8s-manifests.md`, versioning: `plans/38-version-management.md`.
 
 ```sh
 earthly +integration-images
@@ -89,4 +116,5 @@ kubectl -n ltp-system rollout status deploy/serve --timeout=180s
 kubectl -n ltp-system port-forward svc/serve 8080:8080 &
 TOKEN=$(python3 scripts/mint-dex-token.py)
 curl -H "Host: localhost" -H "Authorization: Bearer $TOKEN" http://localhost:8080/health
+curl -H "Host: localhost" -H "Authorization: Bearer $TOKEN" http://localhost:8080/version
 ```
