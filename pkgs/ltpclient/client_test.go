@@ -113,7 +113,7 @@ func TestErrorCodesSurfaceVerbatim(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			})
@@ -137,7 +137,7 @@ func TestErrorCodesSurfaceVerbatim(t *testing.T) {
 
 // TestNonJSONErrorBody — an nginx HTML 502 must still produce a usable error.
 func TestNonJSONErrorBody(t *testing.T) {
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte("<html>502 Bad Gateway</html>"))
 	})
@@ -177,7 +177,7 @@ func TestApplyAcceptedPreserved(t *testing.T) {
 
 func TestWaitForReady(t *testing.T) {
 	var calls int32
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
 		if n < 3 {
 			_, _ = w.Write([]byte(`{"namespace_id":"ns-1","status":"APPLYING","ready":false,"blocking_reasons":["waiting for Deployment"]}`))
@@ -200,7 +200,7 @@ func TestWaitForReady(t *testing.T) {
 // TestWaitForReadyTimeoutKeepsLastReport — the CLI prints blocking_reasons on
 // timeout, so the last report must not be lost.
 func TestWaitForReadyTimeoutKeepsLastReport(t *testing.T) {
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"namespace_id":"ns-1","status":"DEGRADED","ready":false,"blocking_reasons":["demo-db: CrashLoopBackOff"]}`))
 	})
 	last, err := c.WaitForReady(context.Background(), "ns-1", time.Millisecond, 20*time.Millisecond)
@@ -214,7 +214,7 @@ func TestWaitForReadyTimeoutKeepsLastReport(t *testing.T) {
 
 func TestWaitForScriptValidated(t *testing.T) {
 	var calls int32
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		if atomic.AddInt32(&calls, 1) == 1 {
 			_, _ = w.Write([]byte(`{"id":"sc-1","status":"VALIDATING"}`))
 			return
@@ -227,7 +227,7 @@ func TestWaitForScriptValidated(t *testing.T) {
 	}
 
 	// INVALID is terminal and must not loop until the deadline.
-	c2, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c2, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"sc-2","status":"INVALID"}`))
 	})
 	sc, ok, err = c2.WaitForScriptValidated(context.Background(), "ns-1", "sc-2", time.Millisecond, time.Second)
@@ -238,7 +238,7 @@ func TestWaitForScriptValidated(t *testing.T) {
 
 func TestWaitForRunTerminal(t *testing.T) {
 	var calls int32
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
 		status := "RUNNING"
 		if n > 2 {
@@ -254,7 +254,7 @@ func TestWaitForRunTerminal(t *testing.T) {
 	// Every terminal status stops the loop (STOPPED/TIMED_OUT are not failures
 	// of the wait itself — the CLI decides the exit code).
 	for _, terminal := range []string{"FAILED", "STOPPED", "TIMED_OUT", "CLEANUP_FAILED"} {
-		c2, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		c2, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"id":"lt-2","status":"` + terminal + `"}`))
 		})
 		lt, err := c2.WaitForRun(context.Background(), "ns-1", "lt-2", time.Millisecond, time.Second)
@@ -353,7 +353,7 @@ func TestDevAuthHeaders(t *testing.T) {
 // {namespace, services, databases, ingress}; the name-only create returns the
 // namespace flat. Both must land in the same CLI output.
 func TestCreateWithSpecNestedShape(t *testing.T) {
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"namespace":{"id":"ns-7","name":"spec","status":"DRAFT"},
 			"services":["svc-1"],"databases":["db-1"],"ingress":[]}`))
@@ -371,7 +371,7 @@ func TestCreateWithSpecNestedShape(t *testing.T) {
 		t.Errorf("components = %+v", res)
 	}
 
-	c2, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c2, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"id":"ns-8","name":"plain","status":"DRAFT"}`))
 	})
@@ -384,7 +384,7 @@ func TestCreateWithSpecNestedShape(t *testing.T) {
 // TestCreateNamespaceWithoutID — an empty body must not become a zero-value
 // namespace that later commands use as an id.
 func TestCreateNamespaceWithoutID(t *testing.T) {
-	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(`{"count":0}`))
 	})

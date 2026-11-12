@@ -67,8 +67,8 @@ func (a *app) runStart(args []string) (int, error) {
 	if a.g.jsonOut {
 		return exitOK, a.printJSON(lt)
 	}
-	fmt.Fprintf(a.out, "run %s created (status %s)\n", lt.ID, lt.Status)
-	fmt.Fprintf(a.out, "next: ltp run watch %s %s\n", nsID, lt.ID)
+	_, _ = fmt.Fprintf(a.out, "run %s created (status %s)\n", lt.ID, lt.Status)
+	_, _ = fmt.Fprintf(a.out, "next: ltp run watch %s %s\n", nsID, lt.ID)
 	return exitOK, nil
 }
 
@@ -86,7 +86,7 @@ func (a *app) runWatch(args []string) (int, error) {
 			return exitRuntime, err
 		}
 	} else {
-		fmt.Fprintf(a.out, "run %s → %s\n", lt.ID, lt.Status)
+		_, _ = fmt.Fprintf(a.out, "run %s → %s\n", lt.ID, lt.Status)
 	}
 	if lt.Status != "COMPLETED" {
 		return exitState, fmt.Errorf("run finished as %s (not COMPLETED)", lt.Status)
@@ -104,7 +104,7 @@ func (a *app) runStop(args []string) (int, error) {
 	if a.g.jsonOut {
 		return exitOK, a.printJSON(map[string]string{"id": args[1], "status": "STOPPING"})
 	}
-	fmt.Fprintf(a.out, "run %s → STOPPING\n", args[1])
+	_, _ = fmt.Fprintf(a.out, "run %s → STOPPING\n", args[1])
 	return exitOK, nil
 }
 
@@ -125,28 +125,28 @@ func (a *app) runReport(args []string) (int, error) {
 		return exitOK, a.printJSON(lt)
 	}
 	tw := tabwriter.NewWriter(a.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintf(tw, "run\t%s\nname\t%s\nstatus\t%s\nstarted\t%s\nfinished\t%s\n",
+	_, _ = fmt.Fprintf(tw, "run\t%s\nname\t%s\nstatus\t%s\nstarted\t%s\nfinished\t%s\n",
 		lt.ID, lt.Name, lt.Status, fmtTime(lt.StartedAt), fmtTime(lt.FinishedAt))
 	if lt.ResultCollectedAt != nil {
-		fmt.Fprintf(tw, "collected\t%s\n", fmtTime(lt.ResultCollectedAt))
+		_, _ = fmt.Fprintf(tw, "collected\t%s\n", fmtTime(lt.ResultCollectedAt))
 	}
 	if err := tw.Flush(); err != nil {
 		return exitRuntime, err
 	}
 	if lt.Unreliable {
-		fmt.Fprintln(a.err, "warning: namespace was DEGRADED after the run started — result is marked unreliable")
+		_, _ = fmt.Fprintln(a.err, "warning: namespace was DEGRADED after the run started — result is marked unreliable")
 	}
 
 	switch {
 	case lt.ResultCollectedAt == nil:
-		fmt.Fprintln(a.err, "result summary not collected yet (run is not terminal, or the reconciler has not polled it)")
+		_, _ = fmt.Fprintln(a.err, "result summary not collected yet (run is not terminal, or the reconciler has not polled it)")
 		return exitOK, nil
 	case lt.ResultSummary == nil:
 		reason := "no k6 summary in the runner output"
 		if lt.ResultParseError != nil && *lt.ResultParseError != "" {
 			reason = *lt.ResultParseError
 		}
-		fmt.Fprintf(a.err, "result summary unavailable: %s\n", reason)
+		_, _ = fmt.Fprintf(a.err, "result summary unavailable: %s\n", reason)
 		return exitOK, nil
 	}
 
@@ -162,21 +162,21 @@ func (a *app) runReport(args []string) (int, error) {
 		thresholds = "OK"
 	}
 
-	fmt.Fprintf(a.out, "  http_reqs     %s   RPS %.2f\n", commas(s.HTTPReqs), s.RPS)
-	fmt.Fprintf(a.out, "  duration      p95 %s   p99 %s   avg %s\n",
+	_, _ = fmt.Fprintf(a.out, "  http_reqs     %s   RPS %.2f\n", commas(s.HTTPReqs), s.RPS)
+	_, _ = fmt.Fprintf(a.out, "  duration      p95 %s   p99 %s   avg %s\n",
 		millis(s.P95), millis(s.P99), millis(s.Avg))
-	fmt.Fprintf(a.out, "  failed        %.2f%%   checks %s/%s failed\n",
+	_, _ = fmt.Fprintf(a.out, "  failed        %.2f%%   checks %s/%s failed\n",
 		s.ErrorRate*100, commas(s.ChecksFailed), commas(s.Checks))
-	fmt.Fprintf(a.out, "  thresholds    %s\n", thresholds)
+	_, _ = fmt.Fprintf(a.out, "  thresholds    %s\n", thresholds)
 	for _, th := range s.Thresholds {
 		mark := "✓"
 		if !th.OK {
 			mark = "✗"
 		}
-		fmt.Fprintf(a.out, "                %s %s\n", mark, th.String())
+		_, _ = fmt.Fprintf(a.out, "                %s %s\n", mark, th.String())
 	}
 	if s.ParseError != "" {
-		fmt.Fprintf(a.err, "warning: k6 summary was partial: %s\n", s.ParseError)
+		_, _ = fmt.Fprintf(a.err, "warning: k6 summary was partial: %s\n", s.ParseError)
 	}
 	return exitOK, nil
 }
@@ -224,9 +224,9 @@ func (a *app) runList(args []string) (int, error) {
 		return exitOK, a.printJSON(list)
 	}
 	tw := tabwriter.NewWriter(a.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tSTARTED\tFINISHED")
+	_, _ = fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tSTARTED\tFINISHED")
 	for _, lt := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", lt.ID, lt.Name, lt.Status,
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", lt.ID, lt.Name, lt.Status,
 			fmtTime(lt.StartedAt), fmtTime(lt.FinishedAt))
 	}
 	return exitOK, tw.Flush()

@@ -71,15 +71,15 @@ func (a *app) scriptPush(args []string) (int, error) {
 			return exitRuntime, err
 		}
 	} else {
-		fmt.Fprintf(a.out, "script %s (%s) → %s\n", sc.ID, sc.Name, sc.Status)
+		_, _ = fmt.Fprintf(a.out, "script %s (%s) → %s\n", sc.ID, sc.Name, sc.Status)
 	}
 	if !ok {
-		fmt.Fprintf(a.err, "script is %s; fix the errors and run: ltp script push %s %s\n",
+		_, _ = fmt.Fprintf(a.err, "script is %s; fix the errors and run: ltp script push %s %s\n",
 			sc.Status, nsID, path)
 		return exitState, fmt.Errorf("script %s not validated", sc.ID)
 	}
 	if !a.g.jsonOut {
-		fmt.Fprintf(a.out, "next: ltp run start %s --script %s\n", nsID, sc.ID)
+		_, _ = fmt.Fprintf(a.out, "next: ltp run start %s --script %s\n", nsID, sc.ID)
 	}
 	return exitOK, nil
 }
@@ -96,6 +96,6 @@ func (a *app) scriptShow(args []string) (int, error) {
 		return exitOK, a.printJSON(sc)
 	}
 	tw := tabwriter.NewWriter(a.out, 0, 2, 2, ' ', 0)
-	fmt.Fprintf(tw, "id\t%s\nname\t%s\nstatus\t%s\nsize\t%d bytes\n", sc.ID, sc.Name, sc.Status, sc.SizeByte)
+	_, _ = fmt.Fprintf(tw, "id\t%s\nname\t%s\nstatus\t%s\nsize\t%d bytes\n", sc.ID, sc.Name, sc.Status, sc.SizeByte)
 	return exitOK, tw.Flush()
 }

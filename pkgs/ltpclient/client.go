@@ -130,17 +130,17 @@ type LoadTest struct {
 // It is redeclared here rather than imported so the CLI client stays free of
 // the execution backends (pkgs/runner pulls in the Kubernetes client).
 type RunSummary struct {
-	HTTPReqs         int             `json:"http_reqs"`
-	RPS              float64         `json:"rps"`
-	P95              float64         `json:"p95_ms"`
-	P99              float64         `json:"p99_ms"`
-	Avg              float64         `json:"avg_ms"`
-	ErrorRate        float64         `json:"error_rate"`
-	Checks           int             `json:"checks"`
-	ChecksFailed     int             `json:"checks_failed"`
-	Thresholds       []RunThreshold  `json:"thresholds,omitempty"`
-	ThresholdsFailed bool            `json:"thresholds_failed"`
-	ParseError       string          `json:"parse_error,omitempty"`
+	HTTPReqs         int            `json:"http_reqs"`
+	RPS              float64        `json:"rps"`
+	P95              float64        `json:"p95_ms"`
+	P99              float64        `json:"p99_ms"`
+	Avg              float64        `json:"avg_ms"`
+	ErrorRate        float64        `json:"error_rate"`
+	Checks           int            `json:"checks"`
+	ChecksFailed     int            `json:"checks_failed"`
+	Thresholds       []RunThreshold `json:"thresholds,omitempty"`
+	ThresholdsFailed bool           `json:"thresholds_failed"`
+	ParseError       string         `json:"parse_error,omitempty"`
 }
 
 // RunThreshold is one k6 threshold result.

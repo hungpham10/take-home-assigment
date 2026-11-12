@@ -144,7 +144,7 @@ func TestParseSummaryNoSummary(t *testing.T) {
 }
 
 // TestParseSummaryNeverPanics covers binary garbage and nil input.
-func TestParseSummaryNeverPanics(t *testing.T) {
+func TestParseSummaryNeverPanics(_ *testing.T) {
 	for _, raw := range [][]byte{
 		nil,
 		{},

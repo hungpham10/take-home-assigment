@@ -98,14 +98,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rest, err := a.parseGlobals(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprint(stdout, usage())
+			_, _ = fmt.Fprint(stdout, usage())
 			return exitOK
 		}
-		fmt.Fprintf(stderr, "ltp: %v\n\n%s", err, usage())
+		_, _ = fmt.Fprintf(stderr, "ltp: %v\n\n%s", err, usage())
 		return exitUsage
 	}
 	if len(rest) == 0 || rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
-		fmt.Fprint(stdout, usage())
+		_, _ = fmt.Fprint(stdout, usage())
 		return exitOK
 	}
 	code, err := a.dispatch(rest)
@@ -220,10 +220,10 @@ func (a *app) dispatch(args []string) (int, error) {
 func (a *app) printError(err error) {
 	var apiErr *ltpclient.Error
 	if errors.As(err, &apiErr) {
-		fmt.Fprintf(a.err, "error: %s\n", apiErr.Error())
+		_, _ = fmt.Fprintf(a.err, "error: %s\n", apiErr.Error())
 		return
 	}
-	fmt.Fprintf(a.err, "error: %v\n", err)
+	_, _ = fmt.Fprintf(a.err, "error: %v\n", err)
 }
 
 // exitFor maps an error to the CLI exit code (409/422 → 3).

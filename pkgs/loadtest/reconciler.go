@@ -126,7 +126,7 @@ func (rc Reconciler) finish(ctx context.Context, lt *store.LoadTest, st runner.S
 // The summary is *never* empty-and-silent: when retrieval or parsing failed we
 // still stamp result_collected_at and record why, so the API can tell
 // "collected, nothing to report" from "never collected".
-func (rc Reconciler) collectResult(ctx context.Context, tx *gorm.DB, ltID string, st runner.Status) error {
+func (rc Reconciler) collectResult(_ context.Context, tx *gorm.DB, ltID string, st runner.Status) error {
 	sum := runner.ParseSummary(st.Summary)
 	parseErr := sum.ParseError
 	if st.SummaryErr != "" {

@@ -68,7 +68,7 @@ func TestTransportFailureIsRuntime(t *testing.T) {
 // TestStateFailureIsThree — 409/422 maps to exit 3 so CI can distinguish
 // "fix your config" from "the server is broken".
 func TestStateFailureIsThree(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = io.WriteString(w, `{"error":{"code":"NAMESPACE_NOT_READY","message":"namespace is DRAFT"}}`)
 	}))
@@ -105,7 +105,7 @@ func TestNSWaitReady(t *testing.T) {
 // "timed out".
 func TestNSWaitBlockersOnTimeout(t *testing.T) {
 	var calls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		_, _ = io.WriteString(w, `{"namespace_id":"ns-1","status":"APPLYING","ready":false,
 			"blocking_reasons":["deploy/echo: waiting for rollout","database/demo-db: not ready"]}`)
@@ -130,7 +130,7 @@ func TestNSWaitBlockersOnTimeout(t *testing.T) {
 
 func TestScriptPushOversizeFailsBeforeUpload(t *testing.T) {
 	var hit int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&hit, 1)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"id":"sc-1","status":"VALIDATED"}`)
@@ -215,7 +215,7 @@ func TestScriptPushInvalidIsStateFailure(t *testing.T) {
 // --- run watch -------------------------------------------------------------
 
 func TestRunWatchCompletedIsZero(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":"lt-1","status":"COMPLETED"}`)
 	}))
 	defer srv.Close()
@@ -231,7 +231,7 @@ func TestRunWatchCompletedIsZero(t *testing.T) {
 // TestRunWatchFailedIsThree — the run reached a terminal state, so this is a
 // state failure (the test did not pass), not a runtime error.
 func TestRunWatchFailedIsThree(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":"lt-1","status":"FAILED"}`)
 	}))
 	defer srv.Close()
@@ -247,7 +247,7 @@ func TestRunWatchFailedIsThree(t *testing.T) {
 // TestRunWatchPollsUntilTerminal — RUNNING is not terminal.
 func TestRunWatchPollsUntilTerminal(t *testing.T) {
 	var polls int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		status := "RUNNING"
 		if atomic.AddInt32(&polls, 1) > 2 {
 			status = "COMPLETED"
@@ -302,7 +302,7 @@ func TestRunStartSendsLoadConfig(t *testing.T) {
 // TestJSONOutputIsOneObject — scripts pipe `ltp --json …` into jq; the stream
 // must be exactly one JSON document with no prose mixed in.
 func TestJSONOutputIsOneObject(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":"ns-1","name":"demo","status":"READY","ready_for_loadtest":true,"version":2}`)
 	}))
 	defer srv.Close()
@@ -363,7 +363,7 @@ func TestUsageMentionsEveryCommand(t *testing.T) {
 // depend on it; a silently ignored flag would make waits feel broken).
 func TestPollIntervalFlagIsHonoured(t *testing.T) {
 	var times []time.Time
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		times = append(times, time.Now())
 		status := "RUNNING"
 		if len(times) > 1 {
@@ -388,7 +388,7 @@ func TestPollIntervalFlagIsHonoured(t *testing.T) {
 // TestRunReportRendersSummary — the report is the product's central output:
 // it must show the numbers a developer acts on, and the failing threshold.
 func TestRunReportRendersSummary(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{
 			"id":"lt-1","name":"demo","status":"COMPLETED","version":3,
 			"result_collected_at":"2026-11-12T10:04:11Z",
@@ -428,7 +428,7 @@ func TestRunReportRendersSummary(t *testing.T) {
 // TestRunReportNotCollected — never print zeros when nothing was collected:
 // that would read as a passing test that measured nothing.
 func TestRunReportNotCollected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":"lt-2","name":"r","status":"RUNNING","version":1}`)
 	}))
 	defer srv.Close()
@@ -446,7 +446,7 @@ func TestRunReportNotCollected(t *testing.T) {
 
 // TestRunReportCollectionFailure — the pod was gone; say why, not "0 requests".
 func TestRunReportCollectionFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{
 			"id":"lt-3","name":"r","status":"COMPLETED","version":2,
 			"result_collected_at":"2026-11-12T10:04:11Z",
@@ -466,7 +466,7 @@ func TestRunReportCollectionFailure(t *testing.T) {
 // TestRunReportJSONIsTheRun — --json emits the server payload unchanged, so
 // .result_summary is available to jq without a client-side re-shaping.
 func TestRunReportJSONIsTheRun(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"id":"lt-4","status":"COMPLETED","version":1,
 			"result_summary":{"http_reqs":5,"rps":1,"p95_ms":2,"thresholds_failed":false}}`)
 	}))
