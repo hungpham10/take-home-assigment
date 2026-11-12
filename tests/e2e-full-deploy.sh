@@ -651,16 +651,21 @@ import json,sys,base64
 d=json.load(sys.stdin)
 if not d.get("result_collected_at"):
     sys.exit(2)
-raw=d.get("result_summary") or ""
+raw=d.get("result_summary")
 if isinstance(raw,str):
     # The store model marshals the summary to []byte; GORM reads JSONB into
-    // []byte and Go serializes []byte as base64 in JSON responses. Decode so
-    // the summary is a JSON object regardless of transport encoding.
+    # []byte and Go serializes []byte as base64 in JSON responses. Decode so
+    # the summary is a JSON object regardless of transport encoding.
     try:
         raw=base64.b64decode(raw)
     except Exception:
-        pass
-s=json.loads(raw) if raw else {}
+        raw=None
+if isinstance(raw,(bytes,bytearray)):
+    try:
+        raw=raw.decode()
+    except Exception:
+        raw=None
+s=json.loads(raw) if isinstance(raw,str) and raw else (raw if isinstance(raw,dict) else {})
 if int(s.get("http_reqs") or 0) <= 0:
     print("result_summary:", json.dumps(s)[:400], file=sys.stderr)
     sys.exit(3)
