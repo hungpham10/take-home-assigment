@@ -31,6 +31,7 @@ func platformNet(cfg config.Config) envreconciler.PlatformNet {
 	return envreconciler.PlatformNet{
 		K6OperatorNamespace:  cfg.K6OperatorNamespace,
 		K8SNodeCIDRs:         cfg.K8SNodeCIDRs,
+		K8SAPIServerPorts:    cfg.K8SAPIServerPorts,
 		MockServiceNamespace: cfg.MockServiceNamespace,
 		MockServicePorts:     cfg.MockServicePorts,
 	}

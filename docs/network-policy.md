@@ -124,7 +124,8 @@ The controller reads platform networking defaults from environment variables (do
 | Env var | Config field | Default | Meaning |
 |---|---|---|---|
 | `K6_OPERATOR_NAMESPACE` | `K6OperatorNamespace` | `k6-operator-system` | Namespace k6-operator controller pods run in. `StartJobs` probes the runner API from here; the run-scoped `loadtest-run-api-<run>` policy allows ingress from this namespace on TCP 6565. Override when k6-operator is installed elsewhere. |
-| `K8S_NODE_CIDRS` | `K8SNodeCIDRs` | `172.18.0.0/16` | Comma list of node CIDRs whose pods reach kube-apiserver (node IP :443/:6443). kube-proxy DNATs the service IP before the netpol check, so `ipBlock` must target the node CIDR, not the service ClusterIP. Production clusters must set this; `172.18.0.0/16` only matches kind/colima. |
+| `K8S_NODE_CIDRS` | `K8SNodeCIDRs` | `172.18.0.0/16` | Comma list of node CIDRs whose pods reach kube-apiserver. kube-proxy DNATs the service IP before the netpol check, so `ipBlock` must target the node CIDR, not the service ClusterIP. Production clusters must set this; `172.18.0.0/16` only matches kind/colima. |
+| `K8S_APISERVER_PORTS` | `K8SAPIServerPorts` | `443,6443,60898` | Comma list of TCP ports allowed for egress to kube-apiserver on `K8S_NODE_CIDRS` (post-DNAT node endpoint ports, e.g. 6443/443 or k3s/colima non-standard ports). |
 | `MOCK_SERVICE_NAMESPACE` | `MockServiceNamespace` | `mock-system` | Namespace the shared mock-service runtime runs in. `default-deny` allows egress to this namespace on `MOCK_SERVICE_PORTS`. |
 | `MOCK_SERVICE_PORTS` | `MockServicePorts` | `80,8090` | Comma list of TCP ports allowed for egress SUT/runner → mock-service. `80` is the ExternalName-facing port; `8090` is the post-DNAT pod port. |
 

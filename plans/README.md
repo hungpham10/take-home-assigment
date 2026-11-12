@@ -42,6 +42,8 @@ Execution order: simple → complex. Each plan = 1 PR / feature branch, TDD, doc
 | 39 | [release-earthly-install](39-release-earthly-install.md) | Earthly install fail-fast + tag after images verified | 38 |
 | 40 | [release-artifacts](40-release-artifacts.md) | Attach built binaries to GitHub Release | 38, 39 |
 
+| 47 | [apiserver-ports-config](47-apiserver-ports-config.md) | K8S_APISERVER_PORTS env var for kube-apiserver egress ports in default-deny NP | 31 |
+
 Sau 14: mock-service (phase sau), CodeGraph review, bump version, release.
 
 ## Phase 2 — submission deliverables (plans 41–45)

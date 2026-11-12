@@ -140,9 +140,12 @@ type PlatformNet struct {
 	// the run-scoped "api" NetworkPolicy must allow ingress from it.
 	K6OperatorNamespace string
 	// K8SNodeCIDRs are the node CIDRs whose pods can reach kube-apiserver
-	// (node IP :443/:6443). Default targets kind/colima; production clusters
-	// must set this explicitly.
+	// (post-DNAT node endpoint). Default targets kind/colima; production
+	// clusters must set this explicitly.
 	K8SNodeCIDRs []string
+	// K8SAPIServerPorts are TCP ports allowed for egress to kube-apiserver on
+	// K8SNodeCIDRs (node endpoint ports, e.g. 443/6443 or k3s non-standard).
+	K8SAPIServerPorts []int32
 	// MockServiceNamespace is the namespace the shared mock-service runtime
 	// runs in (mock-system by default).
 	MockServiceNamespace string
@@ -156,6 +159,7 @@ func (e *Env) netConfig() PlatformNet {
 	net := PlatformNet{
 		K6OperatorNamespace:   "k6-operator-system",
 		K8SNodeCIDRs:          []string{"172.18.0.0/16"},
+		K8SAPIServerPorts:     []int32{443, 6443, 60898},
 		MockServiceNamespace:  "mock-system",
 		MockServicePorts:      []int32{80, 8090},
 	}
@@ -167,6 +171,9 @@ func (e *Env) netConfig() PlatformNet {
 	}
 	if len(e.Net.K8SNodeCIDRs) > 0 {
 		net.K8SNodeCIDRs = e.Net.K8SNodeCIDRs
+	}
+	if len(e.Net.K8SAPIServerPorts) > 0 {
+		net.K8SAPIServerPorts = e.Net.K8SAPIServerPorts
 	}
 	if e.Net.MockServiceNamespace != "" {
 		net.MockServiceNamespace = e.Net.MockServiceNamespace
@@ -254,7 +261,7 @@ func defaultDenyNP(envNS string, env *Env) map[string]any {
 // baseline allowances (docs/network-policy.md §1):
 //
 //	egress: DNS (kube-system:53), kube-apiserver (configured node CIDRs
-//	        :443/:6443), mock-service (configured namespace, MockServicePorts).
+//	        :443/:6443/:60898), mock-service (configured namespace, MockServicePorts).
 //	        Declared service→dependency traffic is NOT here — each service
 //	        gets its own per-service egress policy
 //	        (component_service_egress_policy.go) so "service A → DB allowed,
@@ -279,15 +286,12 @@ func defaultDenySpec(env *Env) map[string]any {
 		},
 		{
 			// kube-apiserver: pod→ClusterIP 10.96.0.1 bị kube-proxy DNAT sang
-			// node IP:6443 TRƯỚC khi netpol check — ipBlock trên service IP
+			// node IP endpoint TRƯỚC khi netpol check — ipBlock trên service IP
 			// KHÔNG match (gotcha kinh điển, verified bằng probe trên kind).
-			// Allow configured node CIDRs (default kind/colima 172.18.0.0/16),
-			// ports 443+6443.
-			"to": cidrBlocks(net.K8SNodeCIDRs),
-			"ports": []map[string]any{
-				{"protocol": "TCP", "port": int64(443)},
-				{"protocol": "TCP", "port": int64(6443)},
-			},
+			// Allow configured node CIDRs and apiserver ports (post-DNAT endpoint
+			// ports may be non-standard, e.g. k3s/colima 60898).
+			"to":    cidrBlocks(net.K8SNodeCIDRs),
+			"ports": tcpPortRules(net.K8SAPIServerPorts),
 		},
 		{
 			// mock-service: cross-namespace egress SUT/runner → mock runtime.
@@ -327,14 +331,17 @@ func cidrBlocks(cidrs []string) []map[string]any {
 	return blocks
 }
 
-// mockServicePorts renders one port rule per configured mock-service port.
-func mockServicePorts(ports []int32) []map[string]any {
+// tcpPortRules renders one TCP port rule per configured port.
+func tcpPortRules(ports []int32) []map[string]any {
 	rules := make([]map[string]any, 0, len(ports))
 	for _, p := range ports {
 		rules = append(rules, map[string]any{"protocol": "TCP", "port": int64(p)})
 	}
 	return rules
 }
+
+// mockServicePorts renders one port rule per configured mock-service port.
+func mockServicePorts(ports []int32) []map[string]any { return tcpPortRules(ports) }
 
 func cnpgCluster(envNS string, env *Env, db DatabaseSpec) map[string]any {
 	spec := map[string]any{
