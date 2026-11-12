@@ -16,6 +16,14 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 )
 
+// DeleteStatusSink persists the delete terminal transition (DELETING → DELETED)
+// when the reaper observes the K8s namespace is gone (plans/48). Implemented by
+// the controller over store.NSToDeleted so the transition goes through
+// fn_namespace_transition (single-writer rule).
+type DeleteStatusSink interface {
+	MarkDeleted(ctx context.Context, namespaceID, reason string) error
+}
+
 // Options configures the reconciler loop.
 type Options struct {
 	// Interval between level-triggered ticks (default 5s).
@@ -26,6 +34,13 @@ type Options struct {
 	// GenerationLoader reads desired_generation from PG for the prune
 	// generation check (§2.2.4 backstop). Nil = skip check.
 	GenerationLoader func(ctx context.Context, namespaceID string) (int64, error)
+	// DeleteSink completes DELETING → DELETED when the K8s namespace is gone
+	// (delete reaper, plans/48). Nil = legacy delete-only behavior (no DB write).
+	DeleteSink DeleteStatusSink
+	// DeletionDeadline is how long a namespace may sit Terminating before the
+	// reaper escalates with a WARN (stuck finalizer = operator intervention;
+	// the reaper never removes finalizers). 0 = 10m, negative = disabled.
+	DeletionDeadline time.Duration
 }
 
 // Reconciler owns the desired → K8s direction. Given one Env it applies every
@@ -41,6 +56,10 @@ type Reconciler struct {
 	isLeader func() bool
 	// GenerationLoader reads desired_generation from PG for prune backstop.
 	genLoader func(ctx context.Context, namespaceID string) (int64, error)
+	// Delete reaper (plans/48): sink + deadline + warn-once bookkeeping.
+	deleteSink       DeleteStatusSink
+	deletionDeadline time.Duration
+	stuckWarned      map[string]bool
 }
 
 // New wires a Reconciler over any k8s.Client (real or Fake).
@@ -48,11 +67,21 @@ func New(c k8s.Client, opts Options) *Reconciler {
 	if opts.Interval <= 0 {
 		opts.Interval = 5 * time.Second
 	}
+	deadline := 10 * time.Minute
+	if opts.DeletionDeadline > 0 {
+		deadline = opts.DeletionDeadline
+	}
+	if opts.DeletionDeadline < 0 {
+		deadline = 0 // disabled
+	}
 	return &Reconciler{
-		client:    c,
-		interval:  opts.Interval,
-		isLeader:  opts.IsLeader,
-		genLoader: opts.GenerationLoader,
+		client:           c,
+		interval:         opts.Interval,
+		isLeader:         opts.IsLeader,
+		genLoader:        opts.GenerationLoader,
+		deleteSink:       opts.DeleteSink,
+		deletionDeadline: deadline,
+		stuckWarned:      map[string]bool{},
 	}
 }
 
@@ -174,6 +203,44 @@ func (r *Reconciler) DeleteEnv(ctx context.Context, namespaceID string) error {
 // reconciler itself is trivially testable.
 type EnvLoader func(ctx context.Context) ([]*Env, error)
 
+// reapDeleting is the delete reaper (plans/48): level-triggered completion of
+// DELETING → DELETED without trusting any event. GET the K8s namespace —
+// NotFound (real state deleted, DB desynced) → MarkDeleted; Terminating →
+// wait (WARN once past DeletionDeadline — stuck finalizer = operator action);
+// Active → issue the delete (idempotent, retried next tick on error).
+func (r *Reconciler) reapDeleting(ctx context.Context, env *Env) error {
+	if r.isLeader != nil && !r.isLeader() {
+		// Standby: no K8s delete, no status write — leader owns both.
+		return nil
+	}
+	nsGVK := schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}
+	obj, err := r.client.Get(ctx, nsGVK, "", envNamespaceName(env.NamespaceID))
+	if err == k8s.ErrNotFound || apierrors.IsNotFound(err) {
+		// Real state deleted; DB row desynced (crash after K8s delete, lost
+		// event, manual kubectl delete). Converge DB → DELETED this tick.
+		if r.deleteSink != nil {
+			return r.deleteSink.MarkDeleted(ctx, env.NamespaceID, "k8s namespace gone")
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("envreconciler: get namespace for reaper: %w", err)
+	}
+	if obj.GetDeletionTimestamp() != nil {
+		// Terminating: finalizers are draining. Only escalate past the deadline.
+		if r.deletionDeadline > 0 && !env.DeletingSince.IsZero() &&
+			time.Since(env.DeletingSince) >= r.deletionDeadline {
+			if !r.stuckWarned[env.NamespaceID] {
+				r.stuckWarned[env.NamespaceID] = true
+				slog.Warn("envreconciler: namespace deletion deadline exceeded — stuck finalizer, operator intervention required",
+					"namespace", env.NamespaceID, "deleting_since", env.DeletingSince, "deadline", r.deletionDeadline)
+			}
+		}
+		return nil
+	}
+	return r.DeleteEnv(ctx, env.NamespaceID)
+}
+
 // Tick runs one level-triggered pass over the loader's envs. Start calls it
 // on a timer; tests call it directly.
 func (r *Reconciler) Tick(ctx context.Context, load EnvLoader) error {
@@ -183,7 +250,7 @@ func (r *Reconciler) Tick(ctx context.Context, load EnvLoader) error {
 	}
 	for _, env := range envs {
 		if env.Status == "DELETING" {
-			if err := r.DeleteEnv(ctx, env.NamespaceID); err != nil {
+			if err := r.reapDeleting(ctx, env); err != nil {
 				return err
 			}
 			continue

@@ -3,6 +3,7 @@ package envreconciler
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -32,6 +33,19 @@ func LoadEnvs(db *gorm.DB, net PlatformNet) EnvLoader {
 				Net:         net,
 			}
 			if ns.Status == "DELETING" {
+				// Delete reaper deadline input (plans/48): last `→ DELETING`
+				// transition event timestamp, fallback updated_at (same pattern
+				// as the watcher's pastApplyDeadline). Missing both = deadline
+				// not measurable (seeded state) and the reaper just waits.
+				var since time.Time
+				_ = db.WithContext(ctx).Raw(
+					`SELECT created_at FROM tbl_namespace_events
+					 WHERE object_id = ? AND to_status = 'DELETING'
+					 ORDER BY id DESC LIMIT 1`, ns.ID).Scan(&since)
+				if since.IsZero() {
+					since = ns.UpdatedAt
+				}
+				env.DeletingSince = since
 				envs = append(envs, env) // teardown needs no components
 				continue
 			}

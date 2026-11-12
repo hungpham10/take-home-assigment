@@ -22,6 +22,7 @@ import (
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
 	"github.com/hungpham/loadtest-platform/pkgs/mockcontrol"
 	"github.com/hungpham/loadtest-platform/pkgs/statuswatcher"
+	"github.com/hungpham/loadtest-platform/pkgs/store"
 )
 
 // platformNet builds the platform networking defaults from config. Zero env
@@ -49,6 +50,10 @@ func startOrchestration(ctx context.Context, db *gorm.DB, cfg config.Config, api
 	rc := envreconciler.New(client, envreconciler.Options{
 		IsLeader:         isLeader,
 		GenerationLoader: envreconciler.LoadGeneration(db),
+		// Delete reaper (plans/48): complete DELETING → DELETED when the K8s
+		// namespace is observed gone (level-triggered, no events involved).
+		DeleteSink:       deleteSinkFor(db),
+		DeletionDeadline: cfg.EnvReconcilerDeletingDeadline,
 	})
 	mockcontrol.Attach(rc) // binding ConfigMaps + MOCK_* env injection (step 5)
 	go rc.Start(ctx, envreconciler.LoadEnvs(db, net))
@@ -64,6 +69,18 @@ func startOrchestration(ctx context.Context, db *gorm.DB, cfg config.Config, api
 	go w.Start(ctx)
 	slog.Info("orchestration loops started", "api", apiURL, "resync", resync, "ha", cfg.HAEnabled, "k6-operator-ns", net.K6OperatorNamespace)
 	return nil
+}
+
+// deleteSink adapts store.NSToDeleted to the reconciler's DeleteStatusSink
+// (plans/48): the DELETING → DELETED terminal transition goes through
+// fn_namespace_transition — the single-writer rule in pkgs/store holds.
+type deleteSink struct{ db *gorm.DB }
+
+func deleteSinkFor(db *gorm.DB) envreconciler.DeleteStatusSink { return deleteSink{db: db} }
+
+
+func (s deleteSink) MarkDeleted(ctx context.Context, namespaceID, reason string) error {
+	return store.NSToDeleted(ctx, s.db, namespaceID, "envreconciler-reaper", reason)
 }
 
 // applyNowFn builds the request-path hierarchical apply hook (plans/26): after

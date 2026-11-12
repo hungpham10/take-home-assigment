@@ -54,6 +54,9 @@ spec:
               value: 172.18.0.0/16
             - name: HA_ENABLED
               value: "false"
+            # Delete reaper (plans/48): Terminating stale time before WARN escalation.
+            - name: ENVR_DELETING_DEADLINE
+              value: 10m
             # Load-test guardrails (plans/42): per-run caps enforced at create.
             - name: MAX_VUS
               value: "500"

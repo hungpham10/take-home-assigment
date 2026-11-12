@@ -29,6 +29,18 @@ Every resource the controller creates in that namespace (including the Namespace
 
 Ownership/prune rules: any resource carrying the full label set above is **managed**; when a component is removed from the desired state (or the Environment is deleted), the controller deletes by label selector rather than by individual name. Deleting an Environment = deleting the K8s Namespace (1:1 cascade, no per-resource finalizer needed for whole-environment teardown).
 
+**Delete completion (plan 48 — delete reaper):** marking the row `DELETING` (HTTP
+handler) and deleting the K8s Namespace (env reconciler tick) are two separate
+steps; nobody trusts a "deleted" event to close the gap. The reconciler's
+DELETING branch is level-triggered instead: GET the Namespace — **NotFound** →
+`store.NSToDeleted` (DB converges within one tick even if every event was lost);
+**Terminating** → keep waiting; past `ENVR_DELETING_DEADLINE` (default 10m from
+the `→ DELETING` transition event, via `tbl_namespace_events`) log WARN once —
+stuck finalizers require an operator, the controller never removes them;
+**Active** → issue `Delete` (idempotent, retried next tick). All writes go
+through `fn_namespace_transition` (single-writer rule); the branch is gated by
+the HA leader check like every other write.
+
 ## 2. ADR-004 — Render manifests in Go + SSA, no Helm for the SUT
 
 **Decision:** the controller renders `Deployment` + `Service` (+ `ServiceAccount`) directly from the `deploy {image, replicas, port, env, health}` spec using typed structs / `unstructured`, and applies with **Server-Side Apply** using `fieldManager=loadtest-controller`.
