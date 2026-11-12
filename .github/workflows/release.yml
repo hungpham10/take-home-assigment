@@ -1,0 +1,156 @@
+name: Release
+
+# Version = git tag (docs/versioning.md). This workflow is the ONLY place that
+# creates release tags and pushes images; scripts/bump.sh just computes numbers.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        type: choice
+        description: >-
+          Version bump. "none" releases the exact version below (bootstrap,
+          hotfix, or a version agreed elsewhere).
+        options: [none, patch, minor, major]
+        default: patch
+      version:
+        type: string
+        description: "Required when bump=none — MAJOR.MINOR.PATCH, e.g. 0.1.0"
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+# Two releases racing would both compute the same next tag; serialise them.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/loadtest-platform
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags are the version source of truth
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Earthly
+        run: |
+          curl -fsSL https://get.earthly.dev | bash
+          echo "$HOME/.earthly/bin" >> $GITHUB_PATH
+
+      - name: Configure Docker for ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Resolve version
+        id: bump
+        env:
+          BUMP: ${{ github.event.inputs.bump }}
+          REQUESTED: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x ./scripts/bump.sh
+          if [ "$BUMP" = "none" ]; then
+            if [ -z "${REQUESTED:-}" ]; then
+              echo "bump=none requires the 'version' input (e.g. 0.1.0)" >&2
+              exit 1
+            fi
+            V="$(./scripts/bump.sh --set "$REQUESTED")"
+          else
+            V="$(./scripts/bump.sh "$BUMP")"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "tag v$V already exists — tags are immutable, pick the next version" >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo ">>> releasing v$V from $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))"
+
+      - name: Create and push git tag
+        env:
+          V: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$V" -m "Release v$V"
+          git push origin "refs/tags/v$V"
+
+      - name: Build & push images (Earthly)
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          GIT_COMMIT: ${{ steps.bump.outputs.commit }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # --push is mandatory: without it Earthly builds but never uploads
+          # (SAVE IMAGE --push only takes effect on a `--push` build).
+          earthly --push \
+            --build-arg VERSION="$VERSION" \
+            --build-arg GIT_COMMIT="$GIT_COMMIT" \
+            --build-arg BUILD_DATE="$BUILD_DATE" \
+            --build-arg REGISTRY="$REGISTRY" \
+            --build-arg IMAGE_PREFIX="$IMAGE_PREFIX" \
+            +all
+
+      - name: Verify images exist in the registry
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          set -euo pipefail
+          for img in serve mock-service; do
+            for tag in "$VERSION" latest; do
+              ref="$REGISTRY/$IMAGE_PREFIX/$img:$tag"
+              echo ">>> $ref"
+              docker buildx imagetools inspect "$ref" >/dev/null
+            done
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: Release v${{ steps.bump.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          # linux/amd64 binaries produced by the Earthly build (SAVE ARTIFACT).
+          files: |
+            bin/loadtest-controller-earthly
+            bin/mock-service-earthly
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          COMMIT: ${{ steps.bump.outputs.commit }}
+        run: |
+          {
+            echo "## Release v$VERSION"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tag | \`v$VERSION\` |"
+            echo "| Commit | \`$COMMIT\` |"
+            echo "| serve | \`$REGISTRY/$IMAGE_PREFIX/serve:$VERSION\` |"
+            echo "| mock-service | \`$REGISTRY/$IMAGE_PREFIX/mock-service:$VERSION\` |"
+            echo "| latest | moved to \`$VERSION\` |"
+            echo ""
+            echo "Deploy: \`make k8s-render VERSION=$VERSION && kubectl apply -f bin/k8s/release.yaml\`"
+          } >> "$GITHUB_STEP_SUMMARY"

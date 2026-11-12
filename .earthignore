@@ -1,0 +1,9 @@
+# Giữ build context nhỏ — sources/ là reference repos đọc-only, bin/ là artifacts
+# host (COPY --if-exists bin/ vẫn được giữ vì Earthly .earthignore exclude pattern
+# không áp dụng cho COPY của chính file ignore này; nếu cần build fast-path từ host
+# hãy xóa dòng bin/ bên dưới).
+sources
+tags
+.git
+env/*.enc.yaml
+age-key.txt

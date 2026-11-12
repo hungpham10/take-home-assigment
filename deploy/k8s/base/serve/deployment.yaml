@@ -1,0 +1,135 @@
+# AIO serve image: nginx OpenResty + supervisor + controller (UDS /var/run/axum)
+# + mock-service (TCP :8090) + alloy. Entrypoint: SOPS decrypt → prepare → supervisord.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: serve
+  namespace: ltp-system
+  labels:
+    app: serve
+    loadtest.io/managed-by: loadtest-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: serve
+  template:
+    metadata:
+      labels:
+        app: serve
+    spec:
+      serviceAccountName: serve
+      automountServiceAccountToken: true
+      containers:
+        - name: serve
+          image: loadtest-platform-serve:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - /app/entrypoint.sh
+            - /usr/bin/supervisord
+            - -n
+          env:
+            # --- từ SOPS-encrypted file (release.sh giải mã tại boot) ---
+            # DATABASE_DSN, REDIS_*, OIDC_*, LTP_MASTER_KEY, LTP_TENANT_* ...
+            # --- cố định (không nhạy cảm) ---
+            - name: APP_ENV
+              value: dev
+            - name: LOG_LEVEL
+              value: info
+            - name: SCRIPTS_DIR
+              value: /tmp/ltp-scripts
+            - name: K8S_ENABLED
+              value: "true"
+            - name: RUNNER_MODE
+              value: k8s
+            - name: K8S_API_URL
+              value: https://kubernetes.default.svc
+            - name: K6_OPERATOR_NAMESPACE
+              value: k6-operator-system
+            - name: MOCK_SERVICE_NAMESPACE
+              value: mock-system
+            - name: MOCK_SERVICE_PORTS
+              value: "80,8090"
+            - name: K8S_NODE_CIDRS
+              value: 172.18.0.0/16
+            - name: HA_ENABLED
+              value: "false"
+            # nginx boot placeholders (release.sh boot() sed)
+            - name: HTTP_SERVER
+              value: localhost
+            - name: NGINX_LOG
+              value: main
+            - name: NGINX_DIR
+              value: /usr/local/openresty/nginx/conf
+            # resolver cho cosocket trong Lua (JWKS/OIDC). Docker Compose dùng
+            # 127.0.0.11 — trong cluster phải là DNS của kube-dns.
+            - name: NGINX_RESOLVER
+              value: kube-dns.kube-system.svc.cluster.local
+            - name: ENVIRONMENT
+              value: dev
+            - name: HTTP_PROTOCOL
+              value: http
+            # SOPS age private key (từ Secret sops-age-key, không commit)
+            - name: SOPS_AGE_KEY_CONTENT
+              valueFrom:
+                secretKeyRef:
+                  name: sops-age-key
+                  key: SOPS_AGE_KEY_CONTENT
+            - name: ENCRYPTED_FILE
+              value: /app/secrets/secrets.dev.enc.yaml
+            - name: POSTGRES_HOST
+              value: postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+          ports:
+            - containerPort: 8080   # nginx
+            - containerPort: 8090   # mock-service (internal)
+          volumeMounts:
+            # KHÔNG mount emptyDir vào /var/run/axum: path đó phải là FILE
+            # socket do controller tạo (mount sẽ biến nó thành thư mục).
+            # nginx + controller cùng container (AIO) nên không cần volume chia sẻ.
+            - name: scripts-dir
+              mountPath: /tmp/ltp-scripts
+            - name: sops-secrets
+              mountPath: /app/secrets/secrets.dev.enc.yaml
+              subPath: secrets.dev.enc.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: scripts-dir
+          emptyDir: {}
+        - name: sops-secrets
+          configMap:
+            name: serve-sops-secrets

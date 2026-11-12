@@ -1,0 +1,36 @@
+resources:
+  - ../../base
+
+# Release overlay: images are published to ghcr by .github/workflows/release.yml
+# with the git tag as version (docs/versioning.md). `newTag: dev` is a
+# placeholder — use `scripts/k8s-render.sh release <version>` (or
+# `make k8s-render`) to render a manifest pinned to a real release.
+#
+# If the ghcr package is private, add an imagePullSecret (e.g. `ghcr-pull`)
+# here and to the `serve` ServiceAccount.
+images:
+  - name: loadtest-platform-serve
+    newName: ghcr.io/hungpham10/loadtest-platform/serve
+    newTag: dev
+  - name: loadtest-platform-mock-service
+    newName: ghcr.io/hungpham10/loadtest-platform/mock-service
+    newTag: dev
+
+# Release images are pulled from the registry (not pre-loaded like kind).
+# We patch imagePullPolicy to Always so a re-tagged :latest or a new pod
+# never runs a stale node-local copy. The base keeps IfNotPresent for kind.
+patches:
+  - target:
+      kind: Deployment
+      name: serve
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+  - target:
+      kind: Deployment
+      name: mock-service
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always

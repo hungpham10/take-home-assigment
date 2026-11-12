@@ -1,0 +1,153 @@
+name: loadtest-platform
+
+# Local dev stack (plans/34) — pattern sources/opsense-rs/docker-compose.yml.
+#
+# Images build local bằng: earthly +integration-images
+# Sau đó: docker compose up -d --wait
+#
+# Services:
+#   postgres       : persistence (postgres:16-alpine) — controller tự migrate qua embedded SQL
+#   valkey         : Redis cho lua-resty-session (nginx OIDC session storage)
+#   dex            : OIDC provider dev (ghcr.io/dexidp/dex:v2.41.1) — conf/dex/config.dev.yaml
+#   loadtest-serve : AIO image (nginx OpenResty + supervisor + controller unix socket + mock-service)
+#   mock-service   : data-plane unit riêng (optional, scale ngang)
+#
+# OIDC: issuer in-network http://dex:5556/dex (seed tenant auth-config);
+# host-side test dùng http://localhost:5556/dex (cùng port-forward).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ltp-postgres
+    environment:
+      POSTGRES_USER: ltp
+      POSTGRES_PASSWORD: ltp
+      POSTGRES_DB: ltp
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ltp -d ltp"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks: [ltp-net]
+
+  # Redis cho lua-resty-session (nginx OIDC session storage).
+  # Không volume ⇒ RDB vô nghĩa; noeviction để session không bị âm thầm xoá.
+  valkey:
+    image: valkey/valkey:9-alpine
+    container_name: ltp-valkey
+    ports:
+      - "${VALKEY_PORT:-6379}:6379"
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [ltp-net]
+
+  # Dex OIDC provider (integration test only).
+  # Config: conf/dex/config.dev.yaml (static client ltp-test + static user dev-user@example.com/password).
+  # Port 5556 forward để host-side OIDC discovery/debug dùng issuer localhost:5556/dex.
+  dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    container_name: ltp-dex
+    command: dex serve /etc/dex/config.yaml
+    volumes:
+      # Bind-mount path có thể override qua LTP_DEX_CONFIG — trên macOS colima
+      # không mount được ~/Desktop (TCC), Makefile `up` stage sang ~/.ltp-run.
+      - ${LTP_DEX_CONFIG:-./conf/dex/config.dev.yaml}:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5556/dex/.well-known/openid-configuration | grep -q issuer || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [ltp-net]
+
+  loadtest-serve:
+    image: ${LTP_SERVE_IMAGE:-loadtest-platform-serve:${LTP_TAG:-local}}
+    container_name: ltp-serve
+    ports:
+      - "8080:8080"
+    volumes:
+      # SOPS secrets (decrypt trong entrypoint khi có SOPS_AGE_KEY_CONTENT).
+      # Override qua LTP_SECRETS cho máy không mount được ~/Desktop (xem dex).
+      - ${LTP_SECRETS:-./env/secrets.dev.enc.yaml}:/app/secrets/secrets.dev.enc.yaml:ro
+    environment:
+      APP_ENV: dev
+      DATABASE_DSN: postgres://ltp:ltp@postgres:5432/ltp?sslmode=disable
+      RUNNER_MODE: local
+      LOG_LEVEL: debug
+      SCRIPTS_DIR: /tmp/ltp-scripts
+      # DB wait trong prepare() (release.sh) — controller vẫn tự migrate
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ltp
+      POSTGRES_PASSWORD: ltp
+      POSTGRES_DATABASE: ltp
+      # Thư mục chứa conf nginx trong image serve (release.sh boot() sed placeholders ở đây).
+      NGINX_DIR: /usr/local/openresty/nginx/conf
+      # Redis session cho Lua nginx
+      REDIS_HOST: valkey
+      REDIS_PORT: 6379
+      # OIDC env fallback (nginx Lua) — DB tenant seed vẫn là nhánh chính
+      OIDC_ISSUER: http://dex:5556/dex
+      OIDC_CLIENT_ID: ltp-test
+      OIDC_CLIENT_SECRET: ltp-dev-shared-secret-32-bytes-min!!
+      OIDC_SESSION_SECRET: global-dev-session-secret-32-bytes!
+      # Tenant secrets (resolver pkgs/secrets — LTP_TENANT_<SLUG>_*). Giá trị dev
+      # khớp env/secrets.dev.yaml.example; prod dùng SOPS decrypt trong entrypoint.
+      LTP_TENANT_ACME_OIDC_CLIENT_SECRET: change-me-dev
+      LTP_TENANT_ACME_SESSION_SECRET: dev-session-secret-32-bytes-min!!
+      LTP_TENANT_ACME_JWT_SECRET: dev-jwt-secret-32-bytes-min!!
+      # nginx boot placeholders (release.sh boot)
+      HTTP_SERVER: localhost
+      NGINX_LOG: main
+      ENVIRONMENT: dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      dex:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks: [ltp-net]
+
+  # Data-plane unit riêng (tùy chọn) — image mock-service độc lập.
+  mock-service:
+    image: ${LTP_MOCK_IMAGE:-loadtest-platform-mock-service:${LTP_TAG:-local}}
+    container_name: ltp-mock
+    ports:
+      - "8090:8090"
+    environment:
+      ADDR: ":8090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8090/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    networks: [ltp-net]
+
+networks:
+  ltp-net:
+    driver: bridge

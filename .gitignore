@@ -1,0 +1,80 @@
+# Compiled and build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+
+# Dependencies
+target/
+**/target/
+
+# Rust-specific
+# Cargo.lock is committed: workspace builds are reproducible (CI runs --locked).
+*.rs.bk
+*.rlib
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# SOPS: chỉ commit bản MÃ HOÁ (.enc), tuyệt đối không commit plaintext.
+# `*.env` bắt mọi plaintext dưới tên *.env; `!*.enc` mở lại bản mã hoá.
+# ⚠️ Đừng đặt `*.env.*` ở đây — pattern đó khớp LUÔN cả `*.env.enc` (bản cần
+# commit) và là lý do file SOPS từng bị bỏ qua không kịp.
+env/*.env
+!env/*.enc
+*.env.local
+
+# Private key age dùng cho SOPS — không bao giờ vào repo.
+# Chỉ public key nằm trong `.sops.yaml` mới commit.
+age-key.txt
+keys.txt
+*keys.txt
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-*/
+venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Tools
+.codegraph/
+.zcode/
+
+# Opensource for reviewing
+sources/
+
+
+# Go build artifacts
+bin/
+coverage.out
+
+# SOPS plaintext (YAML) — chỉ bản .enc được commit
+env/secrets.*.yaml
+tags

@@ -1,0 +1,344 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.15.0
+          args: --timeout 5m
+      # plans/26: state transitions chỉ qua pkgs/store/*_lifecycle.go
+      - name: Transition lint
+        run: ./scripts/lint-transitions.sh
+
+  # plans/38: version comes from git tags — the bump logic and the binary
+  # banner must agree, and a release tag must never be silently reused.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Bump script tests
+        run: ./scripts/bump_test.sh
+      - name: Build with injected version + assert banner
+        run: |
+          make build
+          echo ">>> make version: $(make -s version)"
+          ./bin/loadtest-controller --version
+          ./bin/mock-service --version
+          want="$(make -s version)"
+          case "$want" in
+            dev) ;;
+            *) ./bin/loadtest-controller --version | grep -q "v${want#v} " \
+                 || { echo "banner does not match git version '$want'" >&2; exit 1; } ;;
+          esac
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ltp
+          POSTGRES_PASSWORD: ltp
+          POSTGRES_DB: ltp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltp -d ltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_DSN: postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run unit tests
+        run: go test ./... -race -coverprofile=coverage.txt -covermode=atomic
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are the version source of truth (plans/38).
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build binaries
+        run: make build
+      - name: Report version
+        run: |
+          ./bin/loadtest-controller --version
+          ./bin/mock-service --version
+
+  # Plans/22: integration harness trên kind cluster (CI chuẩn — không cần
+  # VM/qemu như colima; colima giữ cho local dev, cùng harness chạy được cả
+  # hai qua KUBECONFIG — docs/namespace-status-watcher.md §9). Fake-client
+  # counterparts chạy trong job `test`.
+  integration-k8s:
+    name: Integration Tests (kind k8s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ltp
+          POSTGRES_PASSWORD: ltp
+          POSTGRES_DB: ltp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltp -d ltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_DSN: postgres://ltp:ltp@localhost:5432/ltp?sslmode=disable
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ltp
+      PGPASSWORD: ltp
+      PGDATABASE: ltp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.15.2
+        with:
+          cluster_name: ltp-harness
+          kubectl_version: v1.31.0
+
+      - name: Verify cluster + export KUBECONFIG
+        run: |
+          kind export kubeconfig --name ltp-harness
+          kubectl get nodes
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+
+      - name: Apply migrations
+        run: |
+          set -e
+          for f in $(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort); do
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run WATCH-01..06 integration harness
+        run: |
+          go test -tags harness_k8s -v -timeout 15m \
+            ./tests/harness/watcher/... ./tests/harness/k8s/...
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods -A || true
+          kubectl logs -l app --all-containers --tail=50 -A || true
+
+  # Plans/26: full deploy E2E — namespace với database (CNPG) + echo-server
+  # qua create-with-spec → validate → apply 202 → READY → curl echo thật.
+  full-deploy-e2e:
+    name: Full Deploy E2E (kind + CNPG)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install kind + kubectl
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          curl -Lo ./kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          kind --version
+          kubectl version --client
+      - name: Create kind cluster (with retry)
+        run: |
+          for i in $(seq 1 3); do
+            echo "Attempt $i: creating kind cluster ltp-full-deploy"
+            if kind create cluster --name ltp-full-deploy --wait 120s; then
+              echo "Kind cluster created successfully"
+              break
+            fi
+            echo "Attempt $i failed, waiting 10s before retry..."
+            kind delete cluster --name ltp-full-deploy 2>/dev/null || true
+            sleep 10
+          done
+          kind export kubeconfig --name ltp-full-deploy
+          kubectl get nodes
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Run full deploy E2E
+        env:
+          SKIP_BOOTSTRAP: "0"
+        run: ./tests/e2e-full-deploy.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods -A || true
+          kubectl get cluster -A || true
+
+  # Full Deploy E2E in-cluster: platform (serve AIO + Dex + valkey + postgres
+  # + mock-service) chạy trên kind qua kustomize manifests (deploy/k8s/),
+  # controller dùng in-cluster config (RUNNER_MODE=k8s). Test bằng bearer token
+  # từ Dex (không mở browser). Tương đương plans/36.
+  full-deploy-incluster:
+    name: Full Deploy E2E (in-cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install kind + kubectl
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          curl -Lo ./kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+          kind --version
+          kubectl version --client
+      - name: Build Go binaries
+        run: make build
+      - name: Build serve + mock-service images (docker build)
+        run: |
+          VERSION="$(make -s version)"
+          COMMIT="$(git rev-parse --short HEAD)"
+          docker build --build-arg VERSION="$VERSION" --build-arg GIT_COMMIT="$COMMIT" \
+            -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
+          docker build --build-arg VERSION="$VERSION" --build-arg GIT_COMMIT="$COMMIT" \
+            -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
+      - name: Create kind cluster (with retry)
+        run: |
+          for i in $(seq 1 3); do
+            echo "Attempt $i: creating kind cluster ltp-full-deploy-incluster"
+            if kind create cluster --name ltp-full-deploy-incluster --wait 120s; then
+              echo "Kind cluster created successfully"
+              break
+            fi
+            echo "Attempt $i failed, waiting 10s before retry..."
+            kind delete cluster --name ltp-full-deploy-incluster 2>/dev/null || true
+            sleep 10
+          done
+          kind export kubeconfig --name ltp-full-deploy-incluster
+          kubectl get nodes
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Run full deploy E2E (in-cluster)
+        env:
+          SKIP_BOOTSTRAP: "0"
+          DEPLOY_MODE: "in-cluster"
+          SOPS_AGE_KEY_CONTENT: ${{ secrets.SOPS_AGE_KEY_CONTENT }}
+        run: ./tests/e2e-full-deploy.sh
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get ns,deploy,svc,pods,testruns,clusters -A || true
+          kubectl -n k6-operator-system logs deploy/k6-operator-controller-manager --tail=200 2>&1 || true
+          kubectl -n ltp-system logs deploy/serve --all-containers --tail=100 2>&1 || true
+
+  # Setup database schema: apply mọi migration vào Postgres sạch, tuần tự,
+  # rồi verify các bảng cốt lõi tồn tại. Lấy phong cách từ
+  # sources/opsense-rs/.github/workflows/ci.yml (service container + health
+  # check + verify sau khi stack up).
+  sql-migrations:
+    name: Database Schema Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: ltp
+      PGPASSWORD: ltp
+      PGDATABASE: ltp
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ltp
+          POSTGRES_PASSWORD: ltp
+          POSTGRES_DB: ltp
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ltp -d ltp"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply migrations in order
+        run: |
+          set -e
+          files=$(find sql -maxdepth 1 -name '[0-9]*_*.sql' | sort)
+          if [ -z "$files" ]; then
+            echo "No migrations found — skipping."
+            exit 0
+          fi
+          for f in $files; do
+            echo "== applying $f"
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+          echo "All migrations applied cleanly."
+
+      - name: Verify schema
+        run: |
+          set -e
+          echo "=== Applied migrations ==="
+          psql -v ON_ERROR_STOP=1 -c "SELECT filename, applied_at FROM tbl_schema_migrations ORDER BY id;"
+          echo "=== Tables ==="
+          psql -v ON_ERROR_STOP=1 -c "\dt"
+          # Các bảng bắt buộc phải có sau toàn bộ migrations (cập nhật dần theo sql/)
+          REQUIRED_TABLES="tbl_tenants tbl_tenant_hosts tbl_tenant_auth_profiles tbl_users tbl_user_external_identities tbl_user_roles tbl_access_tokens tbl_audit_log tbl_namespaces tbl_services tbl_databases tbl_ingress tbl_dependencies tbl_network_policies"
+          for t in $REQUIRED_TABLES; do
+            psql -v ON_ERROR_STOP=1 -tAc "SELECT 1 FROM information_schema.tables WHERE table_name='$t'" | grep -q 1 \
+              || (echo "FAIL: missing table $t" && exit 1)
+          done
+          echo "All required tables present."
+
+      - name: Run SQL transition tests
+        run: |
+          set -e
+          for t in tests/sql/*_test.sql; do
+            [ -e "$t" ] || continue
+            echo "== running $t"
+            psql -v ON_ERROR_STOP=1 -f "$t"
+          done
+          echo "SQL transition tests passed."

@@ -1,0 +1,36 @@
+# Dex dev OIDC provider (plans/34) — pattern sources/opsense-rs/conf/dex/config.dev.yaml.
+# Compose mounts this at /etc/dex/config.yaml; port 5556 forwarded to host so
+# both in-network (http://dex:5556/dex, seeded in tenant auth-config) and
+# host-side tests (http://localhost:5556/dex) resolve the same issuer.
+issuer: http://localhost:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+staticClients:
+  - id: ltp-test
+    name: Loadtest Platform Test Client
+    secret: ltp-dev-shared-secret-32-bytes-min!!
+    redirectURIs:
+      - http://localhost:8080/callback
+      - http://127.0.0.1:8080/callback
+    grantTypes: [authorization_code, refresh_token]
+    responseTypes: [code]
+    scopeMappings:
+      - scopes: [openid, email, profile]
+        identityProvider: static
+
+enablePasswordDB: true
+staticPasswords:
+  - email: dev-user@example.com
+    hash: $2b$10$XyvfzkvT3YcLHB6DWle.3egKeghQ4bLGvR3XchL5OusGICmefH/Ba   # bcrypt("password")
+    username: dev-user
+    userID: dev-user
+
+staticIdentityProviders:
+  - id: static
+    name: Static
+    type: static

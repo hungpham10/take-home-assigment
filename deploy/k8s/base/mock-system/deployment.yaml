@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-service
+  namespace: mock-system
+  labels:
+    app: mock-service
+    loadtest.io/managed-by: loadtest-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-service
+  template:
+    metadata:
+      labels:
+        app: mock-service
+    spec:
+      containers:
+        - name: mock-service
+          image: loadtest-platform-mock-service:local
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ADDR
+              value: ":8090"
+            - name: LOG_LEVEL
+              value: "info"
+          ports:
+            - containerPort: 8090
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
