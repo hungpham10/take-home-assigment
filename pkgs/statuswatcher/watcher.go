@@ -235,7 +235,15 @@ func (e *evalContext) evalServices(desired int64) []store.ComponentStatus {
 			row.Phase, row.Reason = phaseUnknown, ptrOf("cluster_error")
 		default:
 			row.Phase, row.Reason, row.ObservedGeneration = evaluateDeployment(obj, deref(svc.SpecHash))
-			row.Phase, row.Reason, _ = e.fenced(row.Phase, obj, desired, derefOr(row.Reason, ""))
+			var obsApplied int64
+			row.Phase, row.Reason, obsApplied = e.fenced(row.Phase, obj, desired, derefOr(row.Reason, ""))
+			if row.Phase == phaseReady {
+				// Track convergence against the controller-stamped desired_generation
+				// (annotation), same as database/network_policy components; the k8s
+				// Deployment's status.observedGeneration is an object revision and
+				// does not advance when only our annotations are updated.
+				row.ObservedGeneration = obsApplied
+			}
 		}
 		rows = append(rows, row)
 	}
