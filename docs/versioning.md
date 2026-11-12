@@ -67,14 +67,14 @@ gh workflow run release.yml --ref <branch> -f bump=patch   # or minor|major
 Workflow:
 1. `./scripts/bump.sh patch` → compute the next version from the latest tag (writes no file).
 2. Fail if `v<next>` already exists, or if HEAD is already tagged.
-3. `earthly --push --build-arg VERSION=<next> … +all` → push `:<next>` and `:latest`.
-4. Verify with `docker buildx imagetools inspect` for both images.
+3. `earthly --push --build-arg VERSION=<next> … +build +all` → push `:<next>` and `:latest`, and write `bin/*-earthly` (plans/40).
+4. Verify with `docker buildx imagetools inspect` for both images, and that `bin/*-earthly` are linux/amd64 ELF.
 5. `git tag -a v<next>` + push the tag (commits nothing ⇒ nothing is pushed to the branch).
 6. Create the GitHub Release + attach the `loadtest-controller`, `mock-service` binaries (linux/amd64).
 
-**The ordering is intentional (plans/39):** the tag is pushed **after** the image has been verified. If the
-build/verify fails, no tag is created ⇒ a tag pointing at a release with no artifacts can never
-exist. The toolchain (`earthly`) is installed and checked
+**The ordering is intentional (plans/39):** the tag is pushed **after** the images and binaries have been
+verified. If the build/verify fails, no tag is created ⇒ a tag pointing at a release with no artifacts can
+never exist. The toolchain (`earthly`) is installed and checked
 (`earthly --version`) at the very start of the job, fail-fast.
 
 **Retracting the tag of a failed release:** only when **no** artifact has been
