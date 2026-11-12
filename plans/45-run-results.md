@@ -1,6 +1,6 @@
 # Plan 45 — Run results: collect, store, surface k6 summary
 
-**Status:** implemented (kind E2E re-run pending after YAML→JSONB Normalize fix)
+**Status:** implemented (kind E2E green on both `kind + CNPG` and `in-cluster` full-deploy jobs)
 **Branch:** `feat/45-run-results`
 **Depends on:** 44 (CLI `run report`), 43 (deterministic thresholds fixture)
 **Type:** backend + migration + CLI + TDD
@@ -164,12 +164,11 @@ result_summary JSON is at .result_summary (--json for machine output)
       verifies columns, NULL-on-old-rows, JSONB round-trip, and FAILED+parse-error storage (rolled back).
 - [x] `ltp run report` renders the summary, thresholds (✓/✗), and never prints zeros for an
       uncollected/unavailable run; `--json` emits the run payload unchanged (`cmds/ltp/cli_test.go`).
-- [ ] K8s end-to-end: `SUT_IMAGE=… tests/e2e-full-deploy.sh` reaches `result_collected_at` within
-      30s of `finished_at` with `result_summary.http_reqs > 0` (step 11a added). A full kind run was
-      attempted and bootstrapped (pinned `kindest/node:v1.31.0` / Calico v3.29.1), but failed at
-      `create-with-spec` due to YAML OpenAPI stored into JSONB (SQLSTATE 22P02) and then an
-      idempotency-key-in-progress retry. `serviceopenapi.Normalize` now fixes the ingest; **a fresh
-      `make kind-demo` re-run is still pending** to confirm the full path including results.
+- [x] K8s end-to-end: `SUT_IMAGE=… tests/e2e-full-deploy.sh` reaches `result_collected_at` within
+      30s of `finished_at` with `result_summary.http_reqs > 0` (step 11a). CI run 43197156840:
+      `Full Deploy E2E (kind + CNPG)` green in 7m39s and `Full Deploy E2E (in-cluster)` green in
+      9m42s on branch `feat/45-run-results` (PR #43). Full kind path (create-with-spec → READY →
+      run → results → cleanup) confirmed.
 - [ ] Pod deleted before collection → terminal status kept, `result_parse_error` set, API 200 (never
       500). Covered by unit/reconciler tests and the K8s "missing pod keeps terminal state" case; not
       yet exercised as a manual in-cluster probe.
