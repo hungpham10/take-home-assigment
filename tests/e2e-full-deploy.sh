@@ -69,9 +69,12 @@ if [ "${SKIP_BOOTSTRAP:-0}" != "1" ]; then
   # node OS (Debian 13+) no longer ships libpcap.so.0.8 and breaks calico-node's
   # mount-bpffs init container. CI pins the same version.
   KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
-  kind get clusters | grep -q "^$CLUSTER$" || {
-    KIND_CONFIG="$(mktemp)"
-    cat > "$KIND_CONFIG" <<KIND_YAML
+  if kind get clusters | grep -q "^$CLUSTER$"; then
+    say "deleting existing cluster $CLUSTER to apply required config (pinned node image, disableDefaultCNI)"
+    kind delete cluster --name "$CLUSTER"
+  fi
+  KIND_CONFIG="$(mktemp)"
+  cat > "$KIND_CONFIG" <<KIND_YAML
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
@@ -82,17 +85,24 @@ nodes:
   - role: control-plane
   - role: worker
 KIND_YAML
-    kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" \
-      --config "$KIND_CONFIG" --wait 120s
-    rm -f "$KIND_CONFIG"
-  }
+  kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" \
+    --config "$KIND_CONFIG" --wait 120s
+  rm -f "$KIND_CONFIG"
   kind export kubeconfig --name "$CLUSTER"
   # Pre-load images vào kind node: CNPG bootstrap không phải pull ghcr/postgres
   # mỗi lần (5-7m → ~1-2m, ổn định CI).
-  docker pull "$SUT_IMAGE" >/dev/null 2>&1 || true
-  docker pull ghcr.io/cloudnative-pg/postgresql:16 >/dev/null 2>&1 || true
-  docker pull grafana/k6:latest >/dev/null 2>&1 || true
-  kind load docker-image "$SUT_IMAGE" ghcr.io/cloudnative-pg/postgresql:16 grafana/k6:latest --name "$CLUSTER" 2>/dev/null || true
+  # The SUT image must exist locally (CI builds it; `make kind-demo` builds it);
+  # fail loudly if it cannot be loaded — an ImagePullBackOff in-cluster is much
+  # harder to diagnose than a load error here.
+  docker image inspect "$SUT_IMAGE" >/dev/null 2>&1 || docker pull "$SUT_IMAGE" >/dev/null 2>&1 || true
+  docker image inspect "$SUT_IMAGE" >/dev/null 2>&1 || fail "SUT image $SUT_IMAGE not found locally (build it first, e.g. make build-sample)"
+  kind load docker-image "$SUT_IMAGE" --name "$CLUSTER"
+  for img in ghcr.io/cloudnative-pg/postgresql:16 grafana/k6:latest; do
+    docker pull "$img" >/dev/null 2>&1 || true
+    if docker image inspect "$img" >/dev/null 2>&1; then
+      kind load docker-image "$img" --name "$CLUSTER" >/dev/null 2>&1 || echo "warn: could not pre-load $img (nodes will pull it)"
+    fi
+  done
 
   # Install Calico so NetworkPolicy is actually enforced (kindnetd does not).
   # kind's default CNI (kindnetd) does NOT enforce NetworkPolicies.
@@ -138,7 +148,7 @@ if [ "$DEPLOY_MODE" = "in-cluster" ]; then
   say "build images (docker build) + apply k8s overlay kind"
   docker build -t loadtest-platform-serve:local -f deploy/k8s/docker/serve.Dockerfile .
   docker build -t loadtest-platform-mock-service:local -f deploy/k8s/docker/mock-service.Dockerfile .
-  kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name "$CLUSTER" 2>/dev/null || true
+  kind load docker-image loadtest-platform-serve:local loadtest-platform-mock-service:local --name "$CLUSTER"
   export SOPS_AGE_KEY_CONTENT="${SOPS_AGE_KEY_CONTENT:-}"
   POSTGRES_PASSWORD=ltp scripts/k8s-apply.sh
   # port-forward: serve (API gateway), dex (mint token), postgres (seed SQL)
