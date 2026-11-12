@@ -59,6 +59,9 @@ type Config struct {
 	MockServiceNamespace string
 	// mock-service ports allowed for egress SUT/runner → mock-service.
 	MockServicePorts []int32
+	// kube-apiserver TCP ports allowed for egress to K8SNodeCIDRs (post-DNAT
+	// node endpoint ports: 443/6443 and e.g. 60898 for k3s/colima).
+	K8SAPIServerPorts []int32
 
 	// Load-test guardrails (plans/42, docs/loadtest-manager-api.md §5):
 	// per-run ceilings enforced at POST /loadtests (422). Quota enforcement via
@@ -113,6 +116,9 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if c.MockServicePorts, err = envPorts("MOCK_SERVICE_PORTS", "80,8090"); err != nil {
+		return Config{}, err
+	}
+	if c.K8SAPIServerPorts, err = envPorts("K8S_APISERVER_PORTS", "443,6443,60898"); err != nil {
 		return Config{}, err
 	}
 	if c.MaxVUs, err = envInt("MAX_VUS", 500); err != nil {

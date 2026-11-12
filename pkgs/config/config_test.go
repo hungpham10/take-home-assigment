@@ -32,6 +32,9 @@ func TestFromEnvDefaults(t *testing.T) {
 	if len(c.MockServicePorts) != 2 || c.MockServicePorts[0] != 80 || c.MockServicePorts[1] != 8090 {
 		t.Errorf("MockServicePorts = %v, want [80 8090]", c.MockServicePorts)
 	}
+	if len(c.K8SAPIServerPorts) != 3 || c.K8SAPIServerPorts[0] != 443 || c.K8SAPIServerPorts[1] != 6443 || c.K8SAPIServerPorts[2] != 60898 {
+		t.Errorf("K8SAPIServerPorts = %v, want [443 6443 60898]", c.K8SAPIServerPorts)
+	}
 }
 
 func TestFromEnvOverrides(t *testing.T) {
@@ -65,6 +68,7 @@ func TestPlatformNetworkOverrides(t *testing.T) {
 	t.Setenv("K8S_NODE_CIDRS", "10.0.0.0/8, 192.168.0.0/24 ,")
 	t.Setenv("MOCK_SERVICE_NAMESPACE", "mock-prod")
 	t.Setenv("MOCK_SERVICE_PORTS", "8080,8090")
+	t.Setenv("K8S_APISERVER_PORTS", "6443,60898")
 	c, err := FromEnv()
 	if err != nil {
 		t.Fatalf("FromEnv: %v", err)
@@ -81,6 +85,9 @@ func TestPlatformNetworkOverrides(t *testing.T) {
 	}
 	if len(c.MockServicePorts) != 2 || c.MockServicePorts[0] != 8080 || c.MockServicePorts[1] != 8090 {
 		t.Errorf("MockServicePorts = %v, want [8080 8090]", c.MockServicePorts)
+	}
+	if len(c.K8SAPIServerPorts) != 2 || c.K8SAPIServerPorts[0] != 6443 || c.K8SAPIServerPorts[1] != 60898 {
+		t.Errorf("K8SAPIServerPorts = %v, want [6443 60898]", c.K8SAPIServerPorts)
 	}
 }
 
@@ -99,5 +106,15 @@ func TestPlatformNetworkInvalidPort(t *testing.T) {
 		t.Error("expected error for invalid MOCK_SERVICE_PORTS")
 	} else if !strings.Contains(err.Error(), "MOCK_SERVICE_PORTS") {
 		t.Errorf("error should mention MOCK_SERVICE_PORTS, got: %v", err)
+	}
+}
+
+
+func TestPlatformNetworkInvalidAPIServerPort(t *testing.T) {
+	t.Setenv("K8S_APISERVER_PORTS", "70000")
+	if _, err := FromEnv(); err == nil {
+		t.Error("expected error for invalid K8S_APISERVER_PORTS")
+	} else if !strings.Contains(err.Error(), "K8S_APISERVER_PORTS") {
+		t.Errorf("error should mention K8S_APISERVER_PORTS, got: %v", err)
 	}
 }

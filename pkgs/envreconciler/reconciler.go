@@ -7,6 +7,8 @@ import (
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -128,9 +130,11 @@ func (r *Reconciler) prune(ctx context.Context, env *Env, desired []*unstructure
 	for _, gvk := range kinds {
 		objs, err := r.client.List(ctx, gvk, envNS, labels.Set{k8s.LabelManagedBy: k8s.ManagedByValue})
 		if err != nil {
-			if err == k8s.ErrNotFound {
-				// API resource kind absent on this cluster (e.g. CNPG CRD not
-				// installed) — nothing of that kind to prune.
+			if err == k8s.ErrNotFound || apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || meta.IsNoMatchError(err) {
+				// API resource kind absent, forbidden, or not matchable on this
+				// cluster (e.g. optional CRD not installed / no RBAC) — nothing
+				// of that kind can be pruned safely.
+				slog.Warn("envreconciler: skip prune for kind", "kind", gvk.Kind, "namespace", envNS, "err", err)
 				continue
 			}
 			return fmt.Errorf("envreconciler: list %s for prune: %w", gvk.Kind, err)

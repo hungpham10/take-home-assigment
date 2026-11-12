@@ -135,3 +135,54 @@ func TestRunAPI6565UsesConfiguredK6OperatorNamespace(t *testing.T) {
 		}
 	}
 }
+
+
+func defaultDenySpecAPIServerPorts(env *Env) []int64 {
+	spec := defaultDenySpec(env)
+	egress, _ := spec["egress"].([]map[string]any)
+	for _, r := range egress {
+		to, _ := r["to"].([]map[string]any)
+		hasIPBlock := false
+		for _, t := range to {
+			if _, ok := t["ipBlock"].(map[string]any); ok {
+				hasIPBlock = true
+			}
+		}
+		if !hasIPBlock {
+			continue
+		}
+		// apiserver rule targets node CIDR ipBlocks (not namespace selectors)
+		ports, _ := r["ports"].([]map[string]any)
+		if len(ports) == 0 {
+			continue
+		}
+		out := make([]int64, 0, len(ports))
+		for _, p := range ports {
+			pv, _ := p["port"].(int64)
+			out = append(out, pv)
+		}
+		// distinguish from other possible ipBlock rules by presence of common apiserver ports
+		for _, pv := range out {
+			if pv == 443 || pv == 6443 {
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func TestDefaultDenyDefaultsAPIServerPorts(t *testing.T) {
+	env := &Env{}
+	ports := defaultDenySpecAPIServerPorts(env)
+	if len(ports) != 3 || ports[0] != 443 || ports[1] != 6443 || ports[2] != 60898 {
+		t.Fatalf("default apiserver ports = %v, want [443 6443 60898]", ports)
+	}
+}
+
+func TestDefaultDenyUsesConfiguredAPIServerPorts(t *testing.T) {
+	env := &Env{Net: PlatformNet{K8SAPIServerPorts: []int32{6443, 8443}}}
+	ports := defaultDenySpecAPIServerPorts(env)
+	if len(ports) != 2 || ports[0] != 6443 || ports[1] != 8443 {
+		t.Fatalf("configured apiserver ports = %v, want [6443 8443]", ports)
+	}
+}
