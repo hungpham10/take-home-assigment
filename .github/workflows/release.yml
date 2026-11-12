@@ -107,16 +107,16 @@ jobs:
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # --push is mandatory: without it Earthly builds but never uploads
           # (SAVE IMAGE --push only takes effect on a `--push` build).
-          # +build is listed explicitly: its `SAVE ARTIFACT ... AS LOCAL` lines
-          # only materialise bin/*-earthly when the target is built by this
-          # invocation (plans/40). It is fully cached from the +all images.
+          # Earthly v0.8 accepts a single target-ref; +all builds +serve +
+          # +mock-service, each of which pulls +build as a dependency, so the
+          # bin/*-earthly artifacts are materialised by this invocation.
           earthly --push \
             --build-arg VERSION="$VERSION" \
             --build-arg GIT_COMMIT="$GIT_COMMIT" \
             --build-arg BUILD_DATE="$BUILD_DATE" \
             --build-arg REGISTRY="$REGISTRY" \
             --build-arg IMAGE_PREFIX="$IMAGE_PREFIX" \
-            +build +all
+            +all
 
       # action-gh-release only warns when a `files:` glob matches nothing, so a
       # missing artifact would silently publish an asset-less release (v0.1.0).
