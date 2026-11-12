@@ -35,9 +35,14 @@ nodes:
 KIND_YAML
   
   kind create cluster --name "$CLUSTER" --image "$KIND_NODE_IMAGE" \
-    --config "$KIND_CONFIG" --wait 120s
+    --config "$KIND_CONFIG" --wait 300s
   rm -f "$KIND_CONFIG"
-  
+
+  # Wait for control-plane node to be Ready (kind --wait may time out
+  # on slow CI runners; the cluster exists but isn't usable yet).
+  wait_for "control-plane node Ready" 60 5 \
+    "kubectl get nodes | grep -q 'control-plane.* Ready'"
+
   kind export kubeconfig --name "$CLUSTER"
   ok "Cluster created and kubeconfig exported"
   
@@ -49,7 +54,7 @@ install_calico() {
   say "Installing Calico CNI (NetworkPolicy enforcement)"
   
   # Calico operator
-  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/tigera-operator.yaml
+  kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml
   
   # Calico custom resources
   cat <<EOF | kubectl apply -f -
