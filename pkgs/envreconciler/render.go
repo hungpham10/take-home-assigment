@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -36,6 +37,11 @@ type Env struct {
 	Policy     *PolicySpec
 	// Net holds platform networking defaults injected by the controller.
 	Net PlatformNet
+	// DeletingSince is when the namespace entered DELETING (loaded from the
+	// latest `→ DELETING` transition event, fallback updated_at) — the delete
+	// reaper measures DeletionDeadline from it (plans/48). Zero for non-DELETING
+	// envs.
+	DeletingSince time.Time
 }
 
 // HPASpec is the HorizontalPodAutoscaler intent for a service.

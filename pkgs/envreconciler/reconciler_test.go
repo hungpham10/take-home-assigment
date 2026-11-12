@@ -5,11 +5,13 @@ import (
 	"sync"
 
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hungpham/loadtest-platform/pkgs/envreconciler"
 	"github.com/hungpham/loadtest-platform/pkgs/k8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -436,5 +438,172 @@ func TestINT_ENV_08_HierarchicalApplyOrder(t *testing.T) {
 	}
 	if indexOf(order, "ConfigMap/echo-config") > indexOf(order, "Deployment/echo") {
 		t.Fatalf("ConfigMap after Deployment (order %v)", order)
+	}
+}
+
+// --- plan 48: namespace delete reaper (DELETING → DELETED auto-completion) ---
+
+type recordingSink struct {
+	deleted []string
+}
+
+func (s *recordingSink) MarkDeleted(_ context.Context, namespaceID, reason string) error {
+	s.deleted = append(s.deleted, namespaceID+"|"+reason)
+	return nil
+}
+
+func nsGVK() schema.GroupVersionKind { return schema.GroupVersionKind{Version: "v1", Kind: "Namespace"} }
+
+func seedNamespace(ctx context.Context, t *testing.T, c *k8s.Fake, name string, terminating bool) {
+	t.Helper()
+	ns := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Namespace",
+		"metadata": map[string]any{
+			"name": name,
+		},
+	}}
+	if terminating {
+		ns.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
+	}
+	if err := c.Apply(ctx, ns); err != nil {
+		t.Fatalf("seed namespace %s: %v", name, err)
+	}
+}
+
+func deletingEnv() *envreconciler.Env {
+	env := testEnv()
+	env.Status = "DELETING"
+	return env
+}
+
+func TestINT_ENV_08_ReapDeleting_NotFoundMarksDeleted(t *testing.T) {
+	c := k8s.NewFake()
+	sink := &recordingSink{}
+	rc := envreconciler.New(c, envreconciler.Options{DeleteSink: sink})
+	ctx := context.Background()
+	// Namespace already gone (event lost, controller crash after K8s delete):
+	// the reaper must converge DB → DELETED without any event.
+	err := rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+		return []*envreconciler.Env{deletingEnv()}, nil
+	})
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(sink.deleted) != 1 || !strings.HasPrefix(sink.deleted[0], testEnv().NamespaceID) {
+		t.Fatalf("MarkDeleted calls: %v", sink.deleted)
+	}
+}
+
+func TestINT_ENV_09_ReapDeleting_ActiveDeletesNoTransition(t *testing.T) {
+	c := k8s.NewFake()
+	sink := &recordingSink{}
+	rc := envreconciler.New(c, envreconciler.Options{DeleteSink: sink})
+	ctx := context.Background()
+	seedNamespace(ctx, t, c, "lt-env-11111111-2222-3333-4444-555555555555", false)
+	if err := rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+		return []*envreconciler.Env{deletingEnv()}, nil
+	}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if _, err := c.Get(ctx, nsGVK(), "", "lt-env-11111111-2222-3333-4444-555555555555"); !errors.Is(err, k8s.ErrNotFound) {
+		t.Fatalf("namespace not deleted: %v", err)
+	}
+	if len(sink.deleted) != 0 {
+		t.Fatalf("MarkDeleted must not fire until namespace is gone: %v", sink.deleted)
+	}
+}
+
+func TestINT_ENV_10_ReapDeleting_TerminatingWithinDeadlineWaits(t *testing.T) {
+	c := k8s.NewFake()
+	sink := &recordingSink{}
+	rc := envreconciler.New(c, envreconciler.Options{DeleteSink: sink, DeletionDeadline: 10 * time.Minute})
+	ctx := context.Background()
+	seedNamespace(ctx, t, c, "lt-env-11111111-2222-3333-4444-555555555555", true)
+	env := deletingEnv()
+	env.DeletingSince = time.Now().Add(-time.Minute) // well inside deadline
+	if err := rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+		return []*envreconciler.Env{env}, nil
+	}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(sink.deleted) != 0 {
+		t.Fatalf("terminating within deadline must stay DELETING: %v", sink.deleted)
+	}
+}
+
+func TestINT_ENV_11_ReapDeleting_TerminatingPastDeadlineWarnsOnce(t *testing.T) {
+	c := k8s.NewFake()
+	sink := &recordingSink{}
+	rc := envreconciler.New(c, envreconciler.Options{DeleteSink: sink, DeletionDeadline: 10 * time.Minute})
+	ctx := context.Background()
+	seedNamespace(ctx, t, c, "lt-env-11111111-2222-3333-4444-555555555555", true)
+	env := deletingEnv()
+	env.DeletingSince = time.Now().Add(-11 * time.Minute) // past deadline
+	tick := func() error {
+		return rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+			return []*envreconciler.Env{env}, nil
+		})
+	}
+	if err := tick(); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if err := tick(); err != nil {
+		t.Fatalf("second tick (stuck, retried level-triggered): %v", err)
+	}
+	if len(sink.deleted) != 0 {
+		t.Fatalf("stuck finalizer never transitions to DELETED: %v", sink.deleted)
+	}
+}
+
+func TestINT_ENV_12_ReapDeleting_DeleteErrorSurfaces(t *testing.T) {
+	c := k8s.NewFake()
+	c.Faults.DeleteErr = errors.New("api server down")
+	sink := &recordingSink{}
+	rc := envreconciler.New(c, envreconciler.Options{DeleteSink: sink})
+	ctx := context.Background()
+	seedNamespace(ctx, t, c, "lt-env-11111111-2222-3333-4444-555555555555", false)
+	err := rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+		return []*envreconciler.Env{deletingEnv()}, nil
+	})
+	if err == nil {
+		t.Fatal("delete fault must surface so the next tick retries")
+	}
+	if len(sink.deleted) != 0 {
+		t.Fatalf("no DB transition when delete failed: %v", sink.deleted)
+	}
+}
+
+func TestINT_ENV_13_ReapDeleting_NilSinkLegacy(t *testing.T) {
+	c := k8s.NewFake()
+	rc := envreconciler.New(c, envreconciler.Options{})
+	ctx := context.Background()
+	seedNamespace(ctx, t, c, "lt-env-11111111-2222-3333-4444-555555555555", false)
+	if err := rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+		return []*envreconciler.Env{deletingEnv()}, nil
+	}); err != nil {
+		t.Fatalf("tick (nil sink = legacy delete-only): %v", err)
+	}
+	if _, err := c.Get(ctx, nsGVK(), "", "lt-env-11111111-2222-3333-4444-555555555555"); !errors.Is(err, k8s.ErrNotFound) {
+		t.Fatalf("namespace not deleted: %v", err)
+	}
+}
+
+func TestINT_ENV_14_ReapDeleting_StandbyNoop(t *testing.T) {
+	c := k8s.NewFake()
+	sink := &recordingSink{}
+	rc := envreconciler.New(c, envreconciler.Options{DeleteSink: sink, IsLeader: func() bool { return false }})
+	ctx := context.Background()
+	seedNamespace(ctx, t, c, "lt-env-11111111-2222-3333-4444-555555555555", false)
+	if err := rc.Tick(ctx, func(context.Context) ([]*envreconciler.Env, error) {
+		return []*envreconciler.Env{deletingEnv()}, nil
+	}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if _, err := c.Get(ctx, nsGVK(), "", "lt-env-11111111-2222-3333-4444-555555555555"); err != nil {
+		t.Fatalf("standby must not delete: %v", err)
+	}
+	if len(sink.deleted) != 0 {
+		t.Fatalf("standby must not write status: %v", sink.deleted)
 	}
 }

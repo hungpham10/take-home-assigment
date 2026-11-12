@@ -106,6 +106,18 @@ DEGRADED     → all READY stable > stable window (60s) → READY
 DELETING     → K8s Namespace gone               → DELETED
 ```
 
+- **`DELETING → DELETED` is owned by the env-reconciler delete reaper** (plan 48),
+  not by the watcher (the watcher skips `DELETING/DELETED` — §3). Each tick
+  (`ENVR_INTERVAL`, 5s) it GETs the K8s Namespace: **NotFound** →
+  `store.NSToDeleted` (desync between real state and DB heals within one tick,
+  no events involved); **Terminating** → wait, with a `ENVR_DELETING_DEADLINE`
+  (default 10m from the `→ DELETING` transition event) after which a WARN is
+  logged once per namespace (stuck finalizer = operator intervention; the reaper
+  never removes finalizers itself); **Active** → issue the delete. Status writes
+  go through `fn_namespace_transition` via a `DeleteStatusSink` injected by the
+  controller (single-writer rule, `pkgs/store/namespace_lifecycle.go`).
+```
+
 - **Required:** every component type including mock/ingress (locked decision — their failure also blocks READY). Future optional components would only contribute `blocking_reasons`, not block.
 - **Vacuous namespaces:** a namespace with **zero required components** (no services, no databases, no declared dependencies) never becomes READY — `allReady` requires `requiredCount > 0`. Optional component rows (data_load/ingress/policy) existing alone cannot drive READY (fail-closed).
 - **Hysteresis:** rolling updates / pod restarts make `availableReplicas` fluctuate; without grace/stable windows the namespace flaps READY↔DEGRADED and load tests get blocked spuriously (`WATCH-06`).

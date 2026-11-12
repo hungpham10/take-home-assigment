@@ -40,6 +40,10 @@ type Config struct {
 	WatcherApplyDeadlineMin   int
 	WatcherStalenessThreshold int
 
+	// EnvReconcilerDeletingDeadline: how long a namespace may sit Terminating
+	// before the delete reaper logs an escalation WARN (plan 48). Negative disables.
+	EnvReconcilerDeletingDeadline time.Duration
+
 	// HA enables K8s leader election for the control loops (docs/k8s-orchestration.md §10).
 	// Only effective when K8SEnabled=true. Default false (single-pod).
 	HAEnabled      bool
@@ -102,6 +106,9 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if c.WatcherStalenessThreshold, err = envInt("WATCHER_STALENESS_THRESHOLD", 900); err != nil {
+		return Config{}, err
+	}
+	if c.EnvReconcilerDeletingDeadline, err = envDuration("ENVR_DELETING_DEADLINE", 10*time.Minute); err != nil {
 		return Config{}, err
 	}
 	switch c.RunnerMode {
