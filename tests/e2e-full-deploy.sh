@@ -550,7 +550,7 @@ done
   curl -s -w "\nHTTP_CODE:%{http_code}" "$BASE/api/loadtest/v1/namespaces/$NS/loadtests/$LT_ID" $H 2>&1 || echo "curl loadtest failed"
   fail "run ingress NetworkPolicy $INGRESS_NP not found in $ENVNS"
 }
-# run-policy labels + egress port 80 + target selector = service name (echo)
+# run-policy labels + egress port + target selector = service name (echo)
 # kubectl -o jsonpath='{.metadata.labels}' prints Go map syntax (map[k:v ...]),
 # not k=v pairs → extract each label via its own jsonpath query.
 NP_KIND=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
@@ -559,14 +559,14 @@ NP_RUN=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID \
   -o jsonpath='{.metadata.labels.loadtest\.io/run-id}')
 [ "$NP_KIND" = "run-policy" ] || fail "egress NP component-kind=$NP_KIND (want run-policy)"
 [ "$NP_RUN" = "$LT_ID" ] || fail "egress NP run-id=$NP_RUN (want $LT_ID)"
-EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)]}')
-[ -n "$EGRESS_PORTS" ] || fail "egress NP missing port 80 rule"
-EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port==80)].to[0].podSelector.matchLabels.loadtest\.io/component-id}')
+EGRESS_PORTS=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port=='"$SUT_PORT"')]}')
+[ -n "$EGRESS_PORTS" ] || fail "egress NP missing port $SUT_PORT rule"
+EGRESS_TARGET=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-egress-$LT_ID -o jsonpath='{.spec.egress[?(@.ports[0].port=='"$SUT_PORT"')].to[0].podSelector.matchLabels.loadtest\.io/component-id}')
 [ "$EGRESS_TARGET" = "echo" ] || fail "egress NP target selector = $EGRESS_TARGET (want echo)"
 # 6565 API ingress rule present
 API_6565=$(kubectl get networkpolicy -n "$ENVNS" loadtest-run-api-$LT_ID -o jsonpath='{.spec.ingress[?(@.ports[0].port==6565)]}')
 [ -n "$API_6565" ] || fail "api NP missing 6565 ingress rule"
-echo "   run-scoped NetworkPolicies: egress/ingress/api present, port 80 scoped, target=echo, 6565 ✅"
+echo "   run-scoped NetworkPolicies: egress/ingress/api present, port $SUT_PORT scoped, target=echo, 6565 ✅"
 
 # --- 13. L3/L4 probes from busybox runner-like pod (in-flight, before completion) ---
 # Enforcement must be verified while the run is alive: the reconciler deletes
@@ -584,9 +584,9 @@ for i in $(seq 1 60); do
 done
 [ "$PSTATUS" = "Running" ] || fail "probe pod did not reach Running"
 
-# 13a. runner → echo (port 80) MUST be allowed (declared target)
-ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
-[ -n "$ECHO_PROBE" ] || fail "runner→echo:80 denied (declared target should be allowed)"
+# 13a. runner → echo (SUT port) MUST be allowed (declared target)
+ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 "http://echo:${SUT_PORT}/" 2>/dev/null | head -c 1 || echo "")
+[ -n "$ECHO_PROBE" ] || fail "runner→echo:${SUT_PORT} denied (declared target should be allowed)"
 # 13b. runner → demo-db-rw (5432) MUST be denied (not a target; CNPG svc is demo-db-rw)
 DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- nc -z -w3 demo-db-rw 5432 2>/dev/null || echo "")
 [ -z "$DB_PROBE" ] || fail "runner→demo-db-rw:5432 allowed (should be denied — not a target)"
