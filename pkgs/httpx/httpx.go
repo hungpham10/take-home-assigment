@@ -43,6 +43,13 @@ var statusByCode = map[string]int{
 	"UNAUTHORIZED":               http.StatusUnauthorized,        // 401
 	"FORBIDDEN":                  http.StatusForbidden,           // 403
 	"NAME_CONFLICT":              http.StatusConflict,            // 409 (INT-NS-05/14)
+	// Load-test guardrails (plans/42): distinct codes so clients can print a
+	// specific remedy instead of "validation failed".
+	"VUS_LIMIT_EXCEEDED":      http.StatusUnprocessableEntity, // 422
+	"DURATION_LIMIT_EXCEEDED": http.StatusUnprocessableEntity, // 422
+	"TIMEOUT_LIMIT_EXCEEDED":  http.StatusUnprocessableEntity, // 422
+	"TIMEOUT_TOO_SHORT":       http.StatusUnprocessableEntity, // 422
+	"INVALID_DURATION":        http.StatusUnprocessableEntity, // 422
 }
 
 // WriteCodeError maps a platform error code to its HTTP status.

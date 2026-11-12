@@ -1,0 +1,8 @@
+  █ TOTAL RESULTS 
+
+    checks_total.......: 2       0.337781/s
+    checks_succeeded...: 100.00% 2 out of 2
+    checks_failed......: 0.00%   0 out of 2
+
+    ✓ status is 200
+

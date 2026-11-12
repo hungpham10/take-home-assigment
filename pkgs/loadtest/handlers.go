@@ -40,6 +40,9 @@ type Deps struct {
 	K8S        bool
 	StaleAfter time.Duration
 	Net        envreconciler.PlatformNet // platform networking defaults for run-scoped policy
+	// Limits caps vusers/duration/timeout at create (plans/42). The zero value
+	// means the documented defaults, never "unlimited".
+	Limits Limits
 }
 
 // Mount registers the loadtest routes FLAT on the passed-in router (server
@@ -97,6 +100,14 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteCodeError(w, "VALIDATION_FAILED", "name and script_id are required")
 		return
 	}
+	// Guardrails (plans/42): cheapest and most pure check, so it runs before
+	// any DB write and before the Runner is touched. A rejected config leaves
+	// no row behind.
+	cfg := defaultLoadConfig(req.LoadConfig)
+	if code, msg := ValidateLoadConfig(cfg, d.Limits); code != "" {
+		httpx.WriteCodeError(w, code, msg)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -120,7 +131,6 @@ func (d Deps) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := defaultLoadConfig(req.LoadConfig)
 	lt := store.LoadTest{
 		NamespaceID: ns.ID,
 		ScriptID:    sc.ID,

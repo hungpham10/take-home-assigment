@@ -1,0 +1,32 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: pass.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 2 max VUs, 32s max duration (incl. graceful stop):
+              * default: 2 looping VUs for 2s (gracefulStop: 30s)
+
+
+running (01.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+default   [  50% ] 2 VUs  1.0s/2s
+
+running (02.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+default   [ 100% ] 2 VUs  2.0s/2s
+
+running (03.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+default ↓ [ 100% ] 2 VUs  2s
+
+running (04.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+default ↓ [ 100% ] 2 VUs  2s
+
+running (05.0s), 2/2 VUs, 0 complete and 0 interrupted iterations
+default ↓ [ 100% ] 2 VUs  2s
+
+

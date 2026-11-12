@@ -1,6 +1,9 @@
 package serviceopenapi
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 const validSpec = `{
   "openapi": "3.0.0",
@@ -58,5 +61,64 @@ func TestSpecHashStable(t *testing.T) {
 	}
 	if h1 == SpecHash([]byte(validSpec+" ")) {
 		t.Error("hash must differ on content change")
+	}
+}
+
+// TestNormalizeYAMLToJSON — tbl_services.openapi_spec is JSONB, but OpenAPI
+// documents are commonly YAML. Validation accepts YAML (kin-openapi), so
+// storage must normalize it or the insert fails with SQLSTATE 22P02 (500).
+func TestNormalizeYAMLToJSON(t *testing.T) {
+	yaml := []byte(`openapi: 3.0.0
+info:
+  title: Sample
+  version: 1.0.0
+paths:
+  /todos:
+    get:
+      operationId: listTodos
+      responses:
+        "200":
+          description: ok
+`)
+	out, err := Normalize(yaml)
+	if err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if !json.Valid(out) {
+		t.Fatalf("normalized document is not JSON: %s", out)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["openapi"] != "3.0.0" {
+		t.Errorf("openapi = %v", doc["openapi"])
+	}
+	paths, _ := doc["paths"].(map[string]any)
+	if _, ok := paths["/todos"]; !ok {
+		t.Errorf("paths lost /todos: %v", doc["paths"])
+	}
+	// The normalized document must still validate (round-trip).
+	if _, err := ValidateAndIndex(out); err != nil {
+		t.Errorf("normalized document does not validate: %v", err)
+	}
+}
+
+// TestNormalizeJSONIsStable — JSON input is passed through untouched so the
+// spec hash does not change for existing services.
+func TestNormalizeJSONIsStable(t *testing.T) {
+	in := []byte(`{"openapi":"3.0.0","info":{"title":"T","version":"1"},"paths":{}}`)
+	out, err := Normalize(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != string(in) {
+		t.Errorf("JSON input was rewritten:\n in: %s\nout: %s", in, out)
+	}
+}
+
+func TestNormalizeInvalid(t *testing.T) {
+	if _, err := Normalize([]byte("openapi: [unclosed")); err == nil {
+		t.Error("expected an error for an unparseable document")
 	}
 }

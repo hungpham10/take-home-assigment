@@ -37,28 +37,31 @@ build:
       if [ -n "$BUILD_DATE" ]; then ldflags="$ldflags -X github.com/hungpham/loadtest-platform/pkgs/version.BuildDate=$BUILD_DATE"; fi && \
       expected="$VERSION" && \
       case "$VERSION" in dev) ;; *) expected="v$VERSION" ;; esac && \
-      sig_ctrl=$(head -c4 /src/host-bin/loadtest-controller 2>/dev/null | od -An -tx1) && \
-      sig_mock=$(head -c4 /src/host-bin/mock-service 2>/dev/null | od -An -tx1) && \
-      case "$sig_ctrl" in *"7f 45 4c 46"*) ctrl_ok=1 ;; *) ctrl_ok=0 ;; esac && \
-      case "$sig_mock" in *"7f 45 4c 46"*) mock_ok=1 ;; *) mock_ok=0 ;; esac && \
-      ctrl_v=$(/src/host-bin/loadtest-controller --version 2>/dev/null || true) && \
-      mock_v=$(/src/host-bin/mock-service --version 2>/dev/null || true) && \
-      case "$ctrl_v" in "$expected"|"$expected "*) ;; *) ctrl_ok=0 ;; esac && \
-      case "$mock_v" in "$expected"|"$expected "*) ;; *) mock_ok=0 ;; esac && \
-      if [ "$ctrl_ok" = 1 ] && [ "$mock_ok" = 1 ]; then \
-        echo "--> Using pre-built host binaries ($ctrl_v)"; \
-        cp /src/host-bin/loadtest-controller /src/host-bin/mock-service /out/; \
+      use_host=1 && \
+      for b in loadtest-controller mock-service ltp; do \
+        src="/src/host-bin/$b"; \
+        sig=$(head -c4 "$src" 2>/dev/null | od -An -tx1); \
+        v=$("$src" --version 2>/dev/null || true); \
+        ok=0; \
+        case "$sig" in *"7f 45 4c 46"*) case "$v" in "$expected"|"$expected "*) ok=1 ;; esac ;; esac; \
+        if [ "$ok" != 1 ]; then use_host=0; echo "--> $b: host binary unusable (version ${v:-none}), rebuilding"; fi; \
+      done && \
+      if [ "$use_host" = 1 ]; then \
+        echo "--> Using pre-built host binaries"; \
+        cp /src/host-bin/loadtest-controller /src/host-bin/mock-service /src/host-bin/ltp /out/; \
       else \
         echo "--> Building inside Earthly (VERSION=$VERSION)..."; \
         cd /src/code && \
-        go build -ldflags "$ldflags" -o /out/loadtest-controller ./cmds/loadtest-controller && \
-        go build -ldflags "$ldflags" -o /out/mock-service ./cmds/mock-service; \
+        for b in loadtest-controller mock-service ltp; do \
+          go build -ldflags "$ldflags" -o "/out/$b" "./cmds/$b"; \
+        done; \
       fi && \
-      chmod +x /out/loadtest-controller /out/mock-service && \
-      /out/loadtest-controller --version && /out/mock-service --version && \
+      chmod +x /out/loadtest-controller /out/mock-service /out/ltp && \
+      /out/loadtest-controller --version && /out/mock-service --version && /out/ltp --version && \
       ls -la /out/'
     SAVE ARTIFACT /out/loadtest-controller AS LOCAL bin/loadtest-controller-earthly
     SAVE ARTIFACT /out/mock-service AS LOCAL bin/mock-service-earthly
+    SAVE ARTIFACT /out/ltp AS LOCAL bin/ltp-earthly
 
 # -----------------------------------------------------------------------
 # serve — AIO image: OpenResty (nginx) + supervisor + controller (unix socket)
@@ -150,7 +153,9 @@ serve:
     # guard in +build can compare against THIS image's VERSION).
     COPY (+build/loadtest-controller --VERSION=$VERSION --GIT_COMMIT=$GIT_COMMIT --BUILD_DATE=$BUILD_DATE) /app/loadtest-controller
     COPY (+build/mock-service        --VERSION=$VERSION --GIT_COMMIT=$GIT_COMMIT --BUILD_DATE=$BUILD_DATE) /app/mock-service
-    RUN chmod +x /app/*.sh /app/loadtest-controller /app/mock-service
+    # Developer CLI (plans/44) ships in the image so `kubectl exec` has it too.
+    COPY (+build/ltp                 --VERSION=$VERSION --GIT_COMMIT=$GIT_COMMIT --BUILD_DATE=$BUILD_DATE) /usr/local/bin/ltp
+    RUN chmod +x /app/*.sh /app/loadtest-controller /app/mock-service /usr/local/bin/ltp
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
     EXPOSE 8080

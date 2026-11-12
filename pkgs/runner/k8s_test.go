@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -558,5 +560,151 @@ func TestK8sTestRunRunnerStartRendersRunnerProbes(t *testing.T) {
 		if path != "/v1/status" || port != 6565 {
 			t.Fatalf("spec.runner.%s httpGet = path=%q port=%d, want /v1/status 6565", probe, path, port)
 		}
+	}
+}
+
+// plantRunnerPod plants the k6-operator runner pod (labels Status() uses) so
+// the results collector can find it by run id.
+func plantRunnerPod(t *testing.T, r *K8sTestRunRunner, ref, name string) {
+	t.Helper()
+	pod := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name":      name,
+				"namespace": testNS,
+				"labels": map[string]any{
+					"loadtest.io/run-id": ref,
+					"runner":             "true",
+				},
+			},
+			"status": map[string]any{"phase": "Succeeded"},
+		},
+	}
+	if err := r.Client.Apply(context.Background(), pod); err != nil {
+		t.Fatalf("plant pod: %v", err)
+	}
+}
+
+// TestK8sStatusAttachesPodLogSummary — terminal status must carry the pod log
+// tail, which is the only place k6's summary exists in K8s mode (plans/45 §1).
+func TestK8sStatusAttachesPodLogSummary(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-log", Namespace: testNS})
+
+	tr := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "k6.io/v1alpha1",
+		"kind":       "TestRun",
+		"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
+		"status":     map[string]any{"stage": "finished"},
+	}}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	plantRunnerPod(t, r, ref, objName(ref)+"-1-abc12")
+	r.Client.(*k8s.Fake).Logs[testNS+"/"+objName(ref)+"-1-abc12"] =
+		[]byte("k6 output\n█ TOTAL RESULTS\n  http_reqs: 10\n")
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != "COMPLETED" {
+		t.Fatalf("state = %q", st.State)
+	}
+	if !strings.Contains(string(st.Summary), "TOTAL RESULTS") {
+		t.Errorf("Summary = %q", st.Summary)
+	}
+	if st.SummaryErr != "" {
+		t.Errorf("SummaryErr = %q", st.SummaryErr)
+	}
+}
+
+// TestK8sStatusSummaryMissingPodKeepsTerminalState — a GC'd pod must not turn
+// a completed run into an error; it records SummaryErr instead.
+func TestK8sStatusSummaryMissingPodKeepsTerminalState(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-nopod", Namespace: testNS})
+	tr := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "k6.io/v1alpha1",
+		"kind":       "TestRun",
+		"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
+		"status":     map[string]any{"stage": "finished"},
+	}}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status must not fail when the pod is gone: %v", err)
+	}
+	if st.State != "COMPLETED" {
+		t.Errorf("state = %q, want COMPLETED", st.State)
+	}
+	if st.SummaryErr == "" {
+		t.Error("SummaryErr is empty with no runner pod")
+	}
+	if len(st.Summary) != 0 {
+		t.Errorf("Summary = %q", st.Summary)
+	}
+}
+
+// TestK8sStatusSummaryPodLogFailure — an injected log-read failure is reported,
+// never swallowed and never fatal.
+func TestK8sStatusSummaryPodLogFailure(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-logerr", Namespace: testNS})
+	tr := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "k6.io/v1alpha1",
+		"kind":       "TestRun",
+		"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
+		"status":     map[string]any{"stage": "finished"},
+	}}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	plantRunnerPod(t, r, ref, objName(ref)+"-1-abc12")
+	fake := r.Client.(*k8s.Fake)
+	fake.Faults.PodLogsErr = errors.New("forbidden")
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.State != "COMPLETED" || st.SummaryErr == "" {
+		t.Errorf("status = %+v, want COMPLETED with SummaryErr", st)
+	}
+}
+
+// TestK8sStatusNoSummaryWhileRunning — the log is read once, at the end.
+func TestK8sStatusNoSummaryWhileRunning(t *testing.T) {
+	r := newK8sRunner(t)
+	ctx := context.Background()
+	ref, _ := r.Provision(ctx, Spec{ID: "run-running", Namespace: testNS})
+	tr := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "k6.io/v1alpha1",
+		"kind":       "TestRun",
+		"metadata":   map[string]any{"name": objName(ref), "namespace": testNS},
+		"status":     map[string]any{"stage": "started"},
+	}}
+	if err := r.Client.Apply(ctx, tr); err != nil {
+		t.Fatal(err)
+	}
+	plantRunnerPod(t, r, ref, objName(ref)+"-1-abc12")
+	r.Client.(*k8s.Fake).Logs[testNS+"/"+objName(ref)+"-1-abc12"] = []byte("partial")
+
+	st, err := r.Status(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != "RUNNING" {
+		t.Errorf("state = %q", st.State)
+	}
+	if len(st.Summary) != 0 || st.SummaryErr != "" {
+		t.Errorf("running status carried a summary: %+v", st)
 	}
 }

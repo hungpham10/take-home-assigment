@@ -200,6 +200,8 @@ jobs:
           kind export kubeconfig --name ltp-full-deploy
           kubectl get nodes
           echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Build sample service image
+        run: docker build -f examples/sample-service/Dockerfile -t ltp/sample-service:dev .
       - name: Run full deploy E2E
         env:
           SKIP_BOOTSTRAP: "0"
@@ -260,6 +262,8 @@ jobs:
           kind export kubeconfig --name ltp-full-deploy-incluster
           kubectl get nodes
           echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+      - name: Build sample service image
+        run: docker build -f examples/sample-service/Dockerfile -t ltp/sample-service:dev .
       - name: Run full deploy E2E (in-cluster)
         env:
           SKIP_BOOTSTRAP: "0"

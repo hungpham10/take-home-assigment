@@ -269,8 +269,8 @@ func (r *K8sTestRunRunner) Start(_ context.Context, ref string, spec Spec) error
 // Failed/Error -> FAILED), then from status.stage, and finally from a
 // runner=true Running pod fallback. This decouples platform status from the
 // operator's stage machine (docs/network-policy.md §10).
-func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error) {
-	tr, err := r.Client.Get(context.Background(), testRunKind, r.nsFor(ref), k8s.RunObjectName(ref))
+func (r *K8sTestRunRunner) Status(ctx context.Context, ref string) (Status, error) {
+	tr, err := r.Client.Get(ctx, testRunKind, r.nsFor(ref), k8s.RunObjectName(ref))
 	if err != nil {
 		if err == k8s.ErrNotFound {
 			return Status{State: "STOPPED", Msg: "testrun not found", Missing: true}, nil
@@ -280,7 +280,7 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 
 	// 1. Job "-1" conditions as source of truth for terminal status.
 	jobName := k8s.RunObjectName(ref) + "-1"
-	jobs, err := r.Client.List(context.Background(), jobGVK, r.nsFor(ref),
+	jobs, err := r.Client.List(ctx, jobGVK, r.nsFor(ref),
 		labels.Set{"job-name": jobName})
 	if err != nil {
 		return Status{}, err
@@ -300,11 +300,11 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 			switch condType {
 			case "Complete":
 				if condStatus == "True" {
-					return Status{State: "COMPLETED"}, nil
+					return r.withSummary(ctx, ref, Status{State: "COMPLETED"}), nil
 				}
 			case "Failed":
 				if condStatus == "True" {
-					return Status{State: "FAILED", Msg: "runner job failed"}, nil
+					return r.withSummary(ctx, ref, Status{State: "FAILED", Msg: "runner job failed"}), nil
 				}
 			}
 		}
@@ -316,17 +316,16 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 	case "started":
 		return Status{State: "RUNNING"}, nil
 	case "finished":
-		return Status{State: "COMPLETED"}, nil
+		return r.withSummary(ctx, ref, Status{State: "COMPLETED"}), nil
 	case "stopped":
-		return Status{State: "STOPPED"}, nil
+		return r.withSummary(ctx, ref, Status{State: "STOPPED"}), nil
 	case "error":
-		return Status{State: "FAILED", Msg: "testrun stage error"}, nil
+		return r.withSummary(ctx, ref, Status{State: "FAILED", Msg: "testrun stage error"}), nil
 	}
 
 	// 3. runner-pod readiness fallback (only pods labeled runner=true count).
 	// Useful when stage is stuck but the runner pod is still Running.
-	pods, err := r.Client.List(context.Background(), podGVK, r.nsFor(ref),
-		labels.Set{"loadtest.io/run-id": ref, "runner": "true"})
+	pods, err := r.Client.List(ctx, podGVK, r.nsFor(ref), runnerPodSelector(ref))
 	if err != nil {
 		return Status{}, err
 	}
@@ -337,6 +336,41 @@ func (r *K8sTestRunRunner) Status(_ context.Context, ref string) (Status, error)
 		}
 	}
 	return Status{State: "PROVISIONING"}, nil
+}
+
+// runnerPodSelector selects the k6-operator runner pod for one run.
+func runnerPodSelector(ref string) labels.Set {
+	return labels.Set{"loadtest.io/run-id": ref, "runner": "true"}
+}
+
+// maxSummaryBytes caps the pod-log tail read at the end of a run. k6 prints
+// its summary last, so the tail is what matters; the cap protects the
+// controller from a noisy run.
+const maxSummaryBytes = 1 << 20 // 1 MiB
+
+// withSummary attaches the runner pod's log tail to a terminal Status. It is
+// called only for terminal states, so a run pays exactly one log read. A
+// missing pod or an RBAC denial is reported through SummaryErr — the run keeps
+// its terminal status (plans/45 §1/§4).
+func (r *K8sTestRunRunner) withSummary(ctx context.Context, ref string, st Status) Status {
+	ns := r.nsFor(ref)
+	pods, err := r.Client.List(ctx, podGVK, ns, runnerPodSelector(ref))
+	if err != nil {
+		st.SummaryErr = "list runner pods: " + err.Error()
+		return st
+	}
+	if len(pods) == 0 {
+		st.SummaryErr = "runner pod not found (already deleted?)"
+		return st
+	}
+	pod := pods[0].GetName()
+	raw, err := r.Client.PodLogs(ctx, ns, pod, "k6", maxSummaryBytes)
+	if err != nil {
+		st.SummaryErr = "read runner pod log: " + err.Error()
+		return st
+	}
+	st.Summary = raw
+	return st
 }
 
 // Stop deletes the TestRun CR. Idempotent: deleting an already-gone run is

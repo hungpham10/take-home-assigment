@@ -31,4 +31,19 @@ Thứ tự thực thi từ đơn giản → phức tạp. Mỗi plan = 1 PR/feat
 | 26 | [full-deploy-e2e](26-full-deploy-e2e.md) | Full deploy E2E: database CNPG + echo-server qua API → READY → curl chứng minh; bỏ fakeWatcher, watch path test real trên kind | 22, 25 |
 
 Sau 14: mock-service (phase sau), CodeGraph review, bump version, release.
-| 16 | [harness-testing-integrity](16-harness-testing-integrity.md) | Harness tests: ACID/invariants, crash/exception/network faults, idempotency/retry, runner/egress safety | 03–13 |
+
+## Phase 2 — submission deliverables (plans 41–45)
+
+Authored 2026-11-12. Merge order is by dependency, **not** by number: 42 → 43 → 44 → 45 → 41.
+Plan 41 (docs) is written first but merged last so the README documents shipped CLI syntax.
+
+| # | Plan | Scope | Dependencies |
+|---|------|-------|--------------|
+| 41 | [submission-docs](41-submission-docs.md) | README (EN, 3 run paths + journey), WRITEUP.md, AI-USAGE.md, plans index, mvp-status refresh | **merge after 42–45** |
+| 42 | [loadtest-caps](42-loadtest-caps.md) | `MAX_VUS` / `MAX_DURATION` / `MAX_TIMEOUT_MINUTES` guardrails → 422 at create; no quota ledger | — |
+| 43 | [sample-service](43-sample-service.md) | `examples/sample-service`: Go SUT + openapi.yaml + Dockerfile + kind E2E wiring | — |
+| 44 | [developer-cli](44-developer-cli.md) | `pkgs/ltpclient` + `cmds/ltp` (ns/script/run/report), exit codes, docs, e2e-cli | 42, 43 |
+| 45 | [run-results](45-run-results.md) | migration 0014, k6 summary parse (local + pod log), API fields, `ltp run report` | 43, 44 |
+
+Not yet planned: **demo video** (plan 46, pending confirmation) and **quota ledger 429**
+(deferred; see plan 42 "Out of scope").

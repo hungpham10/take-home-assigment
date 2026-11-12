@@ -408,9 +408,17 @@ type LoadTest struct {
 	StartedAt   *time.Time `gorm:"column:started_at" json:"started_at"`
 	FinishedAt  *time.Time `gorm:"column:finished_at" json:"finished_at"`
 	TimeoutAt   *time.Time `gorm:"column:timeout_at" json:"timeout_at"`
-	Version     int        `gorm:"column:version" json:"version"`
-	CreatedAt   time.Time  `gorm:"column:created_at" json:"created_at"`
-	UpdatedAt   time.Time  `gorm:"column:updated_at" json:"updated_at"`
+	// Results (migration 0014, plans/45). All four are NULL until the
+	// reconciler collects the k6 summary: NULL means "not collected", which is
+	// different from "collected and empty" (result_collected_at set + no
+	// result_summary + result_parse_error set).
+	ResultSummary     []byte     `gorm:"column:result_summary;type:jsonb" json:"result_summary,omitempty"`
+	ThresholdsFailed  *bool      `gorm:"column:thresholds_failed" json:"thresholds_failed,omitempty"`
+	ResultCollectedAt *time.Time `gorm:"column:result_collected_at" json:"result_collected_at,omitempty"`
+	ResultParseError  *string    `gorm:"column:result_parse_error" json:"result_parse_error,omitempty"`
+	Version           int        `gorm:"column:version" json:"version"`
+	CreatedAt         time.Time  `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at" json:"updated_at"`
 }
 
 // TableName maps LoadTest to its PostgreSQL table.

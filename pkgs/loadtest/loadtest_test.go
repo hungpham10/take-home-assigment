@@ -12,6 +12,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/hungpham/loadtest-platform/pkgs/loadtest"
 	"github.com/hungpham/loadtest-platform/pkgs/runner"
 	"github.com/hungpham/loadtest-platform/pkgs/store"
 	"github.com/hungpham/loadtest-platform/pkgs/testutil"
@@ -282,5 +283,68 @@ func TestINT_LT_03_GetUnreliableFlag(t *testing.T) {
 	rec = doLT(t, h, headers, http.MethodGet, nsID, "/"+lt.ID+"/events", nil)
 	if !strings.Contains(rec.Body.String(), `"unreliable":true`) {
 		t.Fatalf("events payload missing unreliable flag: %s", rec.Body.String())
+	}
+}
+
+// TestINT_LT_04_LoadConfigCapsRejectBeforeWrite — plans/42: an out-of-range
+// load_config is rejected with 422 at the edge, BEFORE any row is written and
+// before the Runner is touched. At-limit configs still create normally.
+func TestINT_LT_04_LoadConfigCapsRejectBeforeWrite(t *testing.T) {
+	db := testutil.TestDB(t)
+	fr := &fakeRunner{}
+	h := testutil.NewServer(t, testutil.ServerDeps{
+		DB: db, Runner: fr, Now: time.Now,
+		Limits: loadtest.Limits{MaxVUs: 10, MaxDuration: 2 * time.Minute, MaxTimeoutMinutes: 10},
+	})
+	headers, nsID := readyFixture(t, db)
+	scriptID := headers["X-Script-Id"]
+
+	countRows := func() int64 {
+		var n int64
+		if err := db.Model(&store.LoadTest{}).Where("namespace_id = ?", nsID).Count(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := countRows()
+
+	cases := []struct {
+		name     string
+		cfg      map[string]any
+		wantCode string
+	}{
+		{"vus over cap", map[string]any{"vusers": 11}, "VUS_LIMIT_EXCEEDED"},
+		{"duration over cap", map[string]any{"vusers": 5, "duration": "3m", "timeout_minutes": 5}, "DURATION_LIMIT_EXCEEDED"},
+		{"unparseable duration", map[string]any{"vusers": 5, "duration": "banana"}, "INVALID_DURATION"},
+		{"timeout below duration", map[string]any{"vusers": 5, "duration": "90s", "timeout_minutes": 1}, "TIMEOUT_TOO_SHORT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doLT(t, h, testutil.WithKey(headers, "cap-"+tc.name), http.MethodPost, nsID, "",
+				map[string]any{"name": "lt-" + tc.name, "script_id": scriptID, "load_config": tc.cfg})
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d (%s), want 422", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantCode) {
+				t.Errorf("body = %s, want code %s", rec.Body.String(), tc.wantCode)
+			}
+			if got := countRows(); got != before {
+				t.Errorf("row written for rejected config: %d -> %d", before, got)
+			}
+			if len(fr.provisioned) != 0 {
+				t.Errorf("runner touched for rejected config: %v", fr.provisioned)
+			}
+		})
+	}
+
+	// At-limit values are legal.
+	rec := doLT(t, h, testutil.WithKey(headers, "cap-ok"), http.MethodPost, nsID, "",
+		map[string]any{"name": "lt-at-limit", "script_id": scriptID,
+			"load_config": map[string]any{"vusers": 10, "duration": "2m", "timeout_minutes": 10}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("at-limit create = %d (%s), want 201", rec.Code, rec.Body.String())
+	}
+	if got := countRows(); got != before+1 {
+		t.Errorf("rows after valid create = %d, want %d", got, before+1)
 	}
 }

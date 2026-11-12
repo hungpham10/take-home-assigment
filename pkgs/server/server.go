@@ -42,6 +42,9 @@ type Deps struct {
 	// ApplyNow (plans/26): hierarchical apply ngay trong request path sau khi
 	// desired-state commit (nil ở legacy mode).
 	ApplyNow func(ctx context.Context, namespaceID string)
+	// Limits caps vusers/duration/timeout at load-test create (plans/42).
+	// Zero value = documented defaults.
+	Limits loadtest.Limits
 }
 
 // NewRouter builds the full HTTP handler.
@@ -95,7 +98,7 @@ func NewRouter(d Deps) http.Handler {
 		namespace.Mount(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		namespace.MountV1(r, namespace.Deps{DB: d.DB, Now: d.Now, K8S: d.K8S, ApplyNow: d.ApplyNow})
 		script.Mount(r, script.Deps{DB: d.DB, ScriptsDir: d.ScriptsDir, Queue: d.ScriptQ, Now: d.Now})
-		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8s: d.K8s, K8S: d.K8S, StaleAfter: d.StaleAfter, Net: d.Net})
+		loadtest.Mount(r, loadtest.Deps{DB: d.DB, Runner: d.Runner, Now: d.Now, K8s: d.K8s, K8S: d.K8S, StaleAfter: d.StaleAfter, Net: d.Net, Limits: d.Limits})
 	})
 	// Script content reader for the runner (staged files).
 	loadtest.ScriptContentOf = func(ref string) ([]byte, error) {

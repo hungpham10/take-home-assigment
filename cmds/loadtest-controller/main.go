@@ -128,6 +128,7 @@ func run() error {
 		Addr: cfg.Addr,
 		Handler: server.NewRouter(server.Deps{DB: db, Secrets: secrets.New(), MasterKey: secrets.LoadMasterKey(), ScriptsDir: cfg.ScriptsDir, ScriptQ: scriptQ, Runner: run, K8s: k8sClient, K8S: cfg.K8SEnabled, StaleAfter: time.Duration(cfg.WatcherStalenessThreshold) * time.Second,
 			Net:      net,
+			Limits:   loadtest.Limits{MaxVUs: cfg.MaxVUs, MaxDuration: cfg.MaxDuration, MaxTimeoutMinutes: cfg.MaxTimeoutMinutes},
 			ApplyNow: applyNowFn(db, cfg.K8SAPIURL, func() bool { return leaderGate == nil || leaderGate.IsLeader() }, net)}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
