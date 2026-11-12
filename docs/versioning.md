@@ -67,10 +67,23 @@ gh workflow run release.yml --ref <branch> -f bump=patch   # hoặc minor|major
 Workflow:
 1. `./scripts/bump.sh patch` → tính version kế tiếp từ tag mới nhất (không ghi file).
 2. Fail nếu `v<next>` đã tồn tại, hoặc HEAD đã được tag.
-3. `git tag -a v<next>` + push tag (không commit gì ⇒ không push vào branch).
-4. `earthly --push --build-arg VERSION=<next> … +all` → push `:<next>` và `:latest`.
-5. Verify `docker buildx imagetools inspect` cho cả 2 image.
+3. `earthly --push --build-arg VERSION=<next> … +all` → push `:<next>` và `:latest`.
+4. Verify `docker buildx imagetools inspect` cho cả 2 image.
+5. `git tag -a v<next>` + push tag (không commit gì ⇒ không push vào branch).
 6. Tạo GitHub Release + đính binary `loadtest-controller`, `mock-service` (linux/amd64).
+
+**Thứ tự có chủ đích (plans/39):** tag được push **sau** khi image đã verify. Nếu
+build/verify fail thì không có tag nào được tạo ⇒ không bao giờ tồn tại tag trỏ tới
+một release không có artifact. Toolchain (`earthly`) được cài và kiểm tra
+(`earthly --version`) ngay đầu job, fail-fast.
+
+**Thu hồi tag của một lần release fail:** chỉ khi **chưa** có artifact nào được
+publish (không có image trong ghcr, không có GitHub Release):
+
+```bash
+git push origin --delete refs/tags/v0.1.0 && git tag -d v0.1.0
+```
+
 
 ### 3.2 Release version chỉ định (`bump=none`)
 
