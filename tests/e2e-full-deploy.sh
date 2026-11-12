@@ -437,7 +437,7 @@ if [ -z "$API_REACHABLE" ]; then
 fi
 # Probe pod egress to echo service should be DENIED (not a declared dependency;
 # default-deny egress only allows DNS + kube-apiserver + declared deps).
-ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 http://echo:80/ 2>/dev/null | head -c 1 || echo "")
+ECHO_REACHABLE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 "http://echo:${SUT_PORT}${SUT_PROBE_PATH}" 2>/dev/null | head -c 1 || echo "")
 if [ -n "$ECHO_REACHABLE" ]; then
   kubectl delete pod "$PROBE_POD" -n "$ENVNS" >/dev/null 2>&1 || true
   fail "probe pod reached echo service without declared dependency — default-deny egress not enforced"
@@ -584,9 +584,11 @@ for i in $(seq 1 60); do
 done
 [ "$PSTATUS" = "Running" ] || fail "probe pod did not reach Running"
 
-# 13a. runner → echo (SUT port) MUST be allowed (declared target)
-ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 "http://echo:${SUT_PORT}/" 2>/dev/null | head -c 1 || echo "")
-[ -n "$ECHO_PROBE" ] || fail "runner→echo:${SUT_PORT} denied (declared target should be allowed)"
+# 13a. runner → echo (SUT port) MUST be allowed (declared target).
+# Probe the known-good SUT path (not "/" — sample-service serves /todos,/healthz
+# and returns 404 on "/" which makes busybox wget exit non-zero with empty body).
+ECHO_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- wget -qO- --timeout=5 "http://echo:${SUT_PORT}${SUT_PROBE_PATH}" 2>/dev/null | head -c 1 || echo "")
+[ -n "$ECHO_PROBE" ] || fail "runner→echo:${SUT_PORT}${SUT_PROBE_PATH} denied (declared target should be allowed)"
 # 13b. runner → demo-db-rw (5432) MUST be denied (not a target; CNPG svc is demo-db-rw)
 DB_PROBE=$(kubectl exec "$PROBE_POD" -n "$ENVNS" -- nc -z -w3 demo-db-rw 5432 2>/dev/null || echo "")
 [ -z "$DB_PROBE" ] || fail "runner→demo-db-rw:5432 allowed (should be denied — not a target)"
