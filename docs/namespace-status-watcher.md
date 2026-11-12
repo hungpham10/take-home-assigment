@@ -2,7 +2,7 @@
 
 This document defines the **observed → Postgres** loop: who computes readiness, where the data comes from, and where it is written. It is the inverse of [`k8s-orchestration.md`](k8s-orchestration.md) (desired → K8s) and the **data source** for the readiness payload in [`namespace-management-api.md`](namespace-management-api.md) §3 (`GET /readiness` is projection-backed, not computed on the fly).
 
-**Scope:** design locked (plans/20); **implemented in plans/21/22** — migration 0011 (`tbl_component_status` + namespace columns + seed transition delta), `pkgs/statuswatcher` (evaluators, projection, aggregator, hysteresis, STATUS_STALE gate), Watch→workqueue event source, apply_deadline, DEGRADED-with-running-run. **WATCH-01..06 harness cases: implemented** — fake-client cases chạy trong CI job `test`, real-cluster cases trên kind trong job `integration-k8s` (`tests/harness/watcher/`, plans/22). 🔜 còn lại: informer-cache sharing đa replica / leader-sharding, restore Job (INT-LOOP-02/03).
+**Scope:** design locked (plans/20); **implemented in plans/21/22** — migration 0011 (`tbl_component_status` + namespace columns + seed transition delta), `pkgs/statuswatcher` (evaluators, projection, aggregator, hysteresis, STATUS_STALE gate), Watch→workqueue event source, apply_deadline, DEGRADED-with-running-run. **WATCH-01..06 harness cases: implemented** — fake-client cases run in CI job `test`, real-cluster cases on kind in job `integration-k8s` (`tests/harness/watcher/`, plans/22). 🔜 remaining: informer-cache sharing across replicas / leader-sharding, restore Job (INT-LOOP-02/03).
 
 ## 1. Two separated loops
 
@@ -101,7 +101,7 @@ APPLYING | DATA_LOADING → any permanent FAILED  → INVALID (blocking_reasons)
 APPLYING | DATA_LOADING → past apply_deadline   → DEGRADED/INVALID
 READY        → a required component not READY
                continuously > grace window (60s) → DEGRADED (ready_for_loadtest=false)
-READY        → DELETING/DEGRADED/INVALID         → ready_for_loadtest được clear trong cùng transition (fn_namespace_transition, sql/0013); chk_namespaces_ready_only_when_ready (sql/0012) là backstop.
+READY        → DELETING/DEGRADED/INVALID         → ready_for_loadtest is cleared in the same transition (fn_namespace_transition, sql/0013); chk_namespaces_ready_only_when_ready (sql/0012) is the backstop.
 DEGRADED     → all READY stable > stable window (60s) → READY
 DELETING     → K8s Namespace gone               → DELETED
 ```

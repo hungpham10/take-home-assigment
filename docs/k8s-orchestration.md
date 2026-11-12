@@ -1,140 +1,140 @@
-# K8s Orchestration — từ desired state (Postgres) đến tài nguyên thật
+# K8s Orchestration — from desired state (Postgres) to real resources
 
-Tài liệu này định nghĩa **cách** platform biến desired state của một Environment (namespace) trong PostgreSQL thành tài nguyên Kubernetes thật: render, apply, observe readiness, prune, và teardown. Nó bổ sung (không thay thế) các contract:
+This document defines **how** the platform turns the desired state of an Environment (namespace) in PostgreSQL into real Kubernetes resources: render, apply, observe readiness, prune, and teardown. It complements (does not replace) the following contracts:
 
 - [`namespace-management-api.md`](namespace-management-api.md) — desired spec, lifecycle status machine, readiness payload.
 - [`architecture.md`](architecture.md) §3.3 (Env Reconciler sequence), §4 (K8s orchestrator/adapter).
-- [`k6-operator-go-client.md`](k6-operator-go-client.md) — chạy load test qua `TestRun` CR (cùng adapter, cùng pattern dynamic client).
-- [`harness-testing.md`](harness-testing.md) §2.3/§4 — yêu cầu fake K8s client + fault injection cho `RUN-*`/`STATE-*`.
+- [`k6-operator-go-client.md`](k6-operator-go-client.md) — running load tests through the `TestRun` CR (same adapter, same dynamic client pattern).
+- [`harness-testing.md`](harness-testing.md) §2.3/§4 — requirements for a fake K8s client + fault injection for `RUN-*`/`STATE-*`.
 
-**Phạm vi MVP:** controller render manifest trong Go + Server-Side Apply; **không dùng Helm** cho SUT (ADR-004, §2). Ingress dùng `networking.k8s.io/v1` (nginx class). Phần implement (`pkgs/k8s` adapter + Env Reconciler) là plan 20; plan này chỉ khoá thiết kế.
+**MVP scope:** the controller renders manifests in Go + Server-Side Apply; **no Helm** for the SUT (ADR-004, §2). Ingress uses `networking.k8s.io/v1` (nginx class). The implementation (`pkgs/k8s` adapter + Env Reconciler) is plan 20; this plan only locks the design.
 
 ## 1. Scope & model
 
-Mapping nền tảng (locked trong `namespace-management-api.md`): **1 Environment ⇄ 1 K8s Namespace**, tên deterministic:
+Core mapping (locked in `namespace-management-api.md`): **1 Environment ⇄ 1 K8s Namespace**, deterministic name:
 
 ```text
 lt-env-<namespace_id>
 ```
 
-Mọi resource controller tạo trong namespace đó (và chính Namespace object) mang label ownership:
+Every resource the controller creates in that namespace (including the Namespace object itself) carries ownership labels:
 
-| Label | Giá trị | Vai trò |
+| Label | Value | Role |
 |---|---|---|
-| `loadtest.io/managed-by` | `loadtest-controller` | Đánh dấu resource do controller sở hữu (SSA field manager trùng tên) |
+| `loadtest.io/managed-by` | `loadtest-controller` | Marks a resource as owned by the controller (SSA field manager with the same name) |
 | `loadtest.io/tenant-id` | tenant slug/id | Isolation, audit, reporting |
-| `loadtest.io/namespace-id` | `ns-...` | Enqueue reconcile theo Environment; prune scope |
-| `loadtest.io/component-id` | `svc-...`, `db-...`, `ing-...` | Map resource ↔ component row trong Postgres |
+| `loadtest.io/namespace-id` | `ns-...` | Enqueue reconcile per Environment; prune scope |
+| `loadtest.io/component-id` | `svc-...`, `db-...`, `ing-...` | Map resource ↔ component row in Postgres |
 | `loadtest.io/component-kind` | `service`, `database`, `ingress`, `mock`, `network-policy` | Prune + readiness aggregation |
 
-Quy tắc ownership/prune: mọi resource có đủ bộ label trên là **managed**; khi một component bị xoá khỏi desired state (hoặc Environment bị xoá), controller delete theo label selector thay vì theo tên riêng lẻ. Xoá Environment = xoá K8s Namespace (cascade 1:1, không cần finalizer per-resource cho teardown toàn bộ).
+Ownership/prune rules: any resource carrying the full label set above is **managed**; when a component is removed from the desired state (or the Environment is deleted), the controller deletes by label selector rather than by individual name. Deleting an Environment = deleting the K8s Namespace (1:1 cascade, no per-resource finalizer needed for whole-environment teardown).
 
-## 2. ADR-004 — Render manifest trong Go + SSA, không Helm cho SUT
+## 2. ADR-004 — Render manifests in Go + SSA, no Helm for the SUT
 
-**Quyết định:** controller render thẳng `Deployment` + `Service` (+ `ServiceAccount`) từ spec `deploy {image, replicas, port, env, health}` bằng typed structs / `unstructured`, apply bằng **Server-Side Apply** với `fieldManager=loadtest-controller`.
+**Decision:** the controller renders `Deployment` + `Service` (+ `ServiceAccount`) directly from the `deploy {image, replicas, port, env, health}` spec using typed structs / `unstructured`, and applies with **Server-Side Apply** using `fieldManager=loadtest-controller`.
 
-**Lý do:**
-- Spec `deploy` đã có cấu trúc chặt (image/replicas/port/env/health); không cần template engine.
-- SSA cho drift detection tự nhiên (managed fields), apply idempotent — khớp mô hình level-triggered/at-least-once trong `harness-testing.md` §3.
-- Prune theo label selector, không phụ thuộc release state.
-- Test được với fake client + fault injection (harness §4: injected errors, "already exists", stale reads); Helm Go SDK kéo release state (Secret trong namespace), khó diff và khó test.
-- Đơn giản hoá kiến trúc khi vượt nhu cầu MVP.
+**Rationale:**
+- The `deploy` spec is already tightly structured (image/replicas/port/env/health); no template engine is needed.
+- SSA gives natural drift detection (managed fields) and idempotent apply — matching the level-triggered/at-least-once model in `harness-testing.md` §3.
+- Prune by label selector, independent of release state.
+- Testable with a fake client + fault injection (harness §4: injected errors, "already exists", stale reads); the Helm Go SDK pulls in release state (a Secret in the namespace), which is hard to diff and hard to test.
+- Simplifies the architecture beyond what the MVP needs.
 
-**Helm (future, §9):** chỉ khi người dùng **mang chart của họ** (`deploy.chart_ref`); khi đó thêm `deploy.mode: manifest|helm`, mặc định `manifest`. Không nằm trong MVP.
+**Helm (future, §9):** only when users **bring their own chart** (`deploy.chart_ref`); in that case add `deploy.mode: manifest|helm`, defaulting to `manifest`. Not part of the MVP.
 
-## 3. Mapping component → K8s resource
+## 3. Component → K8s resource mapping
 
 ```text
-Environment ns-1a2b → K8s Namespace lt-env-ns-1a2b (+ ResourceQuota/LimitRange nếu cấu hình quota)
+Environment ns-1a2b → K8s Namespace lt-env-ns-1a2b (+ ResourceQuota/LimitRange if quota is configured)
 │
 ├─ service svc-order (deploy)
-│    → Deployment + ClusterIP Service + ServiceAccount riêng (no platform creds)
-│    (+ ConfigMap env khi env size vượt giới hạn container env)
+│    → Deployment + ClusterIP Service + its own ServiceAccount (no platform creds)
+│    (+ ConfigMap env when the env size exceeds the container env limit)
 │    ready = Deployment Available (condition) AND observedGeneration == metadata.generation
 │
 ├─ database db-orders (operator = cloudnative-pg)
-│    → CNPG Cluster CR (postgresql.cnpg.io/v1, tên bằng database `name`, ví dụ `demo-db`)
-│    → Secret do operator sinh (`<cluster>-app`): controller CHỈ đọc TÊN secret,
-│       không đọc value; inject secretKeyRef vào Deployment SUT theo database_bindings
-│    → data_source: K8s Job (pg_restore) chạy SAU khi Cluster condition Ready,
-│       activeDeadlineSeconds từ restore_policy.timeout
-│    ready = Cluster condition Ready AND restore Job Complete (nếu có) AND verify pass
+│    → CNPG Cluster CR (postgresql.cnpg.io/v1, name equal to the database `name`, e.g. `demo-db`)
+│    → Secret generated by the operator (`<cluster>-app`): the controller ONLY reads the secret NAME,
+│       never the value; injects secretKeyRef into the SUT Deployment per database_bindings
+│    → data_source: K8s Job (pg_restore) runs AFTER the Cluster condition is Ready,
+│       activeDeadlineSeconds from restore_policy.timeout
+│    ready = Cluster condition Ready AND restore Job Complete (if any) AND verify pass
 │
 ├─ ingress ing-order
-│    → networking.k8s.io/v1 Ingress, ingressClassName từ spec (nginx),
-│      host từ host_template, rules → service_id+port (validate đã ở API layer)
+│    → networking.k8s.io/v1 Ingress, ingressClassName from the spec (nginx),
+│      host from host_template, rules → service_id+port (already validated at the API layer)
 │
 ├─ mock (service.mock / database.mock)
-│    → mock-service runtime là deployment dùng chung NGOÀI env namespace (data-plane riêng)
-│    → trong env namespace: Service ExternalName (hoặc selector Service) cho giao thức
-│      nội bộ, HOẶC route qua Ingress cho giao thức cần host/path — xem §8
+│    → mock-service runtime is a shared deployment OUTSIDE the env namespace (separate data plane)
+│    → inside the env namespace: an ExternalName Service (or selector Service) for internal
+│      protocols, OR route through an Ingress for protocols that need host/path — see §8
 │    → binding snapshot: ConfigMap `mock-binding-<component_id>` (generation/observed_generation)
-│    → NetworkPolicy cho phép egress SUT → mock-service
-│    ready = observed_generation == generation của snapshot
+│    → NetworkPolicy allowing egress SUT → mock-service
+│    ready = observed_generation == generation of the snapshot
 │
 └─ NetworkPolicy
-     → 1 default-deny (ingress+egress) + 1 policy per service render từ dependencies[]
+     → 1 default-deny (ingress+egress) + 1 policy per service rendered from dependencies[]
        + platform allowances (DNS, mock-service, ingress-nginx → SUT)
-     → apply TRƯỚC workload (tránh cửa sổ không bị chặn)
+     → apply BEFORE workloads (to avoid an unblocked window)
 ```
 
-Chi tiết từng loại:
+Details per type:
 
 ### 3.1 Service
-- Render từ `deploy`: image (không cho `:latest` trong prod profile), `replicas`, containerPort = `port`, `env` (map trực tiếp; value từ secret dùng `secretKeyRef`, không bao giờ render plaintext vào manifest), probes từ `health` (liveness/readiness/startup nếu có).
-- `Service` ClusterIP trỏ `service_id` port; DNS nội bộ `<service_id>.<ns>.svc.cluster.local`.
-- `ServiceAccount` riêng per service, không mount platform credentials, `automountServiceAccountToken: false`.
+- Rendered from `deploy`: image (no `:latest` allowed in the prod profile), `replicas`, containerPort = `port`, `env` (mapped directly; values coming from secrets use `secretKeyRef`, never rendering plaintext into the manifest), probes from `health` (liveness/readiness/startup if present).
+- `Service` ClusterIP targeting the `service_id` port; internal DNS `<service_id>.<ns>.svc.cluster.local`.
+- A dedicated `ServiceAccount` per service, no platform credentials mounted, `automountServiceAccountToken: false`.
 
 ### 3.2 Database (cloudnative-pg)
-- CR `Cluster` với spec render từ `database.config` (instances, storage, version, bootstrap). Controller không tự chạy Postgres — chỉ tạo CR và đọc status của operator.
-- Secret credentials do operator tạo: controller **chỉ ghi nhận tên** (pattern `<cluster>-app`) và inject `secretKeyRef` vào các Deployment có `database_bindings[].database_id` trỏ đến. Value không bao giờ đi qua controller DB/API.
-- Restore: khi `data_source.dataset_id` configured → sau Cluster Ready, tạo Job restore (một container chạy `pg_restore`/copy từ dataset location, mount creds qua secret), `activeDeadlineSeconds = restore_policy.timeout` (khớp gate DATA_LOADING trong `namespace-management-api.md` §3). Job fail/timeout → `DEGRADED`/`INVALID` với `blocking_reasons`.
+- `Cluster` CR with the spec rendered from `database.config` (instances, storage, version, bootstrap). The controller does not run Postgres itself — it only creates the CR and reads the operator's status.
+- Credential Secrets are created by the operator: the controller **only records the name** (pattern `<cluster>-app`) and injects `secretKeyRef` into Deployments whose `database_bindings[].database_id` points to it. The value never passes through the controller DB/API.
+- Restore: when `data_source.dataset_id` is configured → after the Cluster is Ready, create a restore Job (one container running `pg_restore`/copy from the dataset location, mounting creds via secret), `activeDeadlineSeconds = restore_policy.timeout` (matching the DATA_LOADING gate in `namespace-management-api.md` §3). Job failure/timeout → `DEGRADED`/`INVALID` with `blocking_reasons`.
 
 ### 3.3 Ingress
-- `networking.k8s.io/v1 Ingress`, `ingressClassName` lấy từ spec (mặc định nginx). `host_template` render deterministic (vd `{{service_id}}.<env-slug>.lt.internal`); TLS block từ `tls` flag.
-- DNS trong cluster loadtest: wildcard DNS trỏ về ingress-nginx của cluster là cấu hình hạ tầng (ngoài phạm vi controller); controller chỉ tạo Ingress object.
+- `networking.k8s.io/v1 Ingress`, `ingressClassName` taken from the spec (nginx by default). `host_template` renders deterministically (e.g. `{{service_id}}.<env-slug>.lt.internal`); TLS block from the `tls` flag.
+- DNS inside the loadtest cluster: wildcard DNS pointing at the cluster's ingress-nginx is infrastructure configuration (outside the controller's scope); the controller only creates the Ingress object.
 
 ### 3.4 Mock
-Xem §8. Điểm chính: mock **không có public ingress**; SUT gọi mock qua Service nội bộ (ExternalName/selector) hoặc qua Ingress nội bộ theo protocol; snapshot binding được publish dưới dạng ConfigMap có `generation`, mock-service báo `observed_generation` (khớp `architecture.md` §4 và harness `MOCK-VER-01`).
+See §8. Key point: mocks have **no public ingress**; the SUT calls the mock through an internal Service (ExternalName/selector) or through an internal Ingress depending on protocol; the binding snapshot is published as a ConfigMap carrying `generation`, and mock-service reports `observed_generation` (matching `architecture.md` §4 and harness `MOCK-VER-01`).
 
 ### 3.5 NetworkPolicy
-- Render từ dependency graph đã resolve ở API layer (`GET .../network-policies`): mỗi service được phép egress tới `dependencies[]` và `database_bindings[]`; mọi traffic khác bị deny.
-- Bộ: 1 `default-deny` cho namespace + 1 policy per service (labels theo §1) + platform allowances (kube-dns, mock-service, ingress-nginx backend).
-- **Runner policy:** cho load-test run, render thêm **3** policy per run (egress runner → target + ingress target ← runner + api k6-operator ns → runner TCP 6565) chọn bởi label `loadtest.io/run-id`; spec đầy đủ tại [`docs/network-policy.md`](network-policy.md) §3. K8s runner (`RUNNER_MODE=k8s`) tạo `TestRun` (k6.io/v1alpha1) qua Go Kubernetes API (`docs/k6-operator-go-client.md`), không dùng `kubectl`.
-- **Chi tiết DB / k6-operator / nguyên hạn của NetworkPolicy:** [`docs/network-policy.md`](network-policy.md) §4–§6.
-- **Thứ tự:** NetworkPolicy apply trước workload (bước 2 trong §4) để không có cửa sổ traffic không bị chặn.
+- Rendered from the dependency graph already resolved at the API layer (`GET .../network-policies`): each service is allowed egress to `dependencies[]` and `database_bindings[]`; all other traffic is denied.
+- Set: 1 `default-deny` for the namespace + 1 policy per service (labels per §1) + platform allowances (kube-dns, mock-service, ingress-nginx backend).
+- **Runner policy:** for a load-test run, render **3** additional policies per run (egress runner → target + ingress target ← runner + api k6-operator ns → runner TCP 6565) selected by the `loadtest.io/run-id` label; the full spec is in [`docs/network-policy.md`](network-policy.md) §3. The K8s runner (`RUNNER_MODE=k8s`) creates a `TestRun` (k6.io/v1alpha1) through the Go Kubernetes API (`docs/k6-operator-go-client.md`), not via `kubectl`.
+- **DB / k6-operator / NetworkPolicy limitations in detail:** [`docs/network-policy.md`](network-policy.md) §4–§6.
+- **Ordering:** NetworkPolicies are applied before workloads (step 2 in §4) so there is no window of unblocked traffic.
 
 ## 4. Env Reconciler design
 
-Level-triggered, at-least-once, idempotent (khớp `harness-testing.md` §3 và `STATE-MEM-01`).
+Level-triggered, at-least-once, idempotent (matching `harness-testing.md` §3 and `STATE-MEM-01`).
 
-### 4.1 Thứ tự apply trong một lần reconcile
+### 4.1 Apply order within one reconcile
 
-1. **Namespace** `lt-env-<namespace_id>` + labels + ResourceQuota/LimitRange (nếu cấu hình).
+1. **Namespace** `lt-env-<namespace_id>` + labels + ResourceQuota/LimitRange (if configured).
 2. **NetworkPolicy** (default-deny + per-service + platform allowances).
-3. **Database CRs** (CNPG Cluster) → chờ condition Ready.
-4. **Restore Job** (nếu `data_source`) → tạo Job; transition `DATA_LOADING` khi Job `Complete` do **Status Watcher** ghi.
+3. **Database CRs** (CNPG Cluster) → wait for the Ready condition.
+4. **Restore Job** (if `data_source`) → create the Job; the `DATA_LOADING` transition when the Job is `Complete` is written by the **Status Watcher**.
 5. **Mock bindings/Services** (ConfigMap snapshot + ExternalName/Ingress route — §8).
-6. **Service workloads** (Deployment cần secret DB đã tồn tại từ bước 3).
+6. **Service workloads** (the Deployment needs the DB secret that already exists from step 3).
 7. **Ingress**.
-8. **Dừng lại — không ghi readiness.** Reconciler chỉ ghi K8s. Việc thu thập trạng thái, aggregate và ghi `READY`/`DEGRADED`/`INVALID` + `blocking_reasons` vào PG là việc của **Status Watcher** (xem `namespace-status-watcher.md`).
+8. **Stop here — do not write readiness.** The Reconciler only writes to K8s. Collecting state, aggregating it, and writing `READY`/`DEGRADED`/`INVALID` + `blocking_reasons` into PG is the **Status Watcher**'s job (see `namespace-status-watcher.md`).
 
-Mỗi bước là idempotent: apply lại cùng spec → no-op (SSA); resource "already exists" với cùng owner là success. Bước nào chưa đủ điều kiện (vd Cluster chưa Ready) → reconcile kết thúc, chờ event tiếp theo (watch) hoặc requeue có backoff.
+Each step is idempotent: re-applying the same spec → no-op (SSA); a resource that "already exists" with the same owner is a success. If a step's preconditions are not yet met (e.g. the Cluster is not Ready) → the reconcile ends and waits for the next event (watch) or requeues with backoff.
 
 **Observed → PG is a separate loop:** the Env Reconciler never writes readiness into Postgres. Observing K8s state and computing `tbl_component_status` / namespace transitions is the Status Watcher's job: [`docs/namespace-status-watcher.md`](namespace-status-watcher.md). The two docs share the label conventions (§1) and `spec_hash` annotations.
 
-### 4.2 Cơ chế
+### 4.2 Mechanisms
 
-- **Phát hiện thay đổi:** `spec_hash` (hash JSONB desired spec của Environment) lưu trong annotation trên Namespace / trong state row; không khớp → apply lại từ bước 1. Per-component dùng `component-id` label + hash annotation riêng để chỉ apply lại component đổi.
-- **Watch:** informer trên Deployment, Service, Ingress, NetworkPolicy, CNPG `Cluster`, Job, k6 `TestRun`; mỗi event resolve `namespace-id` từ label → enqueue key `namespace_id` vào workqueue (dedupe). Kèm requeue định kỳ (resync) làm safety net.
-- **Leader election:** một instance controller reconcile tại một thời điểm (khớp bảng deployment units trong `architecture.md` §4); các instance khác standby.
-- **Prune:** sau apply, list managed resources theo label selector trong namespace; resource có `component-id` không còn trong desired → delete. Không prune resource không có label managed.
-- **Crash safety:** controller restart đọc desired state từ Postgres (không in-process state), phát hiện drift bằng `spec_hash`/observed state — khớp `RUN-CRASH-01`, `STATE-MEM-01`.
-- **Single-step mode:** hook chạy 1 vòng reconcile cho harness test deterministic (khớp harness §4).
+- **Change detection:** `spec_hash` (a hash of the Environment's desired spec JSONB) stored in an annotation on the Namespace / in the state row; on mismatch → re-apply from step 1. Per component, use the `component-id` label + a separate hash annotation so that only changed components are re-applied.
+- **Watch:** informers on Deployment, Service, Ingress, NetworkPolicy, CNPG `Cluster`, Job, k6 `TestRun`; each event resolves `namespace-id` from the label → enqueues the key `namespace_id` into the workqueue (deduped). Plus a periodic requeue (resync) as a safety net.
+- **Leader election:** a single controller instance reconciles at any point in time (matching the deployment units table in `architecture.md` §4); other instances stay on standby.
+- **Prune:** after apply, list managed resources by label selector within the namespace; a resource whose `component-id` is no longer in the desired state → delete. Never prune resources without the managed labels.
+- **Crash safety:** on restart the controller reads the desired state from Postgres (no in-process state) and detects drift via `spec_hash`/observed state — matching `RUN-CRASH-01`, `STATE-MEM-01`.
+- **Single-step mode:** a hook that runs one reconcile iteration for deterministic harness tests (matching harness §4).
 
 ## 5. Adapter `pkgs/k8s`
 
-Interface hẹp, là ranh giới duy nhất controller chạm K8s API — để fake client + fault injection (harness §4: injected errors, delays, "already exists", stale reads):
+A narrow interface that is the single boundary where the controller touches the K8s API — enabling a fake client + fault injection (harness §4: injected errors, delays, "already exists", stale reads):
 
 ```go
 type Client interface {
@@ -146,58 +146,58 @@ type Client interface {
 }
 ```
 
-- Implement thật: client-go **dynamic client + unstructured** — nhất quán với Option 1 đã khuyến nghị trong `k6-operator-go-client.md` cho `TestRun`.
-- CNPG `Cluster` xử lý qua cùng dynamic client (GVR `postgresql.cnpg.io/v1`, `clusters`) — không import Go types của operator, tránh dependency nặng.
-- Fake client trong `pkgs/testutil` (hoặc `pkgs/k8s/fake`) mô phỏng: lỗi transient (để test retry/backoff `RUN-NET-01`), `AlreadyExists` (`RUN-IDEM-01`), stale reads, watch event feed.
+- Real implementation: client-go **dynamic client + unstructured** — consistent with Option 1 recommended in `k6-operator-go-client.md` for `TestRun`.
+- The CNPG `Cluster` is handled through the same dynamic client (GVR `postgresql.cnpg.io/v1`, `clusters`) — no import of the operator's Go types, avoiding heavy dependencies.
+- The fake client in `pkgs/testutil` (or `pkgs/k8s/fake`) simulates: transient errors (to test retry/backoff `RUN-NET-01`), `AlreadyExists` (`RUN-IDEM-01`), stale reads, watch event feeds.
 
 ## 6. RBAC (ServiceAccount `loadtest-controller`)
 
-| Resource (group) | Verbs | Ghi chú |
+| Resource (group) | Verbs | Notes |
 |---|---|---|
-| `namespaces` (core) | get, list, watch, create, delete | 1:1 với Environment |
+| `namespaces` (core) | get, list, watch, create, delete | 1:1 with Environment |
 | `deployments`, `services`, `serviceaccounts`, `configmaps` (apps/core) | get, list, watch, create, update, patch, delete | workload + env config |
 | `networkpolicies` (networking.k8s.io) | get, list, watch, create, update, patch, delete | default-deny + per-service |
 | `ingresses` (networking.k8s.io) | get, list, watch, create, update, patch, delete | nginx class |
 | `jobs` (batch) | get, list, watch, create, delete | restore/verify Jobs |
-| `clusters` (postgresql.cnpg.io) | get, list, watch, create, update, patch, delete | CR của operator |
-| `testruns` (k6.io) | get, list, watch, create, delete | theo `k6-operator-go-client.md` |
-| `secrets` (core) | **get** (tên secret DB do operator sinh — không list toàn namespace nếu có thể), không create/update từ API payload | value không qua controller DB/API |
-| `events`, `pods`, `pod/logs` | get, list, watch | chẩn đoán blocking_reasons |
+| `clusters` (postgresql.cnpg.io) | get, list, watch, create, update, patch, delete | operator CR |
+| `testruns` (k6.io) | get, list, watch, create, delete | per `k6-operator-go-client.md` |
+| `secrets` (core) | **get** (names of DB secrets generated by the operator — avoid listing the whole namespace where possible), no create/update from API payloads | values never pass through the controller DB/API |
+| `events`, `pods`, `pod/logs` | get, list, watch | diagnosing blocking_reasons |
 
-Runner pods / SUT ServiceAccount: **không** có quyền nào trên control-plane resources (least privilege, khớp sketch RBAC trong `k6-operator-go-client.md`).
+Runner pods / SUT ServiceAccounts: **no** permissions on control-plane resources (least privilege, matching the RBAC sketch in `k6-operator-go-client.md`).
 
-## 7. Readiness per component → payload API
+## 7. Readiness per component → API payload
 
-Map điều kiện K8s vào readiness payload trong `namespace-management-api.md` §3 (`components{...}` + `ready_for_loadtest` + `blocking_reasons[]`). Bảng dưới là điều kiện thô; **ai tính / ghi vào đâu** (evaluators, generation fencing, hysteresis, aggregation) được định nghĩa trong [`docs/namespace-status-watcher.md`](namespace-status-watcher.md) §4–§5:
+Map K8s conditions into the readiness payload in `namespace-management-api.md` §3 (`components{...}` + `ready_for_loadtest` + `blocking_reasons[]`). The table below lists the raw conditions; **who computes them / where they are written** (evaluators, generation fencing, hysteresis, aggregation) is defined in [`docs/namespace-status-watcher.md`](namespace-status-watcher.md) §4–§5:
 
-| Component | Điều kiện ready | blocking_reasons ví dụ |
+| Component | Ready condition | Example blocking_reasons |
 |---|---|---|
-| services | Deployment `Available=True` && `observedGeneration == generation` && Service endpoints sẵn sàng | `image_pull_backoff`, `crash_loop`, `replicas_unavailable` |
+| services | Deployment `Available=True` && `observedGeneration == generation` && Service endpoints ready | `image_pull_backoff`, `crash_loop`, `replicas_unavailable` |
 | databases | CNPG `Cluster` condition `Ready=True` | `cluster_not_ready`, `operator_missing` |
 | data_load | Restore Job `Complete=True` && verify pass; timeout → fail | `restore_job_failed`, `restore_timeout` |
-| ingress | Ingress accepted (condition nếu controller báo) && service rule exists | `ingress_class_missing`, `backend_unreachable` |
-| dependencies | resolved graph valid (đã validate ở API) | `unknown_dependency` |
-| network_policy | tất cả policy applied (SSA ok) | `policy_apply_failed` |
+| ingress | Ingress accepted (condition if the controller reports one) && service rule exists | `ingress_class_missing`, `backend_unreachable` |
+| dependencies | resolved graph valid (already validated at the API) | `unknown_dependency` |
+| network_policy | all policies applied (SSA ok) | `policy_apply_failed` |
 | mocks | snapshot `observed_generation == generation` | `mock_not_reconciled` |
 
-`READY` chỉ khi mọi group cần thiết ready (khớp state machine `APPLYING/DATA_LOADING → READY`; fail → `INVALID`/`DEGRADED`).
+`READY` only when every required group is ready (matching the state machine `APPLYING/DATA_LOADING → READY`; failure → `INVALID`/`DEGRADED`).
 
-## 8. Mock wiring chi tiết
+## 8. Mock wiring in detail
 
-Mock runtime (`cmds/mock-service`, phase sau theo `mock-service-api.md`) là **deployment dùng chung ngoài env namespace**. Trong env namespace chỉ có wiring:
+The mock runtime (`cmds/mock-service`, a later phase per `mock-service-api.md`) is a **shared deployment outside the env namespace**. Inside the env namespace there is only wiring:
 
-- **Đường nội bộ (HTTP/gRPC thường):** Service `ExternalName` tên deterministic (vd `mock-<component_id>`) trỏ DNS mock-service; SUT gọi qua tên này. Với protocol cần selector/endpoint riêng (vd gRPC streaming), dùng Service selector tới mock-service endpoint thay ExternalName.
-- **Đường host/path (mock cần được gọi như host riêng — vd mock trả response phụ thuộc Host header):** route qua **Ingress nội bộ** với rule host riêng → service mock; SUT gọi qua host đó. Đây là lý do chọn "ExternalName hoặc Ingress tuỳ protocol".
-- **Inject vào SUT:** controller set env cho Deployment SUT (vd `MOCK_<COMPONENT>_URL`) trỏ tới DNS đã chọn — SUT không cần hardcode. Trong cả hai đường, giá trị inject là DNS/host ổn định trong cluster.
-- **Snapshot binding:** ConfigMap `mock-binding-<component_id>` chứa snapshot metadata (`schema_version`, `generation`, spec mock); mock-service đọc và report `observed_generation` — reconcile mock xong khi hai giá trị khớp (`MOCK-VER-01`).
-- **NetworkPolicy:** egress SUT → mock-service được allow trong policy per service (bước 2 §4.1); mock không bao giờ có public ingress.
+- **Internal path (typical HTTP/gRPC):** an `ExternalName` Service with a deterministic name (e.g. `mock-<component_id>`) pointing at the mock-service DNS; the SUT calls it through this name. For protocols that need their own selector/endpoint (e.g. gRPC streaming), use a selector Service targeting the mock-service endpoint instead of ExternalName.
+- **Host/path path (mock must be called as its own host — e.g. the mock returns responses that depend on the Host header):** route through an **internal Ingress** with its own host rule → mock service; the SUT calls through that host. This is why the choice is "ExternalName or Ingress depending on protocol".
+- **Injection into the SUT:** the controller sets env vars on the SUT Deployment (e.g. `MOCK_<COMPONENT>_URL`) pointing at the chosen DNS — the SUT does not need to hardcode anything. In both paths, the injected value is a stable in-cluster DNS/host.
+- **Binding snapshot:** the ConfigMap `mock-binding-<component_id>` holds the snapshot metadata (`schema_version`, `generation`, mock spec); mock-service reads it and reports `observed_generation` — mock reconcile is done when the two values match (`MOCK-VER-01`).
+- **NetworkPolicy:** egress SUT → mock-service is allowed in the per-service policy (step 2 of §4.1); mocks never have a public ingress.
 
 ## 9. Open items / future
 
-- `deploy.mode: helm` cho chart do người dùng cung cấp (ADR-004 extension).
-- Gateway API (HTTPRoute) thay thế/ song song Ingress.
-- Drift report UI (so observed managed fields vs desired).
-- TTL tự động xoá Environment/Namespace (hiện reaper chạy cho run; env TTL đang open item trong `architecture.md` §3.3).
+- `deploy.mode: helm` for user-supplied charts (ADR-004 extension).
+- Gateway API (HTTPRoute) replacing / alongside Ingress.
+- Drift report UI (comparison of observed managed fields vs desired).
+- TTL for automatically deleting Environments/Namespaces (currently the reaper runs for runs; env TTL is an open item in `architecture.md` §3.3).
 - ResourceQuota/LimitRange profile per tenant.
 
 ## 10. High Availability (HA) — Leader Election & Sharding

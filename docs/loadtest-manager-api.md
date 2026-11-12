@@ -91,15 +91,15 @@ Remote/registered scripts should be validated before dispatching load:
 
 ## 8. Runner mode + result surface (MVP)
 
-`RUNNER_MODE` chọn backend thực thi (`local` mặc định dev; `k8s` trên cluster):
+`RUNNER_MODE` selects the execution backend (`local` is the dev default; `k8s` on a cluster):
 
-- `local`: `pkgs/runner.Local` chạy `k6` binary trên host controller. Dùng cho dev/CI-local; **không** cần cluster. Mỗi run là một OS process; `Provision`/`Start`/`Stop`/`Status` ánh xạ trạng thái process sang model chung (`QUEUED`/`PROVISIONING`/`RUNNING`/`COMPLETED`/`FAILED`/`STOPPED`/`TIMED_OUT`).
-- `k8s`: `pkgs/runner.K8sTestRunRunner` tạo `TestRun` (k6.io/v1alpha1) qua Go Kubernetes API (không `kubectl`), script staged vào ConfigMap run-scoped (≤1 MiB), runner pod chạy trong `lt-env-<namespace_id>` và chịu `default-deny` + run-scoped NetworkPolicy (`docs/network-policy.md` §3).
+- `local`: `pkgs/runner.Local` runs the `k6` binary on the controller host. Used for dev/CI-local; **does not** need a cluster. Each run is an OS process; `Provision`/`Start`/`Stop`/`Status` map the process state onto the shared model (`QUEUED`/`PROVISIONING`/`RUNNING`/`COMPLETED`/`FAILED`/`STOPPED`/`TIMED_OUT`).
+- `k8s`: `pkgs/runner.K8sTestRunRunner` creates a `TestRun` (k6.io/v1alpha1) via the Go Kubernetes API (no `kubectl`), the script is staged into a run-scoped ConfigMap (≤1 MiB), and the runner pod runs in `lt-env-<namespace_id>` under `default-deny` + the run-scoped NetworkPolicy (`docs/network-policy.md` §3).
 
-**Kết quả run (result surface, MVP):**
+**Run result surface (MVP):**
 - `GET /loadtests/{id}`: `status`, `runner_ref`, `started_at`, `finished_at`, `timeout_at`, `targets`, `unreliable`.
-- `GET /loadtests/{id}/events`: chuỗi transition (`from_status` → `to_status`) + `reason`, kèm `unreliable` flag (namespace `DEGRADED` sau khi run bắt đầu → `unreliable: true`, run vẫn tiếp tục).
-- **K6 metrics/summary** (pod log parse → `result_summary`, `thresholds_failed`, `result_collected_at`) là deferred sang benchmark plan (k6 OSS không có endpoint metrics mặc định; cần cài k6 + parse pod log).
+- `GET /loadtests/{id}/events`: transition sequence (`from_status` → `to_status`) + `reason`, with the `unreliable` flag (namespace `DEGRADED` after the run started → `unreliable: true`, the run continues anyway).
+- **K6 metrics/summary** (pod log parse → `result_summary`, `thresholds_failed`, `result_collected_at`) is deferred to the benchmark plan (k6 OSS has no default metrics endpoint; it requires installing k6 + parsing the pod log).
 
 ### Status source of truth (k8s runner)
 
@@ -112,4 +112,4 @@ Remote/registered scripts should be validated before dispatching load:
 
 Render (`Start()`) sets `spec.paused = "false"` and `spec.initializer.disabled = "true"` so k6 runs without the 6565 starter/Service handshake, and sets explicit `runner.readinessProbe`/`runner.livenessProbe` (not the operator's 1s default) so a loaded node cannot kill the runner via probe.
 
-**Lưu ý:** `operation_id`/`method`/`path` trong `targets[]` chỉ validate/audit ở API layer — NetworkPolicy là L3/L4 (`service` + `port`) và không thể enforce L7.
+**Note:** `operation_id`/`method`/`path` in `targets[]` are only validated/audited at the API layer — NetworkPolicy is L3/L4 (`service` + `port`) and cannot enforce L7.

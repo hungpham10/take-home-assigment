@@ -125,7 +125,7 @@ These endpoints are called by `conf/nginx` Lua (see `docs/nginx-oidc-auth.md`, `
 
 ## 4. General account & tenant management (admin API, inferred)
 
-These endpoints support “quản lý chung chung về mặt tài khoản” and OIDC integration operations. Implement incrementally; protect with strong admin/service auth and audit. Exact schemas are finalized in `plans/`/Swagger.
+These endpoints support general account management and OIDC integration operations. Implement incrementally; protect with strong admin/service auth and audit. Exact schemas are finalized in `plans/`/Swagger.
 
 ### 4.1 Tenants & auth profiles
 | Method | Path | Purpose |
